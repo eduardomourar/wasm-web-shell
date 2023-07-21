@@ -1,0 +1,6 @@
+package component:wasi-cli
+
+world example {
+    import wasi:poll/poll
+    export run: func() -> result
+}
