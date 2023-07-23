@@ -1,0 +1,45 @@
+[package]
+name = "aws-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component.target]
+path = "wit"
+
+[package.metadata.component.target.dependencies]
+"wasi:cli" = { path = "wit/deps/cli" }
+"wasi:clocks" = { path = "wit/deps/clocks" }
+"wasi:filesystem" = { path = "wit/deps/filesystem" }
+"wasi:http" = { path = "wit/deps/http" }
+"wasi:io" = { path = "wit/deps/io" }
+"wasi:poll" = { path = "wit/deps/poll" }
+"wasi:random" = { path = "wit/deps/random" }
+"wasi:sockets" = { path = "wit/deps/sockets" }
+
+# [package.metadata.component.registries]
+# local = { path = "/Users/admin/.warg/registry" }
+
+[dependencies]
+anyhow = "1.0"
+aws-config = { version = "0.55.3", default-features = false }
+aws-credential-types = "0.55.3"
+aws-sdk-s3 = { version = "0.28.0", default-features = false }
+aws-sig-auth = "0.55.3"
+aws-smithy-async = "0.55.3"
+aws-smithy-client = "0.55.3"
+aws-smithy-http = "0.55.3"
+aws-smithy-types = "0.55.3"
+aws-smithy-types-convert = "0.55.3"
+bytes = "1.4"
+futures = "0.3"
+http = { version = "0.2" }
+structopt = { version = "0.3", default-features = false }
+tower = "0.4.13"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+# wasi-preview2-prototype = { version = "0.0.1", features = ["http-client"] }
+wit-bindgen = { version = "0.9.0", default-features = false }
