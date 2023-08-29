@@ -1,57 +1,85 @@
-use crate::{adapter::default_connector, wasi_sleep::WasiSleep};
+use crate::adapter::default_connector;
 use anyhow::{Error, Result};
-use aws_config::{
-    environment::EnvironmentVariableCredentialsProvider, meta::region::RegionProviderChain,
+use aws_config::{meta::region::RegionProviderChain};
+use aws_sdk_s3::{
+    config::Region,
+    meta::PKG_VERSION,
+    Client,
 };
-use aws_credential_types::{cache::CredentialsCache, provider::ProvideCredentials, Credentials};
-use aws_sdk_s3::{config::Region, meta::PKG_VERSION, Client};
 use aws_smithy_types::{retry::RetryConfig, timeout::TimeoutConfig};
-use std::{env, process, time};
+use std::time;
 use structopt::StructOpt;
 
-#[derive(Debug, StructOpt)]
-pub struct Opt {
+#[derive(Debug, Clone, StructOpt)]
+enum Subcommands {
+    ListObjects(ListObjects),
+}
+
+#[derive(Debug, Clone, StructOpt)]
+#[structopt(name = "list-objects")]
+struct ListObjects {
+    #[structopt(long)]
+    bucket: Option<String>,
+    #[structopt(long)]
+    delimiter: Option<String>,
+    #[structopt(long)]
+    prefix: Option<String>,
+    #[structopt(long)]
+    max_keys: Option<i32>,
+
+    #[structopt(flatten)]
+    base_opts: BaseOpts,
+}
+
+#[derive(Debug, Clone, StructOpt)]
+#[structopt(name = "s3")]
+struct Opt {
+    #[structopt(subcommand)]
+    sub: Subcommands,
+}
+
+#[derive(Debug, Clone, StructOpt)]
+struct BaseOpts {
     /// The AWS Region.
-    #[structopt(short, long)]
+    #[structopt(long)]
     region: Option<String>,
 
     /// Whether to display additional information.
-    #[structopt(short, long)]
-    verbose: bool,
+    #[structopt(short, long, parse(from_occurrences))]
+    verbose: usize,
 }
 
 // Displays the S3 objects.
 // snippet-start:[s3.rust.list_objects]
-async fn list_objects(client: &Client) -> Result<(), Error> {
-    let mut operation = client
+async fn list_objects(
+    client: &Client,
+    ListObjects {
+        bucket,
+        delimiter,
+        prefix,
+        max_keys,
+        ..
+    }: ListObjects,
+) -> Result<(), Error> {
+    tracing::trace!("Preparing ListObjects operation to AWS SDK");
+    let operation = client
         .list_objects_v2()
-        .bucket("common-screens")
-        .delimiter("/")
-        .prefix("metadata/")
-        .max_keys(10)
+        .bucket(bucket.unwrap_or("nara-national-archives-catalog".to_string()))
+        .delimiter(delimiter.unwrap_or("/".to_string()))
+        .set_prefix(prefix)
+        .set_max_keys(max_keys)
         .customize()
         .await?;
-    let resp = operation.map_operation(make_unsigned)?.send().await?;
+    let resp = operation
+        .send()
+        .await?;
 
-    for object in resp.contents().unwrap_or_default() {
-        println!("Key:          {}", object.key().unwrap_or_default());
-        println!();
+    tracing::trace!("Parsing response contents from {:?}", resp);
+    for object in resp.contents().unwrap() {
+        println!("Key:          {}\n", object.key().unwrap());
     }
 
     Ok(())
-}
-
-fn make_unsigned<O, Retry>(
-    mut operation: aws_smithy_http::operation::Operation<O, Retry>,
-) -> Result<aws_smithy_http::operation::Operation<O, Retry>, std::convert::Infallible> {
-    {
-        let mut props = operation.properties_mut();
-        let mut signing_config = props
-            .get_mut::<aws_sig_auth::signer::OperationSigningConfig>()
-            .expect("has signing_config");
-        signing_config.signing_requirements = aws_sig_auth::signer::SigningRequirements::Disabled;
-    }
-    Ok(operation)
 }
 
 // snippet-end:[s3.rust.list_objects]
@@ -63,71 +91,58 @@ fn make_unsigned<O, Retry>(
 /// * `[-r REGION]` - The Region in which the client is created.
 ///   If the environment variable is not set, defaults to **us**.
 /// * `[-v]` - Whether to display information.
-// #[wasi_tokio::main()]
-#[no_mangle]
-pub extern "C" fn _start() {
-    std::panic::set_hook(Box::new(move |panic_info| {
-        println!("Internal unhandled panic:\n{:?}!", panic_info);
-        process::exit(1);
-    }));
-    tracing_subscriber::fmt::init();
-
+pub(crate) async fn run() {
     let options = Opt::from_args();
-    println!("{:?}", options);
 
-    let res: Result<(), Error> =
-        futures::executor::block_on(async move { run_example(options).await });
+    let res: Result<(), Error> = match options.sub.clone() {
+        Subcommands::ListObjects(cfg) => {
+            if cfg.base_opts.verbose > 0 {
+                crate::logger::set_level(cfg.base_opts.verbose).unwrap();
+            }
+
+            tracing::trace!("Running list objects");
+            let client = build_client(cfg.base_opts.clone())
+                .await
+                .expect("building client");
+            list_objects(&client, cfg).await
+        }
+    };
 
     match res {
         Ok(_) => {
-            println!("Success");
+            tracing::debug!("Success");
         }
         Err(err) => {
-            eprintln!("Error: {}", err);
-            process::exit(1);
+            panic!("Error: {}", err);
         }
     }
 }
 
-fn credentials_cache() -> CredentialsCache {
-    CredentialsCache::lazy_builder()
-        .sleep(std::sync::Arc::new(WasiSleep::default()))
-        .into_credentials_cache()
-}
+async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Client, Error> {
+    tracing::trace!("Building default client");
 
-pub async fn run_example(Opt { region, verbose }: Opt) -> Result<(), Error> {
     let region_provider =
         RegionProviderChain::first_try(region.map(Region::new)).or_else(Region::new("us-east-2"));
-    println!();
-    let verbose = true;
-
-    if verbose {
-        println!("S3 client version: {}", PKG_VERSION);
-        println!();
-    }
+    tracing::debug!("S3 client version: {}", PKG_VERSION);
 
     let region = region_provider.region().await.unwrap();
     let shared_config = aws_config::from_env()
-        .region(region_provider)
         .timeout_config(TimeoutConfig::disabled())
         .retry_config(RetryConfig::disabled())
-        .sleep_impl(WasiSleep::default())
-        .credentials_cache(credentials_cache())
-        .credentials_provider(EnvironmentVariableCredentialsProvider::default())
         .http_connector(default_connector())
+        .no_credentials()
+        .region(region_provider)
         .load()
         .await;
 
     let client = Client::new(&shared_config);
 
-    if verbose {
-        let now = time::SystemTime::now()
-            .duration_since(time::UNIX_EPOCH)
-            .expect("post epoch");
-        println!("Current date in unix timestamp: {}", now.as_secs());
-        println!("S3 client region: {:?}", region);
-        println!("S3 client config: {:?}", shared_config);
-        println!();
-    }
-    list_objects(&client).await
+    let now = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .expect("post epoch");
+    tracing::trace!("Current date in unix timestamp: {}", now.as_secs());
+    tracing::debug!("S3 client region: {:?}", region);
+    tracing::debug!("S3 client config: {:?}", shared_config);
+
+    Ok(client)
 }

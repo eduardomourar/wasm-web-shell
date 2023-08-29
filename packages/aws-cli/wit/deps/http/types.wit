@@ -4,7 +4,7 @@
 interface types {
   use wasi:io/streams.{input-stream, output-stream}
   use wasi:poll/poll.{pollable}
-  
+
   // This type corresponds to HTTP standard Methods.
   variant method {
     get,
@@ -73,16 +73,16 @@ interface types {
   // a single `request` type (that uses the single `stream` type mentioned
   // above). The `consume` and `write` methods may only be called once (and
   // return failure thereafter).
-  // type incoming-request = u32
+  type incoming-request = u32
   type outgoing-request = u32
-  // drop-incoming-request: func(request: incoming-request)
+  drop-incoming-request: func(request: incoming-request)
   drop-outgoing-request: func(request: outgoing-request)
-  // incoming-request-method: func(request: incoming-request) -> method
-  // incoming-request-path-with-query: func(request: incoming-request) -> option<string>
-  // incoming-request-scheme: func(request: incoming-request) -> option<scheme>
-  // incoming-request-authority: func(request: incoming-request) -> option<string>
-  // incoming-request-headers: func(request: incoming-request) -> headers
-  // incoming-request-consume: func(request: incoming-request) -> result<incoming-stream>
+  incoming-request-method: func(request: incoming-request) -> method
+  incoming-request-path-with-query: func(request: incoming-request) -> option<string>
+  incoming-request-scheme: func(request: incoming-request) -> option<scheme>
+  incoming-request-authority: func(request: incoming-request) -> option<string>
+  incoming-request-headers: func(request: incoming-request) -> headers
+  incoming-request-consume: func(request: incoming-request) -> result<incoming-stream>
   new-outgoing-request: func(
     method: method,
     path-with-query: option<string>,

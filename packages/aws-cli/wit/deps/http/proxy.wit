@@ -30,5 +30,5 @@ world proxy {
   // `handle` function of this exported interface. A host may arbitrarily reuse
   // or not reuse component instance when delivering incoming HTTP requests and
   // thus a component must be able to handle 0..N calls to `handle`.
-  // export incoming-handler
+  export incoming-handler
 }

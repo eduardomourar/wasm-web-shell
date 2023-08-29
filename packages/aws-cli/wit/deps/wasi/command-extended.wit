@@ -1,7 +1,7 @@
-package component:aws-cli
-
-world cli {
-    import wasi:clocks/wall-clock
+// All of the same imports and exports available in the wasi:cli/command world
+// with addition of HTTP proxy related imports:
+world command-extended {
+  import wasi:clocks/wall-clock
   import wasi:clocks/monotonic-clock
   import wasi:clocks/timezone
   import wasi:filesystem/types
