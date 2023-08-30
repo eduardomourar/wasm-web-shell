@@ -31,7 +31,7 @@ path = "wit"
 ba-preview-registry = "https://preview-registry.bytecodealliance.org"
 # local = { path = "/Users/admin/.warg/registry" }
 
-[dependencies]
+[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
 anyhow = "1.0"
 aws-config = { version = "0.56.1", default-features = false, features = [
     "rt-tokio",

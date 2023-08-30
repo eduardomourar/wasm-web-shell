@@ -1,3 +1,5 @@
+#![cfg(all(target_family = "wasm", target_os = "wasi"))]
+
 cargo_component_bindings::generate!();
 
 use bindings::exports::wasi::cli::run::Guest;
