@@ -29,7 +29,7 @@ jobs:
         working-directory: packages/aws-cli
         run: cargo component build --release
       - name: Build
-        run: cargo build --exclude aws-cli
+        run: cargo build
       - name: Check formatting
         run: cargo fmt --all
       - name: Run clippy action to produce annotations

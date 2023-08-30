@@ -1,11 +1,7 @@
 use crate::adapter::default_connector;
 use anyhow::{Error, Result};
-use aws_config::{meta::region::RegionProviderChain};
-use aws_sdk_s3::{
-    config::Region,
-    meta::PKG_VERSION,
-    Client,
-};
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_s3::{config::Region, meta::PKG_VERSION, Client};
 use aws_smithy_types::{retry::RetryConfig, timeout::TimeoutConfig};
 use std::time;
 use structopt::StructOpt;
@@ -70,9 +66,7 @@ async fn list_objects(
         .set_max_keys(max_keys)
         .customize()
         .await?;
-    let resp = operation
-        .send()
-        .await?;
+    let resp = operation.send().await?;
 
     tracing::trace!("Parsing response contents from {:?}", resp);
     for object in resp.contents().unwrap() {
