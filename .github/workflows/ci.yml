@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@24cb9080177205b6e8c946b17badbe402adc938f # v3
+
+      - name: Set up rust toolchain
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # tag=v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy,rustfmt
+      - name: Install cargo-component
+        run: cargo install --locked --git https://github.com/bytecodealliance/cargo-component cargo-component
+      - name: Build WASI project
+        working-directory: packages/aws-cli
+        run: cargo component build --release
+      - name: Build
+        run: cargo build --exclude aws-cli
+      - name: Check formatting
+        run: cargo fmt --all
+      - name: Run clippy action to produce annotations
+        uses: actions-rs/clippy-check@b5b5f21f4797c02da247df37026fcd0a5024aa4d # tag=v1
+        with:
+          args: --all-targets --all-features --no-deps
+          token: ${{ secrets.GITHUB_TOKEN }}
+          use-cross: false
+
+  pr-success:
+    needs:
+      - build
+    # if pr-success is skipped, GH branch protection will not consider it a failure, we need to check the result of each dependency ourself
+    # see: https://brunoscheufler.com/blog/2022-04-09-the-required-github-status-check-that-wasnt
+    if: always()
+    steps:
+      - if: needs.build.result == 'failure'
+        run: echo "build job failed, setting the failure() bit" && exit 1
+      - if: success()
+        run: echo "all dependencies succeeded"
+    runs-on: ubuntu-latest
