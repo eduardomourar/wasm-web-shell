@@ -3,6 +3,13 @@
   "version": "0.0.1",
   "type": "module",
   "main": "dist/main.js",
+  "engines" : { 
+    "node" : "18"
+  },
+  "volta" : { 
+    "node" : "18.17.1",
+    "npm": "9.6.7"
+  },
   "scripts": {
     "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
     "dev": "webpack --mode development",
