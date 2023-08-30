@@ -1,0 +1,22 @@
+{
+    "name": "aws-cli-wasm",
+    "version": "0.0.1",
+    "scripts": {
+        "start": "node src/index.js"
+    },
+    "type": "module",
+    "types": "src/index.d.ts",
+    "exports": {
+        ".": {
+            "node": "./src/index.js",
+            "default": "./src/index-browser.js"
+        }
+    },
+    "files": [
+        "src/",
+        "component/"
+    ],
+    "dependencies": {
+        "@bytecodealliance/preview2-shim": "https://gitpkg.now.sh/bytecodealliance/jco/packages/preview2-shim?a0ed456512c095b24f210b371fdafaf4cd099a6d"
+    }
+}

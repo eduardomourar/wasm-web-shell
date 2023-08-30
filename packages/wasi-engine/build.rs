@@ -33,7 +33,7 @@ fn main() {
         .unwrap();
 
     for (filename, contents) in transpiled.files.iter() {
-        let outfile = PathBuf::from("./js/component").join(filename);
+        let outfile = PathBuf::from("../../www/aws-cli/component").join(filename);
         fs::create_dir_all(outfile.parent().unwrap()).unwrap();
         let mut file = fs::File::create(outfile).unwrap();
         file.write_all(contents).unwrap();
