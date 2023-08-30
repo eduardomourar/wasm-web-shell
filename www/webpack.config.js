@@ -5,7 +5,7 @@ import CopyWebpackPlugin from "copy-webpack-plugin";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const ASSET_PATH = process.env.ASSET_PATH || "/";
+const ASSET_PATH = process.env.ASSET_PATH || "./";
 
 export default {
   mode: "development",

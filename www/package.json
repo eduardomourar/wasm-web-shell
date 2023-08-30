@@ -13,14 +13,14 @@
   "scripts": {
     "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
     "dev": "webpack --mode development",
-    "start": "webpack serve"
+    "start": "ASSET_PATH='/' webpack serve"
   },
   "dependencies": {
     "comlink": "^4.4.1",
     "local-echo": "github:wavesoft/local-echo",
     "react": "^17.0.2",
     "react-dom": "^17.0.2",
-    "aws-cli-wasm": "file://../packages/wasi-engine/js",
+    "aws-cli-wasm": "file://./aws-cli",
     "wasm-webterm": "github:cryptool-org/wasm-webterm",
     "xterm": "^4.19.0",
     "xterm-addon-fit": "^0.5.0"
