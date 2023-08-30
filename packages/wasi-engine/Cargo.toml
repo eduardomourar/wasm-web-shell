@@ -7,15 +7,12 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-async-trait = "0.1"
-futures = "0.3"
-tokio = { version = "1.22.0", features = [ "rt-multi-thread", "macros" ] }
-wasi-cap-std-sync = { version = "11.0.0" }
-wasi-common = { version = "11.0.0" }
-wasmtime = { version = "11.0.0", features = ['component-model', 'default']}
-wasmtime-wasi = { version = "11.0.0" }
-wasmtime-wasi-http = { version = "11.0.0" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wasmtime = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1", features = [
+    'component-model',
+] }
+wasmtime-wasi = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
+wasmtime-wasi-http = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
 
 [build-dependencies]
-js-component-bindgen = { git = "https://github.com/eduardomourar/jco", branch = "update-wit-wasmtime-v10" }
-wit-component = "0.11.0"
+js-component-bindgen = { version = "0.11.0", git = "https://github.com/bytecodealliance/jco" }
