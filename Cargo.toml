@@ -1,0 +1,21 @@
+[workspace]
+members = ["packages/wasi-engine", "packages/aws-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+authors = [
+    "Eduardo Rodrigues <16357187+eduardomourar@users.noreply.github.com>",
+]
+edition = "2021"
+
+[profile.release]
+lto = true
+panic = "abort"
+
+[profile.release.package.aws-cli]
+# Optimize for small code size
+opt-level = "s"
+
+[workspace.dependencies]
+tokio = { version = "1.32.0", default-features = false }

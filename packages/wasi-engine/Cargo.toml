@@ -1,0 +1,18 @@
+[package]
+name = "wasi-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wasmtime = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1", features = [
+    'component-model',
+] }
+wasmtime-wasi = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
+wasmtime-wasi-http = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
+
+[build-dependencies]
+js-component-bindgen = { version = "0.11.0", git = "https://github.com/bytecodealliance/jco" }

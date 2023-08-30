@@ -1,0 +1,53 @@
+[package]
+name = "aws-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component.target]
+path = "wit"
+# package = "wasi:preview1-reactor-adapter"
+# version = "11.0.1"
+# registry = "ba-preview-registry"
+
+[package.metadata.component.target.dependencies]
+"wasi:cli" = { path = "wit/deps/cli" }
+"wasi:clocks" = { path = "wit/deps/clocks" }
+"wasi:filesystem" = { path = "wit/deps/filesystem" }
+"wasi:http" = { path = "wit/deps/http" }
+"wasi:io" = { path = "wit/deps/io" }
+"wasi:logging" = { path = "wit/deps/logging" }
+"wasi:poll" = { path = "wit/deps/poll" }
+"wasi:random" = { path = "wit/deps/random" }
+"wasi:sockets" = { path = "wit/deps/sockets" }
+
+# "wasi:preview1-reactor-adapter" = { version = "11.0.1", registry = "ba-preview-registry" }
+
+[package.metadata.component.registries]
+ba-preview-registry = "https://preview-registry.bytecodealliance.org"
+# local = { path = "/Users/admin/.warg/registry" }
+
+[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
+anyhow = "1.0"
+aws-config = { version = "0.56.1", default-features = false, features = [
+    "rt-tokio",
+] }
+aws-sdk-s3 = { version = "0.30.0", default-features = false }
+aws-smithy-client = "0.56.1"
+aws-smithy-http = "0.56.1"
+aws-smithy-types = "0.56.1"
+aws-smithy-types-convert = "0.56.1"
+bytes = "1.4"
+cargo-component-bindings = { git = "https://github.com/bytecodealliance/cargo-component" }
+futures = { version = "0.3.28" }
+http = { version = "0.2" }
+structopt = { version = "0.3", default-features = false }
+tower = "0.4.13"
+tokio = { workspace = true, features = ["macros", "rt"] }
+tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
+tracing = { version = "0.1.37" }
+wasi-preview2-prototype = { version = "0.0.2", features = ["http-client"] }

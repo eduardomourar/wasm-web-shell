@@ -1,0 +1,13 @@
+# http = "https://github.com/WebAssembly/wasi-http/archive/1c95bc21dbd193b046e4232d063a82c8b5ba7994.tar.gz"
+
+# cli = "https://github.com/WebAssembly/wasi-cli/archive/main.tar.gz"
+# clocks = "https://github.com/WebAssembly/wasi-clocks/archive/main.tar.gz"
+# filesystem = "https://github.com/WebAssembly/wasi-filesystem/archive/main.tar.gz"
+# io = "https://github.com/WebAssembly/wasi-io/archive/main.tar.gz"
+# logging = "https://github.com/WebAssembly/wasi-logging/archive/main.tar.gz"
+# poll = "https://github.com/WebAssembly/wasi-poll/archive/main.tar.gz"
+# random = "https://github.com/WebAssembly/wasi-random/archive/main.tar.gz"
+# sockets = "https://github.com/WebAssembly/wasi-sockets/archive/main.tar.gz"
+
+# preview = "https://gitpkg.now.sh/api/pkg.tgz?url=bytecodealliance/wasmtime/crates/wasi-preview1-component-adapter&commit=v11.0.0"
+wasi = "https://gitpkg.now.sh/bytecodealliance/wasmtime/crates/wasi?e250334b8ebfba9359802ab7f61bdd7c6085d87a"
