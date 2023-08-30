@@ -1,0 +1,39 @@
+name: deploy
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    steps:
+      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3
+
+      - uses: actions/setup-node@64ed1c7eab4cce3362f8c340dee64e5eaeef8f7c # v3
+        with:
+          node-version-file: "www/package.json"
+
+      - name: Install Dependencies
+        working-directory: www
+        run: npm ci
+
+      - name: Prepare Web Page
+        working-directory: www
+        run: |
+          npm run build
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@f156874f8191504dae5b037505266ed5dda6c382
+      - name: Upload Web Page Artifact
+        uses: actions/upload-pages-artifact@64bcae551a7b18bcb9a09042ddf1960979799187
+        with:
+          path: www/dist/
+      - name: Deploy Web Page
+        uses: actions/deploy-pages@af48cf94a42f2c634308b1c9dc0151830b6f190a

@@ -4,7 +4,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "webpack --mode production && rm -rf ./*.LICENSE.*",
+    "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
     "dev": "webpack --mode development",
     "start": "webpack serve"
   },
