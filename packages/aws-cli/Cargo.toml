@@ -47,7 +47,9 @@ futures = { version = "0.3.28" }
 http = { version = "0.2" }
 structopt = { version = "0.3", default-features = false }
 tower = "0.4.13"
-tokio = { workspace = true, features = ["macros", "rt"] }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
 tracing = { version = "0.1.37" }
 wasi-preview2-prototype = { version = "0.0.2", features = ["http-client"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

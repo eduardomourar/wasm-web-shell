@@ -1,7 +1,9 @@
 use crate::adapter::default_connector;
 use anyhow::{Error, Result};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::{config::Region, meta::PKG_VERSION, Client};
+use aws_sdk_s3::{
+    config::Region, meta::PKG_VERSION, operation::list_objects_v2::ListObjectsV2Output, Client,
+};
 use aws_smithy_types::{retry::RetryConfig, timeout::TimeoutConfig};
 use std::time;
 use structopt::StructOpt;
@@ -56,7 +58,7 @@ async fn list_objects(
         max_keys,
         ..
     }: ListObjects,
-) -> Result<(), Error> {
+) -> Result<ListObjectsV2Output, Error> {
     tracing::trace!("Preparing ListObjects operation to AWS SDK");
     let operation = client
         .list_objects_v2()
@@ -66,14 +68,10 @@ async fn list_objects(
         .set_max_keys(max_keys)
         .customize()
         .await?;
-    let resp = operation.send().await?;
 
-    tracing::trace!("Parsing response contents from {:?}", resp);
-    for object in resp.contents().unwrap() {
-        println!("Key:          {}\n", object.key().unwrap());
-    }
-
-    Ok(())
+    let resp = operation.send().await.map_err(anyhow::Error::from);
+    tracing::trace!("Operation response {:?}", resp);
+    resp
 }
 
 // snippet-end:[s3.rust.list_objects]
@@ -98,7 +96,16 @@ pub(crate) async fn run() {
             let client = build_client(cfg.base_opts.clone())
                 .await
                 .expect("building client");
-            list_objects(&client, cfg).await
+
+            match list_objects(&client, cfg).await {
+                Ok(value) => {
+                    tracing::debug!("Parsing response contents");
+                    println!("{:#?}", value.contents().unwrap());
+                }
+                Err(err) => eprintln!("{:?}", err),
+            }
+
+            Ok(())
         }
     };
 
@@ -139,4 +146,42 @@ async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Client, Error
     tracing::debug!("S3 client config: {:?}", shared_config);
 
     Ok(client)
+}
+
+#[cfg(test)]
+mod test {
+    use super::{build_client, list_objects, BaseOpts, ListObjects};
+
+    #[tokio::test]
+    pub async fn test_default_config() {
+        let client = build_client(BaseOpts {
+            region: Some("us-east-2".to_string()),
+            verbose: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.config().region().unwrap().to_string(), "us-east-2")
+    }
+
+    #[tokio::test]
+    pub async fn test_s3_list_objects() {
+        let base_opts = BaseOpts {
+            region: None,
+            verbose: 5,
+        };
+        let result = list_objects(
+            &build_client(base_opts.clone()).await.unwrap(),
+            ListObjects {
+                bucket: Some("nara-national-archives-catalog".to_string()),
+                delimiter: Some("/".to_string()),
+                prefix: Some("authority-records/organization/".to_string()),
+                max_keys: Some(2),
+                base_opts,
+            },
+        )
+        .await
+        .unwrap();
+        let objects = result.contents().unwrap();
+        assert!(objects.len() > 1);
+    }
 }
