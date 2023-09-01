@@ -117,7 +117,7 @@ pub(crate) async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Cl
 
 #[cfg(test)]
 mod test {
-    use super::{build_client, BaseOpts, ListObjects};
+    use super::{build_client, BaseOpts};
 
     #[tokio::test]
     pub async fn test_default_config() {

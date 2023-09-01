@@ -58,7 +58,7 @@ mod test {
             verbose: 0,
         };
         let output = PathBuf::from("/tmp/test-s3-get-object.html");
-        let result = get_object(
+        get_object(
             &build_client(base_opts.clone()).await.unwrap(),
             GetObject {
                 bucket: "genome-browser".to_string(),
