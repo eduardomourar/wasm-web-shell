@@ -59,7 +59,8 @@ jobs:
           cargo check
           export CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime -g --disable-cache --dir /tmp --log-to-files --preview2 --wasm-features=component-model --wasi-modules=experimental-wasi-http"
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
-          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo test -- --nocapture
+          export RUST_TEST_NOCAPTURE=1
+          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo test
           cat wasmtime.dbg.main
 
   pr-success:
