@@ -5,10 +5,11 @@ cargo_component_bindings::generate!();
 use bindings::exports::wasi::cli::run::Guest;
 
 mod adapter;
-mod list_objects;
+mod commands;
 mod logger;
+mod s3;
 
-use list_objects::run;
+use commands::run;
 
 struct Component;
 

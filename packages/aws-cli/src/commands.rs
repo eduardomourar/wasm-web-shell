@@ -1,32 +1,21 @@
-use crate::adapter::default_connector;
+use crate::{
+    adapter::default_connector,
+    s3::{
+        get_object::{get_object, GetObject},
+        list_objects::{list_objects, ListObjects},
+    },
+};
 use anyhow::{Error, Result};
 use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_s3::{
-    config::Region, meta::PKG_VERSION, operation::list_objects_v2::ListObjectsV2Output, Client,
-};
+use aws_sdk_s3::{config::Region, meta::PKG_VERSION, Client};
 use aws_smithy_types::{retry::RetryConfig, timeout::TimeoutConfig};
 use std::time;
 use structopt::StructOpt;
 
 #[derive(Debug, Clone, StructOpt)]
 enum Subcommands {
+    GetObject(GetObject),
     ListObjects(ListObjects),
-}
-
-#[derive(Debug, Clone, StructOpt)]
-#[structopt(name = "list-objects")]
-struct ListObjects {
-    #[structopt(long)]
-    bucket: Option<String>,
-    #[structopt(long)]
-    delimiter: Option<String>,
-    #[structopt(long)]
-    prefix: Option<String>,
-    #[structopt(long)]
-    max_keys: Option<i32>,
-
-    #[structopt(flatten)]
-    base_opts: BaseOpts,
 }
 
 #[derive(Debug, Clone, StructOpt)]
@@ -37,52 +26,16 @@ struct Opt {
 }
 
 #[derive(Debug, Clone, StructOpt)]
-struct BaseOpts {
+pub struct BaseOpts {
     /// The AWS Region.
     #[structopt(long)]
-    region: Option<String>,
+    pub region: Option<String>,
 
     /// Whether to display additional information.
     #[structopt(short, long, parse(from_occurrences))]
-    verbose: usize,
+    pub verbose: usize,
 }
 
-// Displays the S3 objects.
-// snippet-start:[s3.rust.list_objects]
-async fn list_objects(
-    client: &Client,
-    ListObjects {
-        bucket,
-        delimiter,
-        prefix,
-        max_keys,
-        ..
-    }: ListObjects,
-) -> Result<ListObjectsV2Output, Error> {
-    tracing::trace!("Preparing ListObjects operation to AWS SDK");
-    let operation = client
-        .list_objects_v2()
-        .bucket(bucket.unwrap_or("nara-national-archives-catalog".to_string()))
-        .delimiter(delimiter.unwrap_or("/".to_string()))
-        .set_prefix(prefix)
-        .set_max_keys(max_keys)
-        .customize()
-        .await?;
-
-    let resp = operation.send().await.map_err(anyhow::Error::from);
-    tracing::trace!("Operation response {:?}", resp);
-    resp
-}
-
-// snippet-end:[s3.rust.list_objects]
-
-/// Displays information about the S3 objects.
-///
-/// # Arguments
-///
-/// * `[-r REGION]` - The Region in which the client is created.
-///   If the environment variable is not set, defaults to **us**.
-/// * `[-v]` - Whether to display information.
 pub(crate) async fn run() {
     let options = Opt::from_args();
 
@@ -92,7 +45,7 @@ pub(crate) async fn run() {
                 crate::logger::set_level(cfg.base_opts.verbose).unwrap();
             }
 
-            tracing::trace!("Running list objects");
+            tracing::debug!("Running list objects");
             let client = build_client(cfg.base_opts.clone())
                 .await
                 .expect("building client");
@@ -104,6 +57,20 @@ pub(crate) async fn run() {
                 }
                 Err(err) => eprintln!("{:?}", err),
             }
+
+            Ok(())
+        }
+        Subcommands::GetObject(cfg) => {
+            if cfg.base_opts.verbose > 0 {
+                crate::logger::set_level(cfg.base_opts.verbose).unwrap();
+            }
+
+            tracing::debug!("Running get object");
+            let client = build_client(cfg.base_opts.clone())
+                .await
+                .expect("building client");
+
+            get_object(&client, cfg).await.unwrap();
 
             Ok(())
         }
@@ -119,7 +86,7 @@ pub(crate) async fn run() {
     }
 }
 
-async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Client, Error> {
+pub(crate) async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Client, Error> {
     tracing::trace!("Building default client");
 
     let region_provider =
@@ -150,7 +117,7 @@ async fn build_client(BaseOpts { region, .. }: BaseOpts) -> Result<Client, Error
 
 #[cfg(test)]
 mod test {
-    use super::{build_client, list_objects, BaseOpts, ListObjects};
+    use super::{build_client, BaseOpts, ListObjects};
 
     #[tokio::test]
     pub async fn test_default_config() {
@@ -161,27 +128,5 @@ mod test {
         .await
         .unwrap();
         assert_eq!(client.config().region().unwrap().to_string(), "us-east-2")
-    }
-
-    #[tokio::test]
-    pub async fn test_s3_list_objects() {
-        let base_opts = BaseOpts {
-            region: None,
-            verbose: 5,
-        };
-        let result = list_objects(
-            &build_client(base_opts.clone()).await.unwrap(),
-            ListObjects {
-                bucket: Some("nara-national-archives-catalog".to_string()),
-                delimiter: Some("/".to_string()),
-                prefix: Some("authority-records/organization/".to_string()),
-                max_keys: Some(2),
-                base_opts,
-            },
-        )
-        .await
-        .unwrap();
-        let objects = result.contents().unwrap();
-        assert!(objects.len() > 1);
     }
 }

@@ -25,6 +25,8 @@ jobs:
           components: clippy,rustfmt
       - name: Install cargo-component
         run: cargo install --locked --git https://github.com/bytecodealliance/cargo-component cargo-component
+      - name: Install wasmtime
+        run: cargo install --locked --git https://github.com/bytecodealliance/wasmtime --rev 2fb5371bf4cb19ed15d4b05042f3cc92799f67e1 wasmtime-cli
       - name: Build WASI project
         working-directory: packages/aws-cli
         run: cargo component build --release
