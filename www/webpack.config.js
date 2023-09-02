@@ -57,12 +57,8 @@ export default {
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Cross-Origin-Opener-Policy": "same-origin"
     },
-    https: true,
     compress: false,
     static: false,
-    // static: {
-    //   directory: path.join(dirname, 'dist'),
-    // },
   },
   experiments: {
     asyncWebAssembly: true,

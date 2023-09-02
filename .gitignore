@@ -7,3 +7,6 @@ target/
 
 # Node.js
 node_modules/
+
+# wasmtime logs
+wasmtime.dbg.*
