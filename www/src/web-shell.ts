@@ -27,7 +27,7 @@ export const webShell = (wasmBinaryPath: string) => {
 
   wasmWebTerm.printWelcomeMessage = () => {
     // Converted with: https://cloudapps.herokuapp.com/imagetoascii/
-    let intro = `\x1b[1;32m
+    let intro = `\x1b[38;2;101;79;240m
   ****************VMNNNNNNMV****************\r
   ******************IVVVVI******************\r
   ******************************************\r
