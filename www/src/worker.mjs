@@ -1,8 +1,14 @@
 import * as Comlink from "comlink";
 import { initialize, wasiImport } from "aws-cli-wasm";
 
-const main = async (args, envVars, stdIn, stdOut, stdErr) => {
+const main = async (args, envVars, stdIn, stdOut, stdErr, getDirectories) => {
   const command = await initialize({
+    "filesystem": {
+      ...wasiImport["filesystem"],
+      "preopens": {
+        getDirectories,
+      },
+    },
     "io": {
       "streams": {
         ...wasiImport["io"]["streams"],
