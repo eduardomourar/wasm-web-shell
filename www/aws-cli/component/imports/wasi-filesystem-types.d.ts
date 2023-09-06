@@ -1,13 +1,13 @@
 export namespace WasiFilesystemTypes {
-  export function readViaStream(this: Descriptor, offset: Filesize): InputStream;
-  export function writeViaStream(this: Descriptor, offset: Filesize): OutputStream;
-  export function appendViaStream(this: Descriptor): OutputStream;
-  export function getType(this: Descriptor): DescriptorType;
-  export function stat(this: Descriptor): DescriptorStat;
-  export function openAt(this: Descriptor, pathFlags: PathFlags, path: string, openFlags: OpenFlags, flags: DescriptorFlags, modes: Modes): Descriptor;
-  export function dropDescriptor(this: Descriptor): void;
-  export function dropDirectoryEntryStream(this: DirectoryEntryStream): void;
-  export function metadataHash(this: Descriptor): MetadataHashValue;
+  export function readViaStream(this_: Descriptor, offset: Filesize): InputStream;
+  export function writeViaStream(this_: Descriptor, offset: Filesize): OutputStream;
+  export function appendViaStream(this_: Descriptor): OutputStream;
+  export function getType(this_: Descriptor): DescriptorType;
+  export function stat(this_: Descriptor): DescriptorStat;
+  export function openAt(this_: Descriptor, pathFlags: PathFlags, path: string, openFlags: OpenFlags, flags: DescriptorFlags, modes: Modes): Descriptor;
+  export function dropDescriptor(this_: Descriptor): void;
+  export function dropDirectoryEntryStream(this_: DirectoryEntryStream): void;
+  export function metadataHash(this_: Descriptor): MetadataHashValue;
 }
 export type Descriptor = number;
 export type Filesize = bigint;
