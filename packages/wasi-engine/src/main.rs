@@ -2,7 +2,10 @@ use wasmtime::{
     component::{Component, Linker},
     Config, Engine, Store,
 };
-use wasmtime_wasi::preview2::{command::Command, Table, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::preview2::{
+    command::Command, DirPerms, FilePerms, Table, WasiCtx, WasiCtxBuilder, WasiView,
+};
+use wasmtime_wasi::{ambient_authority, Dir};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
 pub struct Ctx {
@@ -48,20 +51,23 @@ async fn run() -> anyhow::Result<()> {
         .env("RUST_BACKTRACE", "full")
         .args(&[
             "s3",
-            "list-objects",
+            "get-object",
             "-vvv",
             "--region",
-            "us-east-2",
+            "us-east-1",
             // "--help"
             "--bucket",
-            "nara-national-archives-catalog",
-            "--delimiter",
-            "/",
-            "--prefix",
-            "authority-records/organization/",
-            "--max-keys",
-            "5",
+            "pan-ukb-us-east-1",
+            "--key",
+            "sumstats_release/results_full.mt/README.txt",
+            "/tmp/readme.txt",
         ])
+        .preopened_dir(
+            Dir::open_ambient_dir("/tmp", ambient_authority())?,
+            DirPerms::all(),
+            FilePerms::all(),
+            "/tmp",
+        )
         .build(&mut table)?;
     let mut config = Config::new();
     config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);

@@ -23,8 +23,19 @@ jobs:
           toolchain: stable
           override: true
           components: clippy,rustfmt
+      - name: Cache cargo
+        uses: actions/cache@88522ab9f39a2ea568f7027eddc7d8d8bc9d59c8 # v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Install cargo-component
-        run: cargo install --locked --git https://github.com/bytecodealliance/cargo-component cargo-component
+        run: cargo install cargo-component --locked --git https://github.com/bytecodealliance/cargo-component
+      - name: Install wasmtime
+        run: cargo install wasmtime-cli --locked --features="component-model" --git https://github.com/bytecodealliance/wasmtime --rev 8eefa7c3af9ed35839892f847c8bb4c57495c520
       - name: Build WASI project
         working-directory: packages/aws-cli
         run: cargo component build --release
@@ -38,6 +49,16 @@ jobs:
           args: --all-targets --all-features --no-deps
           token: ${{ secrets.GITHUB_TOKEN }}
           use-cross: false
+
+      - name: Test WASI project
+        working-directory: packages/aws-cli
+        run: |
+          cargo check
+          export CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime -g --disable-cache --dir /tmp --log-to-files --preview2 --wasm-features=component-model --wasi-modules=experimental-wasi-http"
+          export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
+          export RUST_TEST_NOCAPTURE=1
+          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo test
+          cat wasmtime.dbg.main
 
   pr-success:
     needs:

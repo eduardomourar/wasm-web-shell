@@ -1,4 +1,4 @@
 export namespace WasiCliTerminalInput {
-  export function dropTerminalInput(this: TerminalInput): void;
+  export function dropTerminalInput(this_: TerminalInput): void;
 }
 export type TerminalInput = number;

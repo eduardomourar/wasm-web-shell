@@ -50,7 +50,7 @@ interface types {
     /// Descriptor flags.
     ///
     /// Note: This was called `fdflags` in earlier versions of WASI.
-    enum descriptor-flags {
+    flags descriptor-flags {
         /// Read mode: Data can be read.
         read,
         /// Write mode: Data can be written to.
@@ -110,14 +110,14 @@ interface types {
     }
 
     /// Flags determining the method of how paths are resolved.
-    enum path-flags {
+    flags path-flags {
         /// As long as the resolved path corresponds to a symbolic link, it is
         /// expanded.
         symlink-follow,
     }
 
     /// Open flags used by `open-at`.
-    enum open-flags {
+    flags open-flags {
         /// Create file if it does not exist, similar to `O_CREAT` in POSIX.
         create,
         /// Fail if not a directory, similar to `O_DIRECTORY` in POSIX.
@@ -130,7 +130,7 @@ interface types {
 
     /// Permissions mode used by `open-at`, `change-file-permissions-at`, and
     /// similar.
-    enum modes {
+    flags modes {
         /// True if the resource is considered readable by the containing
         /// filesystem.
         readable,
