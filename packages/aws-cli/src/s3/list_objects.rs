@@ -50,7 +50,7 @@ mod test {
     use crate::commands::{build_client, BaseOpts};
 
     #[tokio::test]
-    pub async fn test_s3_list_objects() {
+    pub async fn s3_list_objects() {
         let base_opts = BaseOpts {
             region: Some("us-east-2".to_string()),
             verbose: 0,

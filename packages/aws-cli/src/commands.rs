@@ -70,7 +70,12 @@ pub(crate) async fn run() {
                 .await
                 .expect("building client");
 
-            get_object(&client, cfg).await.unwrap();
+            match get_object(&client, cfg).await.unwrap() {
+                Some(value) => {
+                    println!("{}", std::str::from_utf8(&value[..]).unwrap());
+                }
+                None => {}
+            }
 
             Ok(())
         }
@@ -120,7 +125,7 @@ mod test {
     use super::{build_client, BaseOpts};
 
     #[tokio::test]
-    pub async fn test_default_config() {
+    pub async fn default_config() {
         let client = build_client(BaseOpts {
             region: Some("us-east-2".to_string()),
             verbose: 0,
