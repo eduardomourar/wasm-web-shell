@@ -22,3 +22,18 @@ npm start
 ```
 
 From the browser, access your page for the WebAssembly Web Shell at `http://localhost:8080`.
+
+
+### Other environments
+
+* Node.js
+```console
+cd www/aws-cli/component
+npm start
+```
+
+* Rust (wasmtime)
+```console
+cd packages/wasi-engine
+cargo run
+```
