@@ -8,11 +8,11 @@ publish = false
 [dependencies]
 anyhow = "1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-wasmtime = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1", features = [
+wasmtime = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", features = [
     'component-model',
 ] }
-wasmtime-wasi = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
-wasmtime-wasi-http = { version = "13.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2fb5371bf4cb19ed15d4b05042f3cc92799f67e1" }
+wasmtime-wasi = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime" }
+wasmtime-wasi-http = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime" }
 
 [build-dependencies]
-js-component-bindgen = { version = "0.11.0", git = "https://github.com/bytecodealliance/jco" }
+js-component-bindgen = { version = "0.11", git = "https://github.com/bytecodealliance/jco" }
