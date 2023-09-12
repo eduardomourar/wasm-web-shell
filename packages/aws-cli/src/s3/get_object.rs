@@ -1,6 +1,7 @@
 use crate::commands::BaseOpts;
 use anyhow::{Error, Result};
 use aws_sdk_s3::Client;
+use aws_smithy_http::body;
 use structopt::StructOpt;
 
 #[derive(Debug, Clone, StructOpt)]
@@ -37,11 +38,11 @@ pub(crate) async fn get_object(
     let resp = operation.send().await.map_err(anyhow::Error::from)?;
     tracing::trace!("Operation response {:?}", resp);
     let content_length = resp.content_length() as usize;
-    let inner = resp.body.into_inner();
-    let body = inner.bytes().unwrap();
+    let inner = resp.body.collect().await;
+    let body = inner.map_err(anyhow::Error::from)?.to_vec();
     Ok(match outfile {
         Some(value) => {
-            std::fs::write(&value, body).unwrap();
+            std::fs::write(&value, &body).map_err(anyhow::Error::from)?;
             assert_eq!(content_length, body.len());
             None
         }
