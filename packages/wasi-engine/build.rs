@@ -26,6 +26,7 @@ fn main() {
         base64_cutoff: 5000_usize,
         tla_compat: false,
         valid_lifting_optimization: false,
+        tracing: true,
     };
 
     let transpiled = js_component_bindgen::transpile(&component, opts)
