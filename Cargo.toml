@@ -20,6 +20,3 @@ strip = "debuginfo"
 
 [workspace.dependencies]
 tokio = { version = "1.32.0", default-features = false }
-
-[patch.'https://github.com/bytecodealliance/jco']
-js-component-bindgen = { path = "../../public/jco/crates/js-component-bindgen" }
