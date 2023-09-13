@@ -1,7 +1,6 @@
 use crate::commands::BaseOpts;
 use anyhow::{Error, Result};
 use aws_sdk_s3::Client;
-use aws_smithy_http::body;
 use structopt::StructOpt;
 
 #[derive(Debug, Clone, StructOpt)]
