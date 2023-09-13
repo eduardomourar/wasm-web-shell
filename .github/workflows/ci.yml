@@ -35,7 +35,7 @@ jobs:
       - name: Install cargo-component
         run: cargo install cargo-component --locked --git https://github.com/bytecodealliance/cargo-component
       - name: Install wasmtime
-        run: cargo install wasmtime-cli --locked --features="component-model" --git https://github.com/bytecodealliance/wasmtime --rev 8eefa7c3af9ed35839892f847c8bb4c57495c520
+        run: cargo install wasmtime-cli --locked --features="component-model" --git https://github.com/bytecodealliance/wasmtime
       - name: Build WASI project
         working-directory: packages/aws-cli
         run: cargo component build --release
