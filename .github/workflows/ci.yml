@@ -35,7 +35,7 @@ jobs:
       - name: Install cargo-component
         run: cargo install cargo-component --locked --git https://github.com/bytecodealliance/cargo-component
       - name: Install wasmtime
-        run: cargo install wasmtime-cli --locked --features="component-model" --git https://github.com/bytecodealliance/wasmtime
+        run: cargo install wasmtime-cli --locked --features="component-model" --git https://github.com/bytecodealliance/wasmtime --rev 848764a9412a1bd66de4087f5ba0670d61384af1
       - name: Build WASI project
         working-directory: packages/aws-cli
         run: cargo component build --release
@@ -54,7 +54,7 @@ jobs:
         working-directory: packages/aws-cli
         run: |
           cargo check
-          export CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime -g --disable-cache --dir /tmp --log-to-files --preview2 --wasm-features=component-model --wasi-modules=experimental-wasi-http"
+          export CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --dir /tmp -C cache=no -D debug-info -D log-to-files -W component-model -S preview2 -S common -S http"
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
           export RUST_TEST_NOCAPTURE=1
           RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo test
