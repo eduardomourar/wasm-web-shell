@@ -18,6 +18,17 @@ const hasOwnProperty = Object.prototype.hasOwnProperty;
 
 const toUint64 = val => BigInt.asUintN(64, val);
 
+function toResultString(obj) {
+  return JSON.stringify(obj, (_, v) => {
+    if (v && Object.getPrototypeOf(v) === Uint8Array.prototype) {
+      return `[${v[Symbol.toStringTag]} (${v.byteLength})]`;
+    } else if (typeof v === 'bigint') {
+      return v.toString();
+    }
+    return v;
+  });
+}
+
 function toUint16(val) {
   val >>>= 0;
   val %= 2 ** 16;
@@ -108,10 +119,13 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     newFields,
     newOutgoingRequest,
     outgoingRequestWrite } = types$1;
-  const { blockingRead,
-    blockingWrite,
+  const { blockingFlush,
+    blockingRead,
+    blockingWriteAndFlush,
+    checkWrite,
     dropInputStream,
     dropOutputStream,
+    flush,
     read,
     subscribeToInputStream,
     subscribeToOutputStream,
@@ -122,15 +136,20 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   let exports0;
   
   function trampoline0(arg0) {
+    console.trace(`[module="wasi:io/streams", function="subscribe-to-output-stream"] call this=${arguments[0]}`);
     const ret = subscribeToOutputStream(arg0 >>> 0);
+    console.trace(`[module="wasi:io/streams", function="subscribe-to-output-stream"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline1(arg0) {
+    console.trace(`[module="wasi:poll/poll", function="drop-pollable"] call this=${arguments[0]}`);
     dropPollable(arg0 >>> 0);
+    console.trace(`[module="wasi:poll/poll", function="drop-pollable"] return `);
   }
   
   function trampoline2(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+    console.trace(`[module="wasi:http/outgoing-handler", function="handle"] call request=${arguments[0]}, options=${arguments[1]}`);
     let variant3;
     switch (arg1) {
       case 0: {
@@ -192,91 +211,129 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     const ret = handle(arg0 >>> 0, variant3);
+    console.trace(`[module="wasi:http/outgoing-handler", function="handle"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline3(arg0) {
+    console.trace(`[module="wasi:http/types", function="listen-to-future-incoming-response"] call f=${arguments[0]}`);
     const ret = listenToFutureIncomingResponse(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="listen-to-future-incoming-response"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline4(arg0) {
+    console.trace(`[module="wasi:http/types", function="drop-future-incoming-response"] call f=${arguments[0]}`);
     dropFutureIncomingResponse(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="drop-future-incoming-response"] return `);
   }
   
   function trampoline5(arg0) {
+    console.trace(`[module="wasi:http/types", function="incoming-response-status"] call response=${arguments[0]}`);
     const ret = incomingResponseStatus(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="incoming-response-status"] return result=${toResultString(ret)}`);
     return toUint16(ret);
   }
   
   function trampoline6(arg0) {
+    console.trace(`[module="wasi:io/streams", function="subscribe-to-input-stream"] call this=${arguments[0]}`);
     const ret = subscribeToInputStream(arg0 >>> 0);
+    console.trace(`[module="wasi:io/streams", function="subscribe-to-input-stream"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline7(arg0) {
+    console.trace(`[module="wasi:io/streams", function="drop-input-stream"] call this=${arguments[0]}`);
     dropInputStream(arg0 >>> 0);
+    console.trace(`[module="wasi:io/streams", function="drop-input-stream"] return `);
   }
   
   function trampoline8(arg0) {
+    console.trace(`[module="wasi:http/types", function="incoming-response-headers"] call response=${arguments[0]}`);
     const ret = incomingResponseHeaders(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="incoming-response-headers"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline9(arg0) {
+    console.trace(`[module="wasi:http/types", function="drop-fields"] call fields=${arguments[0]}`);
     dropFields(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="drop-fields"] return `);
   }
   
   function trampoline10(arg0) {
+    console.trace(`[module="wasi:http/types", function="drop-incoming-response"] call response=${arguments[0]}`);
     dropIncomingResponse(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="drop-incoming-response"] return `);
   }
   
   function trampoline11(arg0) {
+    console.trace(`[module="wasi:io/streams", function="drop-output-stream"] call this=${arguments[0]}`);
     dropOutputStream(arg0 >>> 0);
+    console.trace(`[module="wasi:io/streams", function="drop-output-stream"] return `);
   }
   
   function trampoline12(arg0) {
+    console.trace(`[module="wasi:http/types", function="drop-outgoing-request"] call request=${arguments[0]}`);
     dropOutgoingRequest(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="drop-outgoing-request"] return `);
   }
   let exports1;
   
   function trampoline13() {
+    console.trace(`[module="wasi:clocks/monotonic-clock", function="now"] call `);
     const ret = now();
+    console.trace(`[module="wasi:clocks/monotonic-clock", function="now"] return result=${toResultString(ret)}`);
     return toUint64(ret);
   }
   
   function trampoline14(arg0) {
+    console.trace(`[module="wasi:filesystem/types", function="drop-directory-entry-stream"] call this=${arguments[0]}`);
     dropDirectoryEntryStream(arg0 >>> 0);
+    console.trace(`[module="wasi:filesystem/types", function="drop-directory-entry-stream"] return `);
   }
   
   function trampoline15(arg0) {
+    console.trace(`[module="wasi:filesystem/types", function="drop-descriptor"] call this=${arguments[0]}`);
     dropDescriptor(arg0 >>> 0);
+    console.trace(`[module="wasi:filesystem/types", function="drop-descriptor"] return `);
   }
   
   function trampoline16() {
+    console.trace(`[module="wasi:cli/stdin", function="get-stdin"] call `);
     const ret = getStdin();
+    console.trace(`[module="wasi:cli/stdin", function="get-stdin"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline17(arg0) {
+    console.trace(`[module="wasi:cli/terminal-input", function="drop-terminal-input"] call this=${arguments[0]}`);
     dropTerminalInput(arg0 >>> 0);
+    console.trace(`[module="wasi:cli/terminal-input", function="drop-terminal-input"] return `);
   }
   
   function trampoline18() {
+    console.trace(`[module="wasi:cli/stdout", function="get-stdout"] call `);
     const ret = getStdout();
+    console.trace(`[module="wasi:cli/stdout", function="get-stdout"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline19(arg0) {
+    console.trace(`[module="wasi:cli/terminal-output", function="drop-terminal-output"] call this=${arguments[0]}`);
     dropTerminalOutput(arg0 >>> 0);
+    console.trace(`[module="wasi:cli/terminal-output", function="drop-terminal-output"] return `);
   }
   
   function trampoline20() {
+    console.trace(`[module="wasi:cli/stderr", function="get-stderr"] call `);
     const ret = getStderr();
+    console.trace(`[module="wasi:cli/stderr", function="get-stderr"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline21(arg0) {
+    console.trace(`[module="wasi:cli/exit", function="exit"] call status=${arguments[0]}`);
     let variant0;
     switch (arg0) {
       case 0: {
@@ -298,10 +355,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     exit(variant0);
+    console.trace(`[module="wasi:cli/exit", function="exit"] return `);
   }
   let exports2;
   
   function trampoline22(arg0, arg1) {
+    console.trace(`[module="wasi:http/types", function="new-fields"] call entries=${arguments[0]}`);
     const len2 = arg1;
     const base2 = arg0;
     const result2 = [];
@@ -316,12 +375,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       result2.push([result0, result1]);
     }
     const ret = newFields(result2);
+    console.trace(`[module="wasi:http/types", function="new-fields"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   let memory0;
   
   function trampoline23(arg0, arg1) {
+    console.trace(`[module="wasi:http/types", function="fields-entries"] call fields=${arguments[0]}`);
     const ret = fieldsEntries(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="fields-entries"] return result=${toResultString(ret)}`);
     const vec3 = ret;
     const len3 = vec3.length;
     const result3 = realloc0(0, 0, 4, len3 * 16);
@@ -346,6 +408,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   let realloc0;
   
   function trampoline24(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) {
+    console.trace(`[module="wasi:http/types", function="new-outgoing-request"] call method=${arguments[0]}, path-with-query=${arguments[1]}, scheme=${arguments[2]}, authority=${arguments[3]}, headers=${arguments[4]}`);
     let variant1;
     switch (arg0) {
       case 0: {
@@ -493,16 +556,19 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     const ret = newOutgoingRequest(variant1, variant3, variant6, variant8, arg13 >>> 0);
+    console.trace(`[module="wasi:http/types", function="new-outgoing-request"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline25(arg0, arg1) {
+    console.trace(`[module="wasi:http/types", function="outgoing-request-write"] call request=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: outgoingRequestWrite(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:http/types", function="outgoing-request-write"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     switch (variant0.tag) {
       case 'ok': {
@@ -523,12 +589,14 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline26(arg0, arg1) {
+    console.trace(`[module="wasi:http/types", function="incoming-response-consume"] call response=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: incomingResponseConsume(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:http/types", function="incoming-response-consume"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     switch (variant0.tag) {
       case 'ok': {
@@ -549,7 +617,9 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline27(arg0, arg1) {
+    console.trace(`[module="wasi:http/types", function="future-incoming-response-get"] call f=${arguments[0]}`);
     const ret = futureIncomingResponseGet(arg0 >>> 0);
+    console.trace(`[module="wasi:http/types", function="future-incoming-response-get"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     if (variant6 === null || variant6=== undefined) {
       dataView(memory0).setInt8(arg1 + 0, 0, true);
@@ -619,12 +689,14 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline28(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:io/streams", function="read"] call this=${arguments[0]}, len=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:io/streams", function="read"] return result=${toResultString(ret)}`);
     const variant3 = ret;
     switch (variant3.tag) {
       case 'ok': {
@@ -671,48 +743,46 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline29(arg0, arg1, arg2, arg3) {
-    const ptr0 = arg1;
-    const len0 = arg2;
-    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
+  function trampoline29(arg0, arg1) {
+    console.trace(`[module="wasi:io/streams", function="check-write"] call this=${arguments[0]}`);
     let ret;
     try {
-      ret = { tag: 'ok', val: write(arg0 >>> 0, result0) };
+      ret = { tag: 'ok', val: checkWrite(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    const variant3 = ret;
-    switch (variant3.tag) {
+    console.trace(`[module="wasi:io/streams", function="check-write"] return result=${toResultString(ret)}`);
+    const variant1 = ret;
+    switch (variant1.tag) {
       case 'ok': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
-        const [tuple1_0, tuple1_1] = e;
-        dataView(memory0).setBigInt64(arg3 + 8, toUint64(tuple1_0), true);
-        const val2 = tuple1_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple1_1) instanceof Error) {
-              console.error(tuple1_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg3 + 16, enum2, true);
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setBigInt64(arg1 + 8, toUint64(e), true);
         break;
       }
       case 'err': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 8, enum0, true);
         break;
       }
       default: {
@@ -721,11 +791,60 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline30(arg0, arg1, arg2) {
+  function trampoline30(arg0, arg1) {
+    console.trace(`[module="wasi:io/streams", function="flush"] call this=${arguments[0]}`);
+    let ret;
+    try {
+      ret = { tag: 'ok', val: flush(arg0 >>> 0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="flush"] return result=${toResultString(ret)}`);
+    const variant1 = ret;
+    switch (variant1.tag) {
+      case 'ok': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 1, enum0, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline31(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:poll/poll", function="poll-oneoff"] call in=${arguments[0]}`);
     const ptr0 = arg0;
     const len0 = arg1;
     const result0 = new Uint32Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 4));
     const ret = pollOneoff(result0);
+    console.trace(`[module="wasi:poll/poll", function="poll-oneoff"] return result=${toResultString(ret)}`);
     const vec1 = ret;
     const len1 = vec1.length;
     const result1 = realloc0(0, 0, 1, len1 * 1);
@@ -737,8 +856,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     dataView(memory0).setInt32(arg2 + 0, result1, true);
   }
   
-  function trampoline31(arg0) {
+  function trampoline32(arg0) {
+    console.trace(`[module="wasi:filesystem/preopens", function="get-directories"] call `);
     const ret = getDirectories();
+    console.trace(`[module="wasi:filesystem/preopens", function="get-directories"] return result=${toResultString(ret)}`);
     const vec2 = ret;
     const len2 = vec2.length;
     const result2 = realloc1(0, 0, 4, len2 * 12);
@@ -756,20 +877,24 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   let realloc1;
   
-  function trampoline32(arg0) {
+  function trampoline33(arg0) {
+    console.trace(`[module="wasi:clocks/wall-clock", function="now"] call `);
     const ret = now$1();
+    console.trace(`[module="wasi:clocks/wall-clock", function="now"] return result=${toResultString(ret)}`);
     const {seconds: v0_0, nanoseconds: v0_1 } = ret;
     dataView(memory0).setBigInt64(arg0 + 0, toUint64(v0_0), true);
     dataView(memory0).setInt32(arg0 + 8, toUint32(v0_1), true);
   }
   
-  function trampoline33(arg0, arg1, arg2) {
+  function trampoline34(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:filesystem/types", function="read-via-stream"] call this=${arguments[0]}, offset=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: readViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="read-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -949,13 +1074,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline34(arg0, arg1, arg2) {
+  function trampoline35(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:filesystem/types", function="write-via-stream"] call this=${arguments[0]}, offset=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: writeViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="write-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -1135,13 +1262,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline35(arg0, arg1) {
+  function trampoline36(arg0, arg1) {
+    console.trace(`[module="wasi:filesystem/types", function="append-via-stream"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: appendViaStream(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="append-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -1321,13 +1450,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline36(arg0, arg1) {
+  function trampoline37(arg0, arg1) {
+    console.trace(`[module="wasi:filesystem/types", function="get-type"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: getType(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="get-type"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -1550,13 +1681,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline37(arg0, arg1) {
+  function trampoline38(arg0, arg1) {
+    console.trace(`[module="wasi:filesystem/types", function="stat"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: stat(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="stat"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     switch (variant6.tag) {
       case 'ok': {
@@ -1791,7 +1924,8 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline38(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  function trampoline39(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+    console.trace(`[module="wasi:filesystem/types", function="open-at"] call this=${arguments[0]}, path-flags=${arguments[1]}, path=${arguments[2]}, open-flags=${arguments[3]}, flags=${arguments[4]}, modes=${arguments[5]}`);
     if ((arg1 & 4294967294) !== 0) {
       throw new TypeError('flags have extraneous bits set');
     }
@@ -1835,6 +1969,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="open-at"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     switch (variant6.tag) {
       case 'ok': {
@@ -2014,13 +2149,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline39(arg0, arg1) {
+  function trampoline40(arg0, arg1) {
+    console.trace(`[module="wasi:filesystem/types", function="metadata-hash"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: metadataHash(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
+    console.trace(`[module="wasi:filesystem/types", function="metadata-hash"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -2202,8 +2339,267 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline40(arg0, arg1) {
+  function trampoline41(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:io/streams", function="read"] call this=${arguments[0]}, len=${arguments[1]}`);
+    let ret;
+    try {
+      ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="read"] return result=${toResultString(ret)}`);
+    const variant3 = ret;
+    switch (variant3.tag) {
+      case 'ok': {
+        const e = variant3.val;
+        dataView(memory0).setInt8(arg2 + 0, 0, true);
+        const [tuple0_0, tuple0_1] = e;
+        const val1 = tuple0_0;
+        const len1 = val1.byteLength;
+        const ptr1 = realloc1(0, 0, 1, len1 * 1);
+        const src1 = new Uint8Array(val1.buffer || val1, val1.byteOffset, len1 * 1);
+        (new Uint8Array(memory0.buffer, ptr1, len1 * 1)).set(src1);
+        dataView(memory0).setInt32(arg2 + 8, len1, true);
+        dataView(memory0).setInt32(arg2 + 4, ptr1, true);
+        const val2 = tuple0_1;
+        let enum2;
+        switch (val2) {
+          case 'open': {
+            enum2 = 0;
+            break;
+          }
+          case 'ended': {
+            enum2 = 1;
+            break;
+          }
+          default: {
+            if ((tuple0_1) instanceof Error) {
+              console.error(tuple0_1);
+            }
+            
+            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
+          }
+        }
+        dataView(memory0).setInt8(arg2 + 12, enum2, true);
+        break;
+      }
+      case 'err': {
+        const e = variant3.val;
+        dataView(memory0).setInt8(arg2 + 0, 1, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline42(arg0, arg1, arg2) {
+    console.trace(`[module="wasi:io/streams", function="blocking-read"] call this=${arguments[0]}, len=${arguments[1]}`);
+    let ret;
+    try {
+      ret = { tag: 'ok', val: blockingRead(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="blocking-read"] return result=${toResultString(ret)}`);
+    const variant3 = ret;
+    switch (variant3.tag) {
+      case 'ok': {
+        const e = variant3.val;
+        dataView(memory0).setInt8(arg2 + 0, 0, true);
+        const [tuple0_0, tuple0_1] = e;
+        const val1 = tuple0_0;
+        const len1 = val1.byteLength;
+        const ptr1 = realloc1(0, 0, 1, len1 * 1);
+        const src1 = new Uint8Array(val1.buffer || val1, val1.byteOffset, len1 * 1);
+        (new Uint8Array(memory0.buffer, ptr1, len1 * 1)).set(src1);
+        dataView(memory0).setInt32(arg2 + 8, len1, true);
+        dataView(memory0).setInt32(arg2 + 4, ptr1, true);
+        const val2 = tuple0_1;
+        let enum2;
+        switch (val2) {
+          case 'open': {
+            enum2 = 0;
+            break;
+          }
+          case 'ended': {
+            enum2 = 1;
+            break;
+          }
+          default: {
+            if ((tuple0_1) instanceof Error) {
+              console.error(tuple0_1);
+            }
+            
+            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
+          }
+        }
+        dataView(memory0).setInt8(arg2 + 12, enum2, true);
+        break;
+      }
+      case 'err': {
+        const e = variant3.val;
+        dataView(memory0).setInt8(arg2 + 0, 1, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline43(arg0, arg1, arg2, arg3) {
+    console.trace(`[module="wasi:io/streams", function="write"] call this=${arguments[0]}, contents=${arguments[1]}`);
+    const ptr0 = arg1;
+    const len0 = arg2;
+    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
+    let ret;
+    try {
+      ret = { tag: 'ok', val: write(arg0 >>> 0, result0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="write"] return result=${toResultString(ret)}`);
+    const variant2 = ret;
+    switch (variant2.tag) {
+      case 'ok': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const val1 = e;
+        let enum1;
+        switch (val1) {
+          case 'last-operation-failed': {
+            enum1 = 0;
+            break;
+          }
+          case 'closed': {
+            enum1 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val1}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg3 + 1, enum1, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline44(arg0, arg1, arg2, arg3) {
+    console.trace(`[module="wasi:io/streams", function="blocking-write-and-flush"] call this=${arguments[0]}, contents=${arguments[1]}`);
+    const ptr0 = arg1;
+    const len0 = arg2;
+    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
+    let ret;
+    try {
+      ret = { tag: 'ok', val: blockingWriteAndFlush(arg0 >>> 0, result0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="blocking-write-and-flush"] return result=${toResultString(ret)}`);
+    const variant2 = ret;
+    switch (variant2.tag) {
+      case 'ok': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const val1 = e;
+        let enum1;
+        switch (val1) {
+          case 'last-operation-failed': {
+            enum1 = 0;
+            break;
+          }
+          case 'closed': {
+            enum1 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val1}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg3 + 1, enum1, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline45(arg0, arg1) {
+    console.trace(`[module="wasi:io/streams", function="blocking-flush"] call this=${arguments[0]}`);
+    let ret;
+    try {
+      ret = { tag: 'ok', val: blockingFlush(arg0 >>> 0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    console.trace(`[module="wasi:io/streams", function="blocking-flush"] return result=${toResultString(ret)}`);
+    const variant1 = ret;
+    switch (variant1.tag) {
+      case 'ok': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 1, enum0, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline46(arg0, arg1) {
+    console.trace(`[module="wasi:random/random", function="get-random-bytes"] call len=${arguments[0]}`);
     const ret = getRandomBytes(BigInt.asUintN(64, arg0));
+    console.trace(`[module="wasi:random/random", function="get-random-bytes"] return result=${toResultString(ret)}`);
     const val0 = ret;
     const len0 = val0.byteLength;
     const ptr0 = realloc1(0, 0, 1, len0 * 1);
@@ -2213,8 +2609,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     dataView(memory0).setInt32(arg1 + 0, ptr0, true);
   }
   
-  function trampoline41(arg0) {
+  function trampoline47(arg0) {
+    console.trace(`[module="wasi:cli/environment", function="get-environment"] call `);
     const ret = getEnvironment();
+    console.trace(`[module="wasi:cli/environment", function="get-environment"] return result=${toResultString(ret)}`);
     const vec3 = ret;
     const len3 = vec3.length;
     const result3 = realloc1(0, 0, 4, len3 * 16);
@@ -2234,8 +2632,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     dataView(memory0).setInt32(arg0 + 0, result3, true);
   }
   
-  function trampoline42(arg0) {
+  function trampoline48(arg0) {
+    console.trace(`[module="wasi:cli/environment", function="get-arguments"] call `);
     const ret = getArguments();
+    console.trace(`[module="wasi:cli/environment", function="get-arguments"] return result=${toResultString(ret)}`);
     const vec1 = ret;
     const len1 = vec1.length;
     const result1 = realloc1(0, 0, 4, len1 * 8);
@@ -2250,164 +2650,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     dataView(memory0).setInt32(arg0 + 0, result1, true);
   }
   
-  function trampoline43(arg0, arg1, arg2) {
-    let ret;
-    try {
-      ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
-    } catch (e) {
-      ret = { tag: 'err', val: getErrorPayload(e) };
-    }
-    const variant3 = ret;
-    switch (variant3.tag) {
-      case 'ok': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg2 + 0, 0, true);
-        const [tuple0_0, tuple0_1] = e;
-        const val1 = tuple0_0;
-        const len1 = val1.byteLength;
-        const ptr1 = realloc1(0, 0, 1, len1 * 1);
-        const src1 = new Uint8Array(val1.buffer || val1, val1.byteOffset, len1 * 1);
-        (new Uint8Array(memory0.buffer, ptr1, len1 * 1)).set(src1);
-        dataView(memory0).setInt32(arg2 + 8, len1, true);
-        dataView(memory0).setInt32(arg2 + 4, ptr1, true);
-        const val2 = tuple0_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple0_1) instanceof Error) {
-              console.error(tuple0_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg2 + 12, enum2, true);
-        break;
-      }
-      case 'err': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg2 + 0, 1, true);
-        break;
-      }
-      default: {
-        throw new TypeError('invalid variant specified for result');
-      }
-    }
-  }
-  
-  function trampoline44(arg0, arg1, arg2) {
-    let ret;
-    try {
-      ret = { tag: 'ok', val: blockingRead(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
-    } catch (e) {
-      ret = { tag: 'err', val: getErrorPayload(e) };
-    }
-    const variant3 = ret;
-    switch (variant3.tag) {
-      case 'ok': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg2 + 0, 0, true);
-        const [tuple0_0, tuple0_1] = e;
-        const val1 = tuple0_0;
-        const len1 = val1.byteLength;
-        const ptr1 = realloc1(0, 0, 1, len1 * 1);
-        const src1 = new Uint8Array(val1.buffer || val1, val1.byteOffset, len1 * 1);
-        (new Uint8Array(memory0.buffer, ptr1, len1 * 1)).set(src1);
-        dataView(memory0).setInt32(arg2 + 8, len1, true);
-        dataView(memory0).setInt32(arg2 + 4, ptr1, true);
-        const val2 = tuple0_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple0_1) instanceof Error) {
-              console.error(tuple0_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg2 + 12, enum2, true);
-        break;
-      }
-      case 'err': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg2 + 0, 1, true);
-        break;
-      }
-      default: {
-        throw new TypeError('invalid variant specified for result');
-      }
-    }
-  }
-  
-  function trampoline45(arg0, arg1, arg2, arg3) {
-    const ptr0 = arg1;
-    const len0 = arg2;
-    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
-    let ret;
-    try {
-      ret = { tag: 'ok', val: blockingWrite(arg0 >>> 0, result0) };
-    } catch (e) {
-      ret = { tag: 'err', val: getErrorPayload(e) };
-    }
-    const variant3 = ret;
-    switch (variant3.tag) {
-      case 'ok': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
-        const [tuple1_0, tuple1_1] = e;
-        dataView(memory0).setBigInt64(arg3 + 8, toUint64(tuple1_0), true);
-        const val2 = tuple1_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple1_1) instanceof Error) {
-              console.error(tuple1_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg3 + 16, enum2, true);
-        break;
-      }
-      case 'err': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
-        break;
-      }
-      default: {
-        throw new TypeError('invalid variant specified for result');
-      }
-    }
-  }
-  
-  function trampoline46(arg0) {
+  function trampoline49(arg0) {
+    console.trace(`[module="wasi:cli/terminal-stdin", function="get-terminal-stdin"] call `);
     const ret = getTerminalStdin();
+    console.trace(`[module="wasi:cli/terminal-stdin", function="get-terminal-stdin"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2418,8 +2664,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline47(arg0) {
+  function trampoline50(arg0) {
+    console.trace(`[module="wasi:cli/terminal-stdout", function="get-terminal-stdout"] call `);
     const ret = getTerminalStdout();
+    console.trace(`[module="wasi:cli/terminal-stdout", function="get-terminal-stdout"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2430,8 +2678,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline48(arg0) {
+  function trampoline51(arg0) {
+    console.trace(`[module="wasi:cli/terminal-stderr", function="get-terminal-stderr"] call `);
     const ret = getTerminalStderr();
+    console.trace(`[module="wasi:cli/terminal-stderr", function="get-terminal-stderr"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2466,33 +2716,34 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       'outgoing-request-write': exports0['3'],
     },
     'wasi:io/streams': {
+      'check-write': exports0['7'],
       'drop-input-stream': trampoline7,
       'drop-output-stream': trampoline11,
+      flush: exports0['8'],
       read: exports0['6'],
       'subscribe-to-input-stream': trampoline6,
       'subscribe-to-output-stream': trampoline0,
-      write: exports0['7'],
     },
     'wasi:poll/poll': {
       'drop-pollable': trampoline1,
-      'poll-oneoff': exports0['8'],
+      'poll-oneoff': exports0['9'],
     },
     wasi_snapshot_preview1: {
-      args_get: exports0['29'],
-      args_sizes_get: exports0['28'],
-      clock_time_get: exports0['35'],
-      environ_get: exports0['37'],
-      environ_sizes_get: exports0['38'],
-      fd_close: exports0['39'],
-      fd_filestat_get: exports0['32'],
-      fd_prestat_dir_name: exports0['41'],
-      fd_prestat_get: exports0['40'],
-      fd_read: exports0['33'],
-      fd_write: exports0['30'],
-      path_open: exports0['34'],
-      proc_exit: exports0['42'],
-      random_get: exports0['36'],
-      sched_yield: exports0['31'],
+      args_get: exports0['32'],
+      args_sizes_get: exports0['31'],
+      clock_time_get: exports0['38'],
+      environ_get: exports0['40'],
+      environ_sizes_get: exports0['41'],
+      fd_close: exports0['42'],
+      fd_filestat_get: exports0['35'],
+      fd_prestat_dir_name: exports0['44'],
+      fd_prestat_get: exports0['43'],
+      fd_read: exports0['36'],
+      fd_write: exports0['33'],
+      path_open: exports0['37'],
+      proc_exit: exports0['45'],
+      random_get: exports0['39'],
+      sched_yield: exports0['34'],
     },
   }));
   ({ exports: exports2 } = await instantiateCore(await module1, {
@@ -2503,8 +2754,8 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       memory: exports1.memory,
     },
     'wasi:cli/environment': {
-      'get-arguments': exports0['20'],
-      'get-environment': exports0['19'],
+      'get-arguments': exports0['27'],
+      'get-environment': exports0['26'],
     },
     'wasi:cli/exit': {
       exit: trampoline21,
@@ -2525,44 +2776,46 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       'drop-terminal-output': trampoline19,
     },
     'wasi:cli/terminal-stderr': {
-      'get-terminal-stderr': exports0['27'],
+      'get-terminal-stderr': exports0['30'],
     },
     'wasi:cli/terminal-stdin': {
-      'get-terminal-stdin': exports0['25'],
+      'get-terminal-stdin': exports0['28'],
     },
     'wasi:cli/terminal-stdout': {
-      'get-terminal-stdout': exports0['26'],
+      'get-terminal-stdout': exports0['29'],
     },
     'wasi:clocks/monotonic-clock': {
       now: trampoline13,
     },
     'wasi:clocks/wall-clock': {
-      now: exports0['10'],
+      now: exports0['11'],
     },
     'wasi:filesystem/preopens': {
-      'get-directories': exports0['9'],
+      'get-directories': exports0['10'],
     },
     'wasi:filesystem/types': {
-      'append-via-stream': exports0['13'],
+      'append-via-stream': exports0['14'],
       'drop-descriptor': trampoline15,
       'drop-directory-entry-stream': trampoline14,
-      'get-type': exports0['14'],
-      'metadata-hash': exports0['17'],
-      'open-at': exports0['16'],
-      'read-via-stream': exports0['11'],
-      stat: exports0['15'],
-      'write-via-stream': exports0['12'],
+      'get-type': exports0['15'],
+      'metadata-hash': exports0['18'],
+      'open-at': exports0['17'],
+      'read-via-stream': exports0['12'],
+      stat: exports0['16'],
+      'write-via-stream': exports0['13'],
     },
     'wasi:io/streams': {
-      'blocking-read': exports0['22'],
-      'blocking-write': exports0['24'],
+      'blocking-flush': exports0['24'],
+      'blocking-read': exports0['20'],
+      'blocking-write-and-flush': exports0['23'],
+      'check-write': exports0['21'],
       'drop-input-stream': trampoline7,
       'drop-output-stream': trampoline11,
-      read: exports0['21'],
-      write: exports0['23'],
+      read: exports0['19'],
+      write: exports0['22'],
     },
     'wasi:random/random': {
-      'get-random-bytes': exports0['18'],
+      'get-random-bytes': exports0['25'],
     },
   }));
   memory0 = exports1.memory;
@@ -2585,30 +2838,33 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       '19': trampoline41,
       '2': trampoline24,
       '20': trampoline42,
-      '21': trampoline43,
-      '22': trampoline44,
-      '23': trampoline29,
+      '21': trampoline29,
+      '22': trampoline43,
+      '23': trampoline44,
       '24': trampoline45,
       '25': trampoline46,
       '26': trampoline47,
       '27': trampoline48,
-      '28': exports2.args_sizes_get,
-      '29': exports2.args_get,
+      '28': trampoline49,
+      '29': trampoline50,
       '3': trampoline25,
-      '30': exports2.fd_write,
-      '31': exports2.sched_yield,
-      '32': exports2.fd_filestat_get,
-      '33': exports2.fd_read,
-      '34': exports2.path_open,
-      '35': exports2.clock_time_get,
-      '36': exports2.random_get,
-      '37': exports2.environ_get,
-      '38': exports2.environ_sizes_get,
-      '39': exports2.fd_close,
+      '30': trampoline51,
+      '31': exports2.args_sizes_get,
+      '32': exports2.args_get,
+      '33': exports2.fd_write,
+      '34': exports2.sched_yield,
+      '35': exports2.fd_filestat_get,
+      '36': exports2.fd_read,
+      '37': exports2.path_open,
+      '38': exports2.clock_time_get,
+      '39': exports2.random_get,
       '4': trampoline26,
-      '40': exports2.fd_prestat_get,
-      '41': exports2.fd_prestat_dir_name,
-      '42': exports2.proc_exit,
+      '40': exports2.environ_get,
+      '41': exports2.environ_sizes_get,
+      '42': exports2.fd_close,
+      '43': exports2.fd_prestat_get,
+      '44': exports2.fd_prestat_dir_name,
+      '45': exports2.proc_exit,
       '5': trampoline27,
       '6': trampoline28,
       '7': trampoline29,
@@ -2618,7 +2874,9 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }));
   
   function run() {
+    console.trace(`[module="wasi:cli/run", function="run"] call `);
     const ret = exports1['wasi:cli/run#run']();
+    console.trace(`[module="wasi:cli/run", function="run"] return result=${toResultString(ret)}`);
     let variant0;
     switch (ret) {
       case 0: {
