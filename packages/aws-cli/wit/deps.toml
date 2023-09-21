@@ -1,1 +1,1 @@
-wasi = "https://gitpkg.now.sh/bytecodealliance/wasmtime/crates/wasi?e250334b8ebfba9359802ab7f61bdd7c6085d87a"
+wasi = "https://gitpkg.now.sh/bytecodealliance/wasmtime/crates/wasi?848764a9412a1bd66de4087f5ba0670d61384af1"

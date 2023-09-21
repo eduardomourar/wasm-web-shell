@@ -16,6 +16,7 @@ panic = "abort"
 [profile.release.package.aws-cli]
 # Optimize for small code size
 opt-level = "s"
+strip = "debuginfo"
 
 [workspace.dependencies]
 tokio = { version = "1.32.0", default-features = false }

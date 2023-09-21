@@ -108,10 +108,13 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     newFields,
     newOutgoingRequest,
     outgoingRequestWrite } = types$1;
-  const { blockingRead,
-    blockingWrite,
+  const { blockingFlush,
+    blockingRead,
+    blockingWriteAndFlush,
+    checkWrite,
     dropInputStream,
     dropOutputStream,
+    flush,
     read,
     subscribeToInputStream,
     subscribeToOutputStream,
@@ -671,48 +674,44 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline29(arg0, arg1, arg2, arg3) {
-    const ptr0 = arg1;
-    const len0 = arg2;
-    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
+  function trampoline29(arg0, arg1) {
     let ret;
     try {
-      ret = { tag: 'ok', val: write(arg0 >>> 0, result0) };
+      ret = { tag: 'ok', val: checkWrite(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    const variant3 = ret;
-    switch (variant3.tag) {
+    const variant1 = ret;
+    switch (variant1.tag) {
       case 'ok': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
-        const [tuple1_0, tuple1_1] = e;
-        dataView(memory0).setBigInt64(arg3 + 8, toUint64(tuple1_0), true);
-        const val2 = tuple1_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple1_1) instanceof Error) {
-              console.error(tuple1_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg3 + 16, enum2, true);
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setBigInt64(arg1 + 8, toUint64(e), true);
         break;
       }
       case 'err': {
-        const e = variant3.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 8, enum0, true);
         break;
       }
       default: {
@@ -721,7 +720,52 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline30(arg0, arg1, arg2) {
+  function trampoline30(arg0, arg1) {
+    let ret;
+    try {
+      ret = { tag: 'ok', val: flush(arg0 >>> 0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    const variant1 = ret;
+    switch (variant1.tag) {
+      case 'ok': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 1, enum0, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline31(arg0, arg1, arg2) {
     const ptr0 = arg0;
     const len0 = arg1;
     const result0 = new Uint32Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 4));
@@ -737,7 +781,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     dataView(memory0).setInt32(arg2 + 0, result1, true);
   }
   
-  function trampoline31(arg0) {
+  function trampoline32(arg0) {
     const ret = getDirectories();
     const vec2 = ret;
     const len2 = vec2.length;
@@ -756,14 +800,14 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   let realloc1;
   
-  function trampoline32(arg0) {
+  function trampoline33(arg0) {
     const ret = now$1();
     const {seconds: v0_0, nanoseconds: v0_1 } = ret;
     dataView(memory0).setBigInt64(arg0 + 0, toUint64(v0_0), true);
     dataView(memory0).setInt32(arg0 + 8, toUint32(v0_1), true);
   }
   
-  function trampoline33(arg0, arg1, arg2) {
+  function trampoline34(arg0, arg1, arg2) {
     let ret;
     try {
       ret = { tag: 'ok', val: readViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
@@ -949,7 +993,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline34(arg0, arg1, arg2) {
+  function trampoline35(arg0, arg1, arg2) {
     let ret;
     try {
       ret = { tag: 'ok', val: writeViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
@@ -1135,7 +1179,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline35(arg0, arg1) {
+  function trampoline36(arg0, arg1) {
     let ret;
     try {
       ret = { tag: 'ok', val: appendViaStream(arg0 >>> 0) };
@@ -1321,7 +1365,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline36(arg0, arg1) {
+  function trampoline37(arg0, arg1) {
     let ret;
     try {
       ret = { tag: 'ok', val: getType(arg0 >>> 0) };
@@ -1550,7 +1594,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline37(arg0, arg1) {
+  function trampoline38(arg0, arg1) {
     let ret;
     try {
       ret = { tag: 'ok', val: stat(arg0 >>> 0) };
@@ -1791,7 +1835,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline38(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  function trampoline39(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
     if ((arg1 & 4294967294) !== 0) {
       throw new TypeError('flags have extraneous bits set');
     }
@@ -2014,7 +2058,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline39(arg0, arg1) {
+  function trampoline40(arg0, arg1) {
     let ret;
     try {
       ret = { tag: 'ok', val: metadataHash(arg0 >>> 0) };
@@ -2202,55 +2246,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline40(arg0, arg1) {
-    const ret = getRandomBytes(BigInt.asUintN(64, arg0));
-    const val0 = ret;
-    const len0 = val0.byteLength;
-    const ptr0 = realloc1(0, 0, 1, len0 * 1);
-    const src0 = new Uint8Array(val0.buffer || val0, val0.byteOffset, len0 * 1);
-    (new Uint8Array(memory0.buffer, ptr0, len0 * 1)).set(src0);
-    dataView(memory0).setInt32(arg1 + 4, len0, true);
-    dataView(memory0).setInt32(arg1 + 0, ptr0, true);
-  }
-  
-  function trampoline41(arg0) {
-    const ret = getEnvironment();
-    const vec3 = ret;
-    const len3 = vec3.length;
-    const result3 = realloc1(0, 0, 4, len3 * 16);
-    for (let i = 0; i < vec3.length; i++) {
-      const e = vec3[i];
-      const base = result3 + i * 16;const [tuple0_0, tuple0_1] = e;
-      const ptr1 = utf8Encode(tuple0_0, realloc1, memory0);
-      const len1 = utf8EncodedLen;
-      dataView(memory0).setInt32(base + 4, len1, true);
-      dataView(memory0).setInt32(base + 0, ptr1, true);
-      const ptr2 = utf8Encode(tuple0_1, realloc1, memory0);
-      const len2 = utf8EncodedLen;
-      dataView(memory0).setInt32(base + 12, len2, true);
-      dataView(memory0).setInt32(base + 8, ptr2, true);
-    }
-    dataView(memory0).setInt32(arg0 + 4, len3, true);
-    dataView(memory0).setInt32(arg0 + 0, result3, true);
-  }
-  
-  function trampoline42(arg0) {
-    const ret = getArguments();
-    const vec1 = ret;
-    const len1 = vec1.length;
-    const result1 = realloc1(0, 0, 4, len1 * 8);
-    for (let i = 0; i < vec1.length; i++) {
-      const e = vec1[i];
-      const base = result1 + i * 8;const ptr0 = utf8Encode(e, realloc1, memory0);
-      const len0 = utf8EncodedLen;
-      dataView(memory0).setInt32(base + 4, len0, true);
-      dataView(memory0).setInt32(base + 0, ptr0, true);
-    }
-    dataView(memory0).setInt32(arg0 + 4, len1, true);
-    dataView(memory0).setInt32(arg0 + 0, result1, true);
-  }
-  
-  function trampoline43(arg0, arg1, arg2) {
+  function trampoline41(arg0, arg1, arg2) {
     let ret;
     try {
       ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
@@ -2303,7 +2299,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline44(arg0, arg1, arg2) {
+  function trampoline42(arg0, arg1, arg2) {
     let ret;
     try {
       ret = { tag: 'ok', val: blockingRead(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
@@ -2356,48 +2352,46 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline45(arg0, arg1, arg2, arg3) {
+  function trampoline43(arg0, arg1, arg2, arg3) {
     const ptr0 = arg1;
     const len0 = arg2;
     const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
     let ret;
     try {
-      ret = { tag: 'ok', val: blockingWrite(arg0 >>> 0, result0) };
+      ret = { tag: 'ok', val: write(arg0 >>> 0, result0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    const variant3 = ret;
-    switch (variant3.tag) {
+    const variant2 = ret;
+    switch (variant2.tag) {
       case 'ok': {
-        const e = variant3.val;
+        const e = variant2.val;
         dataView(memory0).setInt8(arg3 + 0, 0, true);
-        const [tuple1_0, tuple1_1] = e;
-        dataView(memory0).setBigInt64(arg3 + 8, toUint64(tuple1_0), true);
-        const val2 = tuple1_1;
-        let enum2;
-        switch (val2) {
-          case 'open': {
-            enum2 = 0;
-            break;
-          }
-          case 'ended': {
-            enum2 = 1;
-            break;
-          }
-          default: {
-            if ((tuple1_1) instanceof Error) {
-              console.error(tuple1_1);
-            }
-            
-            throw new TypeError(`"${val2}" is not one of the cases of stream-status`);
-          }
-        }
-        dataView(memory0).setInt8(arg3 + 16, enum2, true);
         break;
       }
       case 'err': {
-        const e = variant3.val;
+        const e = variant2.val;
         dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const val1 = e;
+        let enum1;
+        switch (val1) {
+          case 'last-operation-failed': {
+            enum1 = 0;
+            break;
+          }
+          case 'closed': {
+            enum1 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val1}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg3 + 1, enum1, true);
         break;
       }
       default: {
@@ -2406,7 +2400,148 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline46(arg0) {
+  function trampoline44(arg0, arg1, arg2, arg3) {
+    const ptr0 = arg1;
+    const len0 = arg2;
+    const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
+    let ret;
+    try {
+      ret = { tag: 'ok', val: blockingWriteAndFlush(arg0 >>> 0, result0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    const variant2 = ret;
+    switch (variant2.tag) {
+      case 'ok': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant2.val;
+        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        const val1 = e;
+        let enum1;
+        switch (val1) {
+          case 'last-operation-failed': {
+            enum1 = 0;
+            break;
+          }
+          case 'closed': {
+            enum1 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val1}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg3 + 1, enum1, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline45(arg0, arg1) {
+    let ret;
+    try {
+      ret = { tag: 'ok', val: blockingFlush(arg0 >>> 0) };
+    } catch (e) {
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    const variant1 = ret;
+    switch (variant1.tag) {
+      case 'ok': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        break;
+      }
+      case 'err': {
+        const e = variant1.val;
+        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        const val0 = e;
+        let enum0;
+        switch (val0) {
+          case 'last-operation-failed': {
+            enum0 = 0;
+            break;
+          }
+          case 'closed': {
+            enum0 = 1;
+            break;
+          }
+          default: {
+            if ((e) instanceof Error) {
+              console.error(e);
+            }
+            
+            throw new TypeError(`"${val0}" is not one of the cases of write-error`);
+          }
+        }
+        dataView(memory0).setInt8(arg1 + 1, enum0, true);
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+  }
+  
+  function trampoline46(arg0, arg1) {
+    const ret = getRandomBytes(BigInt.asUintN(64, arg0));
+    const val0 = ret;
+    const len0 = val0.byteLength;
+    const ptr0 = realloc1(0, 0, 1, len0 * 1);
+    const src0 = new Uint8Array(val0.buffer || val0, val0.byteOffset, len0 * 1);
+    (new Uint8Array(memory0.buffer, ptr0, len0 * 1)).set(src0);
+    dataView(memory0).setInt32(arg1 + 4, len0, true);
+    dataView(memory0).setInt32(arg1 + 0, ptr0, true);
+  }
+  
+  function trampoline47(arg0) {
+    const ret = getEnvironment();
+    const vec3 = ret;
+    const len3 = vec3.length;
+    const result3 = realloc1(0, 0, 4, len3 * 16);
+    for (let i = 0; i < vec3.length; i++) {
+      const e = vec3[i];
+      const base = result3 + i * 16;const [tuple0_0, tuple0_1] = e;
+      const ptr1 = utf8Encode(tuple0_0, realloc1, memory0);
+      const len1 = utf8EncodedLen;
+      dataView(memory0).setInt32(base + 4, len1, true);
+      dataView(memory0).setInt32(base + 0, ptr1, true);
+      const ptr2 = utf8Encode(tuple0_1, realloc1, memory0);
+      const len2 = utf8EncodedLen;
+      dataView(memory0).setInt32(base + 12, len2, true);
+      dataView(memory0).setInt32(base + 8, ptr2, true);
+    }
+    dataView(memory0).setInt32(arg0 + 4, len3, true);
+    dataView(memory0).setInt32(arg0 + 0, result3, true);
+  }
+  
+  function trampoline48(arg0) {
+    const ret = getArguments();
+    const vec1 = ret;
+    const len1 = vec1.length;
+    const result1 = realloc1(0, 0, 4, len1 * 8);
+    for (let i = 0; i < vec1.length; i++) {
+      const e = vec1[i];
+      const base = result1 + i * 8;const ptr0 = utf8Encode(e, realloc1, memory0);
+      const len0 = utf8EncodedLen;
+      dataView(memory0).setInt32(base + 4, len0, true);
+      dataView(memory0).setInt32(base + 0, ptr0, true);
+    }
+    dataView(memory0).setInt32(arg0 + 4, len1, true);
+    dataView(memory0).setInt32(arg0 + 0, result1, true);
+  }
+  
+  function trampoline49(arg0) {
     const ret = getTerminalStdin();
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
@@ -2418,7 +2553,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline47(arg0) {
+  function trampoline50(arg0) {
     const ret = getTerminalStdout();
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
@@ -2430,7 +2565,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     }
   }
   
-  function trampoline48(arg0) {
+  function trampoline51(arg0) {
     const ret = getTerminalStderr();
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
@@ -2466,33 +2601,34 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       'outgoing-request-write': exports0['3'],
     },
     'wasi:io/streams': {
+      'check-write': exports0['7'],
       'drop-input-stream': trampoline7,
       'drop-output-stream': trampoline11,
+      flush: exports0['8'],
       read: exports0['6'],
       'subscribe-to-input-stream': trampoline6,
       'subscribe-to-output-stream': trampoline0,
-      write: exports0['7'],
     },
     'wasi:poll/poll': {
       'drop-pollable': trampoline1,
-      'poll-oneoff': exports0['8'],
+      'poll-oneoff': exports0['9'],
     },
     wasi_snapshot_preview1: {
-      args_get: exports0['30'],
-      args_sizes_get: exports0['29'],
-      clock_time_get: exports0['35'],
-      environ_get: exports0['37'],
-      environ_sizes_get: exports0['38'],
-      fd_close: exports0['39'],
-      fd_filestat_get: exports0['32'],
-      fd_prestat_dir_name: exports0['41'],
-      fd_prestat_get: exports0['40'],
-      fd_read: exports0['33'],
-      fd_write: exports0['31'],
-      path_open: exports0['34'],
-      proc_exit: exports0['42'],
-      random_get: exports0['36'],
-      sched_yield: exports0['28'],
+      args_get: exports0['32'],
+      args_sizes_get: exports0['31'],
+      clock_time_get: exports0['38'],
+      environ_get: exports0['40'],
+      environ_sizes_get: exports0['41'],
+      fd_close: exports0['42'],
+      fd_filestat_get: exports0['35'],
+      fd_prestat_dir_name: exports0['44'],
+      fd_prestat_get: exports0['43'],
+      fd_read: exports0['36'],
+      fd_write: exports0['33'],
+      path_open: exports0['37'],
+      proc_exit: exports0['45'],
+      random_get: exports0['39'],
+      sched_yield: exports0['34'],
     },
   }));
   ({ exports: exports2 } = await instantiateCore(await module1, {
@@ -2503,8 +2639,8 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       memory: exports1.memory,
     },
     'wasi:cli/environment': {
-      'get-arguments': exports0['20'],
-      'get-environment': exports0['19'],
+      'get-arguments': exports0['27'],
+      'get-environment': exports0['26'],
     },
     'wasi:cli/exit': {
       exit: trampoline21,
@@ -2525,44 +2661,46 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       'drop-terminal-output': trampoline19,
     },
     'wasi:cli/terminal-stderr': {
-      'get-terminal-stderr': exports0['27'],
+      'get-terminal-stderr': exports0['30'],
     },
     'wasi:cli/terminal-stdin': {
-      'get-terminal-stdin': exports0['25'],
+      'get-terminal-stdin': exports0['28'],
     },
     'wasi:cli/terminal-stdout': {
-      'get-terminal-stdout': exports0['26'],
+      'get-terminal-stdout': exports0['29'],
     },
     'wasi:clocks/monotonic-clock': {
       now: trampoline13,
     },
     'wasi:clocks/wall-clock': {
-      now: exports0['10'],
+      now: exports0['11'],
     },
     'wasi:filesystem/preopens': {
-      'get-directories': exports0['9'],
+      'get-directories': exports0['10'],
     },
     'wasi:filesystem/types': {
-      'append-via-stream': exports0['13'],
+      'append-via-stream': exports0['14'],
       'drop-descriptor': trampoline15,
       'drop-directory-entry-stream': trampoline14,
-      'get-type': exports0['14'],
-      'metadata-hash': exports0['17'],
-      'open-at': exports0['16'],
-      'read-via-stream': exports0['11'],
-      stat: exports0['15'],
-      'write-via-stream': exports0['12'],
+      'get-type': exports0['15'],
+      'metadata-hash': exports0['18'],
+      'open-at': exports0['17'],
+      'read-via-stream': exports0['12'],
+      stat: exports0['16'],
+      'write-via-stream': exports0['13'],
     },
     'wasi:io/streams': {
-      'blocking-read': exports0['22'],
-      'blocking-write': exports0['24'],
+      'blocking-flush': exports0['24'],
+      'blocking-read': exports0['20'],
+      'blocking-write-and-flush': exports0['23'],
+      'check-write': exports0['21'],
       'drop-input-stream': trampoline7,
       'drop-output-stream': trampoline11,
-      read: exports0['21'],
-      write: exports0['23'],
+      read: exports0['19'],
+      write: exports0['22'],
     },
     'wasi:random/random': {
-      'get-random-bytes': exports0['18'],
+      'get-random-bytes': exports0['25'],
     },
   }));
   memory0 = exports1.memory;
@@ -2585,30 +2723,33 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       '19': trampoline41,
       '2': trampoline24,
       '20': trampoline42,
-      '21': trampoline43,
-      '22': trampoline44,
-      '23': trampoline29,
+      '21': trampoline29,
+      '22': trampoline43,
+      '23': trampoline44,
       '24': trampoline45,
       '25': trampoline46,
       '26': trampoline47,
       '27': trampoline48,
-      '28': exports2.sched_yield,
-      '29': exports2.args_sizes_get,
+      '28': trampoline49,
+      '29': trampoline50,
       '3': trampoline25,
-      '30': exports2.args_get,
-      '31': exports2.fd_write,
-      '32': exports2.fd_filestat_get,
-      '33': exports2.fd_read,
-      '34': exports2.path_open,
-      '35': exports2.clock_time_get,
-      '36': exports2.random_get,
-      '37': exports2.environ_get,
-      '38': exports2.environ_sizes_get,
-      '39': exports2.fd_close,
+      '30': trampoline51,
+      '31': exports2.args_sizes_get,
+      '32': exports2.args_get,
+      '33': exports2.fd_write,
+      '34': exports2.sched_yield,
+      '35': exports2.fd_filestat_get,
+      '36': exports2.fd_read,
+      '37': exports2.path_open,
+      '38': exports2.clock_time_get,
+      '39': exports2.random_get,
       '4': trampoline26,
-      '40': exports2.fd_prestat_get,
-      '41': exports2.fd_prestat_dir_name,
-      '42': exports2.proc_exit,
+      '40': exports2.environ_get,
+      '41': exports2.environ_sizes_get,
+      '42': exports2.fd_close,
+      '43': exports2.fd_prestat_get,
+      '44': exports2.fd_prestat_dir_name,
+      '45': exports2.proc_exit,
       '5': trampoline27,
       '6': trampoline28,
       '7': trampoline29,
