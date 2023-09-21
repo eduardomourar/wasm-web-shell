@@ -7,6 +7,7 @@ import {
 } from "native-file-system-adapter";
 import { ITerminalAddon, Terminal } from "xterm";
 import { retrieveCredentials } from "./credentials";
+import type { main } from "./aws-command";
 import { Descriptor } from "aws-cli/component/imports/wasi-filesystem-types";
 
 interface WasmFile {
@@ -54,10 +55,8 @@ export const webShell = (wasmBinaryPath: string) => {
       "aws",
       async (argsv: any[], stdinPreset: any) => {
         const credentials = retrieveCredentials();
-        const worker = new Worker(new URL("./worker.mjs", import.meta.url));
-        const awsCommand = Comlink.wrap(worker) as unknown as (
-          ...input: any[]
-        ) => Promise<any>;
+        const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
+        const awsCommand = Comlink.wrap(worker) as unknown as typeof main;
 
         let output = "";
         await awsCommand(
@@ -80,6 +79,8 @@ export const webShell = (wasmBinaryPath: string) => {
         );
 
         await wasmWebTerm._waitForOutputPause();
+
+        worker.terminate();
 
         return output;
       }
