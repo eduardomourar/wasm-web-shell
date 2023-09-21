@@ -18,17 +18,6 @@ const hasOwnProperty = Object.prototype.hasOwnProperty;
 
 const toUint64 = val => BigInt.asUintN(64, val);
 
-function toResultString(obj) {
-  return JSON.stringify(obj, (_, v) => {
-    if (v && Object.getPrototypeOf(v) === Uint8Array.prototype) {
-      return `[${v[Symbol.toStringTag]} (${v.byteLength})]`;
-    } else if (typeof v === 'bigint') {
-      return v.toString();
-    }
-    return v;
-  });
-}
-
 function toUint16(val) {
   val >>>= 0;
   val %= 2 ** 16;
@@ -136,20 +125,15 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   let exports0;
   
   function trampoline0(arg0) {
-    console.trace(`[module="wasi:io/streams", function="subscribe-to-output-stream"] call this=${arguments[0]}`);
     const ret = subscribeToOutputStream(arg0 >>> 0);
-    console.trace(`[module="wasi:io/streams", function="subscribe-to-output-stream"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline1(arg0) {
-    console.trace(`[module="wasi:poll/poll", function="drop-pollable"] call this=${arguments[0]}`);
     dropPollable(arg0 >>> 0);
-    console.trace(`[module="wasi:poll/poll", function="drop-pollable"] return `);
   }
   
   function trampoline2(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-    console.trace(`[module="wasi:http/outgoing-handler", function="handle"] call request=${arguments[0]}, options=${arguments[1]}`);
     let variant3;
     switch (arg1) {
       case 0: {
@@ -211,129 +195,91 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     const ret = handle(arg0 >>> 0, variant3);
-    console.trace(`[module="wasi:http/outgoing-handler", function="handle"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline3(arg0) {
-    console.trace(`[module="wasi:http/types", function="listen-to-future-incoming-response"] call f=${arguments[0]}`);
     const ret = listenToFutureIncomingResponse(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="listen-to-future-incoming-response"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline4(arg0) {
-    console.trace(`[module="wasi:http/types", function="drop-future-incoming-response"] call f=${arguments[0]}`);
     dropFutureIncomingResponse(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="drop-future-incoming-response"] return `);
   }
   
   function trampoline5(arg0) {
-    console.trace(`[module="wasi:http/types", function="incoming-response-status"] call response=${arguments[0]}`);
     const ret = incomingResponseStatus(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="incoming-response-status"] return result=${toResultString(ret)}`);
     return toUint16(ret);
   }
   
   function trampoline6(arg0) {
-    console.trace(`[module="wasi:io/streams", function="subscribe-to-input-stream"] call this=${arguments[0]}`);
     const ret = subscribeToInputStream(arg0 >>> 0);
-    console.trace(`[module="wasi:io/streams", function="subscribe-to-input-stream"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline7(arg0) {
-    console.trace(`[module="wasi:io/streams", function="drop-input-stream"] call this=${arguments[0]}`);
     dropInputStream(arg0 >>> 0);
-    console.trace(`[module="wasi:io/streams", function="drop-input-stream"] return `);
   }
   
   function trampoline8(arg0) {
-    console.trace(`[module="wasi:http/types", function="incoming-response-headers"] call response=${arguments[0]}`);
     const ret = incomingResponseHeaders(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="incoming-response-headers"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline9(arg0) {
-    console.trace(`[module="wasi:http/types", function="drop-fields"] call fields=${arguments[0]}`);
     dropFields(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="drop-fields"] return `);
   }
   
   function trampoline10(arg0) {
-    console.trace(`[module="wasi:http/types", function="drop-incoming-response"] call response=${arguments[0]}`);
     dropIncomingResponse(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="drop-incoming-response"] return `);
   }
   
   function trampoline11(arg0) {
-    console.trace(`[module="wasi:io/streams", function="drop-output-stream"] call this=${arguments[0]}`);
     dropOutputStream(arg0 >>> 0);
-    console.trace(`[module="wasi:io/streams", function="drop-output-stream"] return `);
   }
   
   function trampoline12(arg0) {
-    console.trace(`[module="wasi:http/types", function="drop-outgoing-request"] call request=${arguments[0]}`);
     dropOutgoingRequest(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="drop-outgoing-request"] return `);
   }
   let exports1;
   
   function trampoline13() {
-    console.trace(`[module="wasi:clocks/monotonic-clock", function="now"] call `);
     const ret = now();
-    console.trace(`[module="wasi:clocks/monotonic-clock", function="now"] return result=${toResultString(ret)}`);
     return toUint64(ret);
   }
   
   function trampoline14(arg0) {
-    console.trace(`[module="wasi:filesystem/types", function="drop-directory-entry-stream"] call this=${arguments[0]}`);
     dropDirectoryEntryStream(arg0 >>> 0);
-    console.trace(`[module="wasi:filesystem/types", function="drop-directory-entry-stream"] return `);
   }
   
   function trampoline15(arg0) {
-    console.trace(`[module="wasi:filesystem/types", function="drop-descriptor"] call this=${arguments[0]}`);
     dropDescriptor(arg0 >>> 0);
-    console.trace(`[module="wasi:filesystem/types", function="drop-descriptor"] return `);
   }
   
   function trampoline16() {
-    console.trace(`[module="wasi:cli/stdin", function="get-stdin"] call `);
     const ret = getStdin();
-    console.trace(`[module="wasi:cli/stdin", function="get-stdin"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline17(arg0) {
-    console.trace(`[module="wasi:cli/terminal-input", function="drop-terminal-input"] call this=${arguments[0]}`);
     dropTerminalInput(arg0 >>> 0);
-    console.trace(`[module="wasi:cli/terminal-input", function="drop-terminal-input"] return `);
   }
   
   function trampoline18() {
-    console.trace(`[module="wasi:cli/stdout", function="get-stdout"] call `);
     const ret = getStdout();
-    console.trace(`[module="wasi:cli/stdout", function="get-stdout"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline19(arg0) {
-    console.trace(`[module="wasi:cli/terminal-output", function="drop-terminal-output"] call this=${arguments[0]}`);
     dropTerminalOutput(arg0 >>> 0);
-    console.trace(`[module="wasi:cli/terminal-output", function="drop-terminal-output"] return `);
   }
   
   function trampoline20() {
-    console.trace(`[module="wasi:cli/stderr", function="get-stderr"] call `);
     const ret = getStderr();
-    console.trace(`[module="wasi:cli/stderr", function="get-stderr"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline21(arg0) {
-    console.trace(`[module="wasi:cli/exit", function="exit"] call status=${arguments[0]}`);
     let variant0;
     switch (arg0) {
       case 0: {
@@ -355,12 +301,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     exit(variant0);
-    console.trace(`[module="wasi:cli/exit", function="exit"] return `);
   }
   let exports2;
   
   function trampoline22(arg0, arg1) {
-    console.trace(`[module="wasi:http/types", function="new-fields"] call entries=${arguments[0]}`);
     const len2 = arg1;
     const base2 = arg0;
     const result2 = [];
@@ -375,15 +319,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       result2.push([result0, result1]);
     }
     const ret = newFields(result2);
-    console.trace(`[module="wasi:http/types", function="new-fields"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   let memory0;
   
   function trampoline23(arg0, arg1) {
-    console.trace(`[module="wasi:http/types", function="fields-entries"] call fields=${arguments[0]}`);
     const ret = fieldsEntries(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="fields-entries"] return result=${toResultString(ret)}`);
     const vec3 = ret;
     const len3 = vec3.length;
     const result3 = realloc0(0, 0, 4, len3 * 16);
@@ -408,7 +349,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   let realloc0;
   
   function trampoline24(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) {
-    console.trace(`[module="wasi:http/types", function="new-outgoing-request"] call method=${arguments[0]}, path-with-query=${arguments[1]}, scheme=${arguments[2]}, authority=${arguments[3]}, headers=${arguments[4]}`);
     let variant1;
     switch (arg0) {
       case 0: {
@@ -556,19 +496,16 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
       }
     }
     const ret = newOutgoingRequest(variant1, variant3, variant6, variant8, arg13 >>> 0);
-    console.trace(`[module="wasi:http/types", function="new-outgoing-request"] return result=${toResultString(ret)}`);
     return toUint32(ret);
   }
   
   function trampoline25(arg0, arg1) {
-    console.trace(`[module="wasi:http/types", function="outgoing-request-write"] call request=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: outgoingRequestWrite(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:http/types", function="outgoing-request-write"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     switch (variant0.tag) {
       case 'ok': {
@@ -589,14 +526,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline26(arg0, arg1) {
-    console.trace(`[module="wasi:http/types", function="incoming-response-consume"] call response=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: incomingResponseConsume(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:http/types", function="incoming-response-consume"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     switch (variant0.tag) {
       case 'ok': {
@@ -617,9 +552,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline27(arg0, arg1) {
-    console.trace(`[module="wasi:http/types", function="future-incoming-response-get"] call f=${arguments[0]}`);
     const ret = futureIncomingResponseGet(arg0 >>> 0);
-    console.trace(`[module="wasi:http/types", function="future-incoming-response-get"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     if (variant6 === null || variant6=== undefined) {
       dataView(memory0).setInt8(arg1 + 0, 0, true);
@@ -689,14 +622,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline28(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:io/streams", function="read"] call this=${arguments[0]}, len=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="read"] return result=${toResultString(ret)}`);
     const variant3 = ret;
     switch (variant3.tag) {
       case 'ok': {
@@ -744,14 +675,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline29(arg0, arg1) {
-    console.trace(`[module="wasi:io/streams", function="check-write"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: checkWrite(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="check-write"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -792,14 +721,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline30(arg0, arg1) {
-    console.trace(`[module="wasi:io/streams", function="flush"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: flush(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="flush"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -839,12 +766,10 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline31(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:poll/poll", function="poll-oneoff"] call in=${arguments[0]}`);
     const ptr0 = arg0;
     const len0 = arg1;
     const result0 = new Uint32Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 4));
     const ret = pollOneoff(result0);
-    console.trace(`[module="wasi:poll/poll", function="poll-oneoff"] return result=${toResultString(ret)}`);
     const vec1 = ret;
     const len1 = vec1.length;
     const result1 = realloc0(0, 0, 1, len1 * 1);
@@ -857,9 +782,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline32(arg0) {
-    console.trace(`[module="wasi:filesystem/preopens", function="get-directories"] call `);
     const ret = getDirectories();
-    console.trace(`[module="wasi:filesystem/preopens", function="get-directories"] return result=${toResultString(ret)}`);
     const vec2 = ret;
     const len2 = vec2.length;
     const result2 = realloc1(0, 0, 4, len2 * 12);
@@ -878,23 +801,19 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   let realloc1;
   
   function trampoline33(arg0) {
-    console.trace(`[module="wasi:clocks/wall-clock", function="now"] call `);
     const ret = now$1();
-    console.trace(`[module="wasi:clocks/wall-clock", function="now"] return result=${toResultString(ret)}`);
     const {seconds: v0_0, nanoseconds: v0_1 } = ret;
     dataView(memory0).setBigInt64(arg0 + 0, toUint64(v0_0), true);
     dataView(memory0).setInt32(arg0 + 8, toUint32(v0_1), true);
   }
   
   function trampoline34(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:filesystem/types", function="read-via-stream"] call this=${arguments[0]}, offset=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: readViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="read-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -1075,14 +994,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline35(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:filesystem/types", function="write-via-stream"] call this=${arguments[0]}, offset=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: writeViaStream(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="write-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -1263,14 +1180,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline36(arg0, arg1) {
-    console.trace(`[module="wasi:filesystem/types", function="append-via-stream"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: appendViaStream(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="append-via-stream"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -1451,14 +1366,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline37(arg0, arg1) {
-    console.trace(`[module="wasi:filesystem/types", function="get-type"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: getType(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="get-type"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -1682,14 +1595,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline38(arg0, arg1) {
-    console.trace(`[module="wasi:filesystem/types", function="stat"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: stat(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="stat"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     switch (variant6.tag) {
       case 'ok': {
@@ -1925,7 +1836,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline39(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-    console.trace(`[module="wasi:filesystem/types", function="open-at"] call this=${arguments[0]}, path-flags=${arguments[1]}, path=${arguments[2]}, open-flags=${arguments[3]}, flags=${arguments[4]}, modes=${arguments[5]}`);
     if ((arg1 & 4294967294) !== 0) {
       throw new TypeError('flags have extraneous bits set');
     }
@@ -1969,7 +1879,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="open-at"] return result=${toResultString(ret)}`);
     const variant6 = ret;
     switch (variant6.tag) {
       case 'ok': {
@@ -2150,14 +2059,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline40(arg0, arg1) {
-    console.trace(`[module="wasi:filesystem/types", function="metadata-hash"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: metadataHash(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:filesystem/types", function="metadata-hash"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -2340,14 +2247,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline41(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:io/streams", function="read"] call this=${arguments[0]}, len=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: read(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="read"] return result=${toResultString(ret)}`);
     const variant3 = ret;
     switch (variant3.tag) {
       case 'ok': {
@@ -2395,14 +2300,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline42(arg0, arg1, arg2) {
-    console.trace(`[module="wasi:io/streams", function="blocking-read"] call this=${arguments[0]}, len=${arguments[1]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: blockingRead(arg0 >>> 0, BigInt.asUintN(64, arg1)) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="blocking-read"] return result=${toResultString(ret)}`);
     const variant3 = ret;
     switch (variant3.tag) {
       case 'ok': {
@@ -2450,7 +2353,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline43(arg0, arg1, arg2, arg3) {
-    console.trace(`[module="wasi:io/streams", function="write"] call this=${arguments[0]}, contents=${arguments[1]}`);
     const ptr0 = arg1;
     const len0 = arg2;
     const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
@@ -2460,7 +2362,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="write"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -2500,7 +2401,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline44(arg0, arg1, arg2, arg3) {
-    console.trace(`[module="wasi:io/streams", function="blocking-write-and-flush"] call this=${arguments[0]}, contents=${arguments[1]}`);
     const ptr0 = arg1;
     const len0 = arg2;
     const result0 = new Uint8Array(memory0.buffer.slice(ptr0, ptr0 + len0 * 1));
@@ -2510,7 +2410,6 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="blocking-write-and-flush"] return result=${toResultString(ret)}`);
     const variant2 = ret;
     switch (variant2.tag) {
       case 'ok': {
@@ -2550,14 +2449,12 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline45(arg0, arg1) {
-    console.trace(`[module="wasi:io/streams", function="blocking-flush"] call this=${arguments[0]}`);
     let ret;
     try {
       ret = { tag: 'ok', val: blockingFlush(arg0 >>> 0) };
     } catch (e) {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
-    console.trace(`[module="wasi:io/streams", function="blocking-flush"] return result=${toResultString(ret)}`);
     const variant1 = ret;
     switch (variant1.tag) {
       case 'ok': {
@@ -2597,9 +2494,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline46(arg0, arg1) {
-    console.trace(`[module="wasi:random/random", function="get-random-bytes"] call len=${arguments[0]}`);
     const ret = getRandomBytes(BigInt.asUintN(64, arg0));
-    console.trace(`[module="wasi:random/random", function="get-random-bytes"] return result=${toResultString(ret)}`);
     const val0 = ret;
     const len0 = val0.byteLength;
     const ptr0 = realloc1(0, 0, 1, len0 * 1);
@@ -2610,9 +2505,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline47(arg0) {
-    console.trace(`[module="wasi:cli/environment", function="get-environment"] call `);
     const ret = getEnvironment();
-    console.trace(`[module="wasi:cli/environment", function="get-environment"] return result=${toResultString(ret)}`);
     const vec3 = ret;
     const len3 = vec3.length;
     const result3 = realloc1(0, 0, 4, len3 * 16);
@@ -2633,9 +2526,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline48(arg0) {
-    console.trace(`[module="wasi:cli/environment", function="get-arguments"] call `);
     const ret = getArguments();
-    console.trace(`[module="wasi:cli/environment", function="get-arguments"] return result=${toResultString(ret)}`);
     const vec1 = ret;
     const len1 = vec1.length;
     const result1 = realloc1(0, 0, 4, len1 * 8);
@@ -2651,9 +2542,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline49(arg0) {
-    console.trace(`[module="wasi:cli/terminal-stdin", function="get-terminal-stdin"] call `);
     const ret = getTerminalStdin();
-    console.trace(`[module="wasi:cli/terminal-stdin", function="get-terminal-stdin"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2665,9 +2554,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline50(arg0) {
-    console.trace(`[module="wasi:cli/terminal-stdout", function="get-terminal-stdout"] call `);
     const ret = getTerminalStdout();
-    console.trace(`[module="wasi:cli/terminal-stdout", function="get-terminal-stdout"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2679,9 +2566,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }
   
   function trampoline51(arg0) {
-    console.trace(`[module="wasi:cli/terminal-stderr", function="get-terminal-stderr"] call `);
     const ret = getTerminalStderr();
-    console.trace(`[module="wasi:cli/terminal-stderr", function="get-terminal-stderr"] return result=${toResultString(ret)}`);
     const variant0 = ret;
     if (variant0 === null || variant0=== undefined) {
       dataView(memory0).setInt8(arg0 + 0, 0, true);
@@ -2874,9 +2759,7 @@ export async function instantiate(compileCore, imports, instantiateCore = WebAss
   }));
   
   function run() {
-    console.trace(`[module="wasi:cli/run", function="run"] call `);
     const ret = exports1['wasi:cli/run#run']();
-    console.trace(`[module="wasi:cli/run", function="run"] return result=${toResultString(ret)}`);
     let variant0;
     switch (ret) {
       case 0: {

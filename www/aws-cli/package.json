@@ -17,6 +17,6 @@
         "component/"
     ],
     "dependencies": {
-        "@bytecodealliance/preview2-shim": "https://gitpkg.now.sh/bytecodealliance/jco/packages/preview2-shim?177f295422db38ddd7853bd371fd096c6bb70965"
+        "@bytecodealliance/preview2-shim": "https://gitpkg.now.sh/bytecodealliance/jco/packages/preview2-shim?f2294ca77656d97317faa9bee688ec09993adf2b"
     }
 }
