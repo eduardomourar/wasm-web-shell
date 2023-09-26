@@ -35,11 +35,6 @@ jobs:
             .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
-      - name: Set up rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          default: true
-          override: true
       - name: Install cargo binstall
         if: steps.cache.outputs.cache-hit != 'true'
         uses: cargo-bins/cargo-binstall@v1.3.1
