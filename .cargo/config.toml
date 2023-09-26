@@ -1,0 +1,2 @@
+[alias]
+component = ["bin", "cargo-component"]

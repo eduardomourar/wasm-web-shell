@@ -42,7 +42,7 @@ aws-smithy-http = "0.56.1"
 aws-smithy-types = "0.56.1"
 aws-smithy-types-convert = "0.56.1"
 bytes = "1.4"
-cargo-component-bindings = { git = "https://github.com/bytecodealliance/cargo-component" }
+cargo-component-bindings = { workspace = true }
 futures = { version = "0.3.28" }
 http = { version = "0.2" }
 structopt = { version = "0.3", default-features = false }

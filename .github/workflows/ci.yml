@@ -25,7 +25,15 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+            .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Cache cargo run bin
+        uses: actions/cache@704facf57e6136b1bc63b828d79edcd491f0ee84 # v3
+        with:
+          path: |
+            .bin/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+
       - name: Set up rust toolchain
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # tag=v1
         with:
@@ -33,15 +41,16 @@ jobs:
           toolchain: stable
           override: true
           components: clippy,rustfmt
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked --force --git https://github.com/bytecodealliance/cargo-component --rev 075e5a99448403a0e9f3ef5e848102aa096e8f62
-      - name: Install wasmtime
-        run: cargo install wasmtime-cli --locked --force --features="component-model" --git https://github.com/bytecodealliance/wasmtime --rev 2ad057d735edc43f8ba89428d483f2b2430c1068
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install cargo-run-bin
+        run: cargo install cargo-run-bin --locked --git https://github.com/dustinblackman/cargo-run-bin --rev 7151499b4b47861f84c63b958af8cd36aa8648a9
       - name: Build WASI project
         working-directory: packages/aws-cli
         run: cargo component build --release
       - name: Build
-        run: cargo build
+        run: |
+          cargo build
+          cargo bin --install
       - name: Check formatting
         run: cargo fmt --all
       - name: Run clippy action to produce annotations
@@ -55,7 +64,7 @@ jobs:
         working-directory: packages/aws-cli
         run: |
           cargo check
-          export CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --dir /tmp -C cache=no -D debug-info -D log-to-files -W component-model -S preview2 -S common -S http"
+          export CARGO_TARGET_WASM32_WASI_RUNNER="cargo bin wasmtime --dir /tmp -C cache=no -D debug-info -D log-to-files -W component-model -S preview2 -S common -S http"
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
           export RUST_TEST_NOCAPTURE=1
           RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo component test
