@@ -622,7 +622,7 @@ dependencies = [
 [[package]]
 name = "cargo-component-bindings"
 version = "0.1.0"
-source = "git+https://github.com/bytecodealliance/cargo-component?rev=075e5a99448403a0e9f3ef5e848102aa096e8f62#075e5a99448403a0e9f3ef5e848102aa096e8f62"
+source = "git+https://github.com/bytecodealliance/cargo-component?rev=67d99610a7f29aee1419987ec412126490a31254#67d99610a7f29aee1419987ec412126490a31254"
 dependencies = [
  "cargo-component-macro",
  "wit-bindgen 0.12.0",
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "cargo-component-macro"
 version = "0.1.0"
-source = "git+https://github.com/bytecodealliance/cargo-component?rev=075e5a99448403a0e9f3ef5e848102aa096e8f62#075e5a99448403a0e9f3ef5e848102aa096e8f62"
+source = "git+https://github.com/bytecodealliance/cargo-component?rev=67d99610a7f29aee1419987ec412126490a31254#67d99610a7f29aee1419987ec412126490a31254"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
@@ -640,7 +640,7 @@ dependencies = [
  "wit-bindgen-core 0.12.0",
  "wit-bindgen-rust 0.12.0",
  "wit-bindgen-rust-lib 0.12.0",
- "wit-component 0.14.2",
+ "wit-component 0.14.4",
 ]
 
 [[package]]
@@ -709,7 +709,7 @@ dependencies = [
  "cranelift-entity 0.101.0 (git+https://github.com/bytecodealliance/wasmtime?rev=2ad057d735edc43f8ba89428d483f2b2430c1068)",
  "cranelift-isle",
  "gimli",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.1",
  "log",
  "regalloc2",
  "smallvec",
@@ -749,7 +749,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.101.0"
-source = "git+https://github.com/bytecodealliance/wasmtime#d127a14a93a1440a1f1049bb5079bf5e36280875"
+source = "git+https://github.com/bytecodealliance/wasmtime#270e92225da3acb5b0a583546b2d4598cb59ae2a"
 dependencies = [
  "serde",
  "serde_derive",
@@ -1154,7 +1154,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fb8d784f27acf97159b40fc4db5ecd8aa23b9ad5ef69cdd136d3bc80665f0c0"
 dependencies = [
  "fallible-iterator",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "stable_deref_trait",
 ]
 
@@ -1194,9 +1194,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c6201b9ff9fd90a5a3bac2e56a830d0caa509576f0e503818ee82c181b3437a"
+checksum = "7dfda62a12f55daeae5015f81b0baea145391cb4520f86c248fc615d72640d12"
 dependencies = [
  "ahash",
 ]
@@ -1369,12 +1369,12 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.0.0"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5477fe2230a79769d8dc68e0eabf5437907c0457a5614a9e8dddb67f65eb65d"
+checksum = "8adf3ddd720272c6ea8bf59463c04e0f93d0bbf7c5439b691bca2987e0270897"
 dependencies = [
  "equivalent",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.1",
  "serde",
 ]
 
@@ -1463,12 +1463,12 @@ dependencies = [
  "anyhow",
  "base64",
  "heck 0.4.1",
- "indexmap 2.0.0",
- "wasm-encoder 0.33.1",
+ "indexmap 2.0.2",
+ "wasm-encoder 0.33.2",
  "wasmtime-environ 14.0.0 (git+https://github.com/bytecodealliance/wasmtime)",
  "wit-bindgen-core 0.12.0",
- "wit-component 0.14.2",
- "wit-parser 0.11.1",
+ "wit-component 0.14.4",
+ "wit-parser 0.11.3",
 ]
 
 [[package]]
@@ -1500,9 +1500,9 @@ checksum = "9cdc71e17332e86d2e1d38c1f99edcb6288ee11b815fb1a4b049eaa2114d369b"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a9bad9f94746442c783ca431b22403b519cd7fbeed0533fdd6328b2f2212128"
+checksum = "3852614a3bd9ca9804678ba6be5e3b8ce76dfc902cae004e3e0c44051b6e88db"
 
 [[package]]
 name = "log"
@@ -1634,8 +1634,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cf5f9dd3933bd50a9e1f149ec995f39ae2c496d31fd772c1fd45ebc27e902b0"
 dependencies = [
  "crc32fast",
- "hashbrown 0.14.0",
- "indexmap 2.0.0",
+ "hashbrown 0.14.1",
+ "indexmap 2.0.2",
  "memchr",
 ]
 
@@ -1860,13 +1860,13 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.9.5"
+version = "1.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "697061221ea1b4a94a624f67d0ae2bfe4e22b8a17b6a192afb11046542cc8c47"
+checksum = "ebee201405406dbf528b8b672104ae6d6d63e6d118cb10e4d51abbc7b58044ff"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-automata 0.3.8",
+ "regex-automata 0.3.9",
  "regex-syntax 0.7.5",
 ]
 
@@ -1881,9 +1881,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2f401f4955220693b56f8ec66ee9c78abffd8d1c4f23dc41a23839eb88f0795"
+checksum = "59b23e92ee4318893fa3fe3e6fb365258efbfe6ac6ab30f090cdcbb7aa37efa9"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1940,9 +1940,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.14"
+version = "0.38.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "747c788e9ce8e92b12cd485c49ddf90723550b654b32508f979b71a7b1ecda4f"
+checksum = "d2f9da0cbd88f9f09e7814e388301c8414c51c62aa6ce1e4b5c551d49d96e531"
 dependencies = [
  "bitflags 2.4.0",
  "errno",
@@ -2047,9 +2047,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.7"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479fb9d862239e610720565ca91403019f2f00410f1864c5aa7479b950a76ed8"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -2058,9 +2058,9 @@ dependencies = [
 
 [[package]]
 name = "sharded-slab"
-version = "0.1.4"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "900fba806f70c630b0a382d0d825e17a0f19fcd059a2ade1ff237bcddf446b31"
+checksum = "c1b21f559e07218024e7e9f90f96f601825397de0e25420135f7f952453fed0b"
 dependencies = [
  "lazy_static",
 ]
@@ -2217,18 +2217,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.48"
+version = "1.0.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d6d7a740b8a666a7e828dd00da9c0dc290dff53154ea77ac109281de90589b7"
+checksum = "1177e8c6d7ede7afde3585fd2513e611227efd6481bd78d2e82ba1ce16557ed4"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.48"
+version = "1.0.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49922ecae66cc8a249b77e68d1d0623c1b2c514f0060c27cdc68bd62a1219d35"
+checksum = "10712f02019e9288794769fba95cd6847df9874d49d871d062172f9dd41bc4cc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2724,9 +2724,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.33.1"
+version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39de0723a53d3c8f54bed106cfbc0d06b3e4d945c5c5022115a61e3b29183ae"
+checksum = "34180c89672b3e4825c3a8db4b61a674f1447afd5fe2445b2d22c3d8b6ea086c"
 dependencies = [
  "leb128",
 ]
@@ -2738,7 +2738,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d51db59397fc650b5f2fc778e4a5c4456cd856bed7fc1ec15f8d3e28229dc463"
 dependencies = [
  "anyhow",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "serde",
  "serde_json",
  "spdx",
@@ -2748,17 +2748,17 @@ dependencies = [
 
 [[package]]
 name = "wasm-metadata"
-version = "0.10.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fab01638cbecc57afec7b53ce0e28620b44d7ae1dea53120c96dd08486c07ce"
+checksum = "577508d8a45bc54ad97efe77c95ba57bb10e7e5c5bac9c31295ce88b8045cd7d"
 dependencies = [
  "anyhow",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "serde",
  "serde_json",
  "spdx",
- "wasm-encoder 0.33.1",
- "wasmparser 0.113.1",
+ "wasm-encoder 0.33.2",
+ "wasmparser 0.113.2",
 ]
 
 [[package]]
@@ -2767,7 +2767,7 @@ version = "0.108.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76c956109dcb41436a39391139d9b6e2d0a5e0b158e1293ef352ec977e5e36c5"
 dependencies = [
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "semver",
 ]
 
@@ -2777,28 +2777,28 @@ version = "0.112.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e986b010f47fcce49cf8ea5d5f9e5d2737832f12b53ae8ae785bbe895d0877bf"
 dependencies = [
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "semver",
 ]
 
 [[package]]
 name = "wasmparser"
-version = "0.113.1"
+version = "0.113.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a128cea7b8516703ab41b10a0b1aa9ba18d0454cd3792341489947ddeee268db"
+checksum = "1fd0d44fab0bd78404e352f3399324eef76516a4580b52bc9031c60f064e98f3"
 dependencies = [
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "semver",
 ]
 
 [[package]]
 name = "wasmprinter"
-version = "0.2.66"
+version = "0.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2e5e818f88cee5311e9a5df15cba0a8f772978baf3109af97004bce6e8e3c6"
+checksum = "f6615a5587149e753bf4b93f90fa3c3f41c88597a7a2da72879afcabeda9648f"
 dependencies = [
  "anyhow",
- "wasmparser 0.113.1",
+ "wasmparser 0.113.2",
 ]
 
 [[package]]
@@ -2813,7 +2813,7 @@ dependencies = [
  "cfg-if",
  "encoding_rs",
  "fxprof-processed-profile",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "libc",
  "log",
  "object",
@@ -2878,7 +2878,7 @@ dependencies = [
  "syn 2.0.37",
  "wasmtime-component-util 14.0.0 (git+https://github.com/bytecodealliance/wasmtime?rev=2ad057d735edc43f8ba89428d483f2b2430c1068)",
  "wasmtime-wit-bindgen",
- "wit-parser 0.11.1",
+ "wit-parser 0.11.3",
 ]
 
 [[package]]
@@ -2889,7 +2889,7 @@ source = "git+https://github.com/bytecodealliance/wasmtime?rev=2ad057d735edc43f8
 [[package]]
 name = "wasmtime-component-util"
 version = "14.0.0"
-source = "git+https://github.com/bytecodealliance/wasmtime#d127a14a93a1440a1f1049bb5079bf5e36280875"
+source = "git+https://github.com/bytecodealliance/wasmtime#270e92225da3acb5b0a583546b2d4598cb59ae2a"
 
 [[package]]
 name = "wasmtime-cranelift"
@@ -2938,7 +2938,7 @@ dependencies = [
  "anyhow",
  "cranelift-entity 0.101.0 (git+https://github.com/bytecodealliance/wasmtime?rev=2ad057d735edc43f8ba89428d483f2b2430c1068)",
  "gimli",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "object",
  "serde",
@@ -2955,20 +2955,20 @@ dependencies = [
 [[package]]
 name = "wasmtime-environ"
 version = "14.0.0"
-source = "git+https://github.com/bytecodealliance/wasmtime#d127a14a93a1440a1f1049bb5079bf5e36280875"
+source = "git+https://github.com/bytecodealliance/wasmtime#270e92225da3acb5b0a583546b2d4598cb59ae2a"
 dependencies = [
  "anyhow",
  "cranelift-entity 0.101.0 (git+https://github.com/bytecodealliance/wasmtime)",
  "gimli",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "object",
  "serde",
  "serde_derive",
  "target-lexicon",
  "thiserror",
- "wasm-encoder 0.33.1",
- "wasmparser 0.113.1",
+ "wasm-encoder 0.33.2",
+ "wasmparser 0.113.2",
  "wasmprinter",
  "wasmtime-component-util 14.0.0 (git+https://github.com/bytecodealliance/wasmtime)",
  "wasmtime-types 14.0.0 (git+https://github.com/bytecodealliance/wasmtime)",
@@ -3043,7 +3043,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "encoding_rs",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "libc",
  "log",
  "mach",
@@ -3078,13 +3078,13 @@ dependencies = [
 [[package]]
 name = "wasmtime-types"
 version = "14.0.0"
-source = "git+https://github.com/bytecodealliance/wasmtime#d127a14a93a1440a1f1049bb5079bf5e36280875"
+source = "git+https://github.com/bytecodealliance/wasmtime#270e92225da3acb5b0a583546b2d4598cb59ae2a"
 dependencies = [
  "cranelift-entity 0.101.0 (git+https://github.com/bytecodealliance/wasmtime)",
  "serde",
  "serde_derive",
  "thiserror",
- "wasmparser 0.113.1",
+ "wasmparser 0.113.2",
 ]
 
 [[package]]
@@ -3176,8 +3176,8 @@ source = "git+https://github.com/bytecodealliance/wasmtime?rev=2ad057d735edc43f8
 dependencies = [
  "anyhow",
  "heck 0.4.1",
- "indexmap 2.0.0",
- "wit-parser 0.11.1",
+ "indexmap 2.0.2",
+ "wit-parser 0.11.3",
 ]
 
 [[package]]
@@ -3196,23 +3196,23 @@ dependencies = [
 
 [[package]]
 name = "wast"
-version = "65.0.1"
+version = "65.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd8c1cbadf94a0b0d1071c581d3cfea1b7ed5192c79808dd15406e508dd0afb"
+checksum = "a55a88724cf8c2c0ebbf32c8e8f4ac0d6aa7ba6d73a1cfd94b254aa8f894317e"
 dependencies = [
  "leb128",
  "memchr",
  "unicode-width",
- "wasm-encoder 0.33.1",
+ "wasm-encoder 0.33.2",
 ]
 
 [[package]]
 name = "wat"
-version = "1.0.73"
+version = "1.0.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3209e35eeaf483714f4c6be93f4a03e69aad5f304e3fa66afa7cb90fe1c8051f"
+checksum = "d83e1a8d86d008adc7bafa5cf4332d448699a08fcf2a715a71fbb75e2c5ca188"
 dependencies = [
- "wast 65.0.1",
+ "wast 65.0.2",
 ]
 
 [[package]]
@@ -3421,8 +3421,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f0371c47784e7559efb422f74473e395b49f7101725584e2673657e0b4fc104"
 dependencies = [
  "anyhow",
- "wit-component 0.14.2",
- "wit-parser 0.11.1",
+ "wit-component 0.14.4",
+ "wit-parser 0.11.3",
 ]
 
 [[package]]
@@ -3446,10 +3446,10 @@ checksum = "eeab5a09a85b1641690922ce05d79d868a2f2e78e9415a5302f58b9846fab8f1"
 dependencies = [
  "anyhow",
  "heck 0.4.1",
- "wasm-metadata 0.10.5",
+ "wasm-metadata 0.10.6",
  "wit-bindgen-core 0.12.0",
  "wit-bindgen-rust-lib 0.12.0",
- "wit-component 0.14.2",
+ "wit-component 0.14.4",
 ]
 
 [[package]]
@@ -3499,7 +3499,7 @@ dependencies = [
  "wit-bindgen-core 0.12.0",
  "wit-bindgen-rust 0.12.0",
  "wit-bindgen-rust-lib 0.12.0",
- "wit-component 0.14.2",
+ "wit-component 0.14.4",
 ]
 
 [[package]]
@@ -3510,7 +3510,7 @@ checksum = "253bd426c532f1cae8c633c517c63719920535f3a7fada3589de40c5b734e393"
 dependencies = [
  "anyhow",
  "bitflags 1.3.2",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "wasm-encoder 0.30.0",
  "wasm-metadata 0.9.0",
@@ -3520,21 +3520,21 @@ dependencies = [
 
 [[package]]
 name = "wit-component"
-version = "0.14.2"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af872ef43ecb73cc49c7bd2dd19ef9117168e183c78cf70000dca0e14b6a5473"
+checksum = "ee23614740bf871dac9856e3062c7a308506eb3f0a2759939ab8d0aa8436a1c0"
 dependencies = [
  "anyhow",
  "bitflags 2.4.0",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "serde",
  "serde_json",
- "wasm-encoder 0.33.1",
- "wasm-metadata 0.10.5",
- "wasmparser 0.113.1",
+ "wasm-encoder 0.33.2",
+ "wasm-metadata 0.10.6",
+ "wasmparser 0.113.2",
  "wat",
- "wit-parser 0.11.1",
+ "wit-parser 0.11.3",
 ]
 
 [[package]]
@@ -3545,7 +3545,7 @@ checksum = "541efa2046e544de53a9da1e2f6299e63079840360c9e106f1f8275a97771318"
 dependencies = [
  "anyhow",
  "id-arena",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "pulldown-cmark",
  "semver",
@@ -3555,13 +3555,13 @@ dependencies = [
 
 [[package]]
 name = "wit-parser"
-version = "0.11.1"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dcd022610436a1873e60bfdd9b407763f2404adf7d1cb57912c7ae4059e57a5"
+checksum = "a39edca9abb16309def3843af73b58d47d243fe33a9ceee572446bcc57556b9a"
 dependencies = [
  "anyhow",
  "id-arena",
- "indexmap 2.0.0",
+ "indexmap 2.0.2",
  "log",
  "pulldown-cmark",
  "semver",
@@ -3584,9 +3584,9 @@ dependencies = [
 
 [[package]]
 name = "xmlparser"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d25c75bf9ea12c4040a97f829154768bbbce366287e2dc044af160cd79a13fd"
+checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "zeroize"

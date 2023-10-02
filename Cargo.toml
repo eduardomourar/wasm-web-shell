@@ -19,7 +19,7 @@ opt-level = "s"
 strip = "debuginfo"
 
 [workspace.dependencies]
-cargo-component-bindings = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62" }
+cargo-component-bindings = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "67d99610a7f29aee1419987ec412126490a31254" }
 tokio = { version = "1.32.0", default-features = false }
 wasmtime = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068", features = [
     'component-model',
@@ -33,4 +33,4 @@ wasmtime-cli = { version = "14.0.0", git = "https://github.com/bytecodealliance/
 ], features = [
     "component-model",
 ] }
-cargo-component = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62", locked = true }
+cargo-component = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "82f2284a24684ed6667d99610a7f29aee1419987ec412126490a31254ada64dff1c07e2ff0d3c472", locked = true }
