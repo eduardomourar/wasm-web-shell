@@ -76,7 +76,17 @@ async fn run() -> anyhow::Result<()> {
     config.async_support(true);
 
     let engine = Engine::new(&config)?;
-    let component = Component::from_file(&engine, "../../target/wasm32-wasi/release/aws_cli.wasm")?;
+    let profile = if std::env::var("PROFILE") == Ok("debug".to_owned()) {
+        "debug"
+    } else {
+        "release"
+    };
+    let component_path = std::env::current_dir()?
+        .join("../../target")
+        .join("wasm32-wasi")
+        .join(profile)
+        .join("aws-cli.component.wasm");
+    let component = Component::from_file(&engine, component_path)?;
     let mut store = Store::new(&engine, Ctx { table, wasi, http });
     let mut linker = Linker::<Ctx>::new(&engine);
 
