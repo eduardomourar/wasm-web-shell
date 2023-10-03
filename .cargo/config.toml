@@ -1,2 +1,23 @@
 [alias]
 component = ["bin", "cargo-component"]
+
+[target.wasm32-wasi]
+runner = [
+    "cargo",
+    "bin",
+    "wasmtime",
+    "--dir",
+    "/tmp",
+    "-C",
+    "cache=no",
+    "-D",
+    "debug-info",
+    "-W",
+    "component-model",
+    "-S",
+    "preview2",
+    "-S",
+    "common",
+    "-S",
+    "http",
+]
