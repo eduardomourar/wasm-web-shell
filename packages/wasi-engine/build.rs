@@ -3,7 +3,15 @@ use std::{collections::HashMap, fs, io::Write, path::PathBuf};
 fn main() {
     let current_dir = std::env::current_dir().unwrap();
     let target_dir = current_dir.join("../../target");
-    let component_path = target_dir.join("wasm32-wasi/release/aws_cli.wasm");
+    let profile = if std::env::var("PROFILE") == Ok("debug".to_owned()) {
+        "debug"
+    } else {
+        "release"
+    };
+    let component_path = target_dir
+        .join("wasm32-wasi")
+        .join(profile)
+        .join("aws-cli.component.wasm");
     let component = fs::read(&component_path).unwrap();
 
     let import_map = HashMap::from([
@@ -26,7 +34,7 @@ fn main() {
         base64_cutoff: 5000_usize,
         tla_compat: false,
         valid_lifting_optimization: false,
-        tracing: std::env::var("PROFILE") == Ok("debug".to_owned()),
+        tracing: profile == "debug",
     };
 
     let transpiled = js_component_bindgen::transpile(&component, opts)

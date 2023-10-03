@@ -1,11 +1,11 @@
 package component:aws-cli
 
 world cli {
-  include wasi:cli/command
+  include wasi:cli/reactor
 
-  // We should replace all others with `include self.command`
-  // as soon as the unioning of worlds is available:
-  // https://github.com/WebAssembly/component-model/issues/169
   import wasi:logging/logging
   import wasi:http/outgoing-handler
+
+  // Done implicitly with building project as binary
+  // export wasi:cli/run
 }

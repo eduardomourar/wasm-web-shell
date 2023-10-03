@@ -1,0 +1,8 @@
+package component:wasi-http
+
+world reactor {
+  // include wasi:cli/reactor
+
+  // import wasi:logging/logging
+  import wasi:http/outgoing-handler
+}

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use std::task::{Context, Poll};
 use tower::Service;
 
-use wasi_preview2_prototype::http_client::DefaultClient;
+use wasi_http_preview2_component::http_client::DefaultClient;
 
 pub(crate) fn default_connector() -> impl Into<HttpConnector> {
     DynConnector::new(Adapter::default())

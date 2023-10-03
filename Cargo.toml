@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/aws-cli", "packages/wasi-engine"]
+members = ["packages/aws-cli", "packages/wasi-http", "packages/wasi-engine"]
 resolver = "2"
 
 [workspace.package]
@@ -19,7 +19,10 @@ opt-level = "s"
 strip = "debuginfo"
 
 [workspace.dependencies]
-cargo-component-bindings = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62" }
+anyhow = { version = "1.0" }
+bytes = { version = "1.5" }
+cargo-component-bindings = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "759c4776a3ef3cbeb7bc89970184da2744705eb4" }
+http = { version = "0.2" }
 tokio = { version = "1.32.0", default-features = false }
 wasmtime = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068", features = [
     'component-model',
@@ -28,9 +31,9 @@ wasmtime-wasi = { version = "14.0.0", git = "https://github.com/bytecodealliance
 wasmtime-wasi-http = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068" }
 
 [workspace.metadata.bin]
+cargo-component = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "759c4776a3ef3cbeb7bc89970184da2744705eb4", locked = true }
 wasmtime-cli = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068", locked = true, bins = [
     "wasmtime",
 ], features = [
     "component-model",
 ] }
-cargo-component = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62", locked = true }
