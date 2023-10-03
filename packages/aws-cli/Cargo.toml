@@ -28,8 +28,8 @@ path = "wit"
 ba-preview-registry = "https://preview-registry.bytecodealliance.org"
 # local = { path = "/Users/admin/.warg/registry" }
 
-[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dependencies]
-anyhow = "1.0"
+[dependencies]
+anyhow = { workspace = true }
 aws-config = { version = "0.56.1", default-features = false, features = [
     "rt-tokio",
 ] }
@@ -38,17 +38,15 @@ aws-smithy-client = "0.56.1"
 aws-smithy-http = "0.56.1"
 aws-smithy-types = "0.56.1"
 aws-smithy-types-convert = "0.56.1"
-bytes = "1.4"
+bytes = { workspace = true }
 cargo-component-bindings = { workspace = true }
 futures = { version = "0.3.28" }
-http = { version = "0.2" }
+http = { workspace = true }
 structopt = { version = "0.3", default-features = false }
 tower = "0.4.13"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
 tracing = { version = "0.1.37" }
-wasi-preview2-prototype = { git = "https://github.com/bytecodealliance/preview2-prototyping", rev = "ecfc05ae3b4bd0dd15eaa3aadd70ebdaabc6ea8c", features = [
-    "http-client",
-] }
+wasi-http-preview2-component = { path = "../wasi-http" }
 
-[target.'cfg(all(target_family = "wasm", target_os = "wasi"))'.dev-dependencies]
+[dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
