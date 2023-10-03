@@ -26,7 +26,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Cache cargo run bin
         uses: actions/cache@v3
@@ -41,9 +40,8 @@ jobs:
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
         run: cargo install cargo-run-bin --locked --git https://github.com/dustinblackman/cargo-run-bin --rev 7151499b4b47861f84c63b958af8cd36aa8648a9
-      - name: Build WASI project
-        working-directory: packages/aws-cli
-        run: cargo component build --release
+      - name: Build WebAssembly components
+        run: cargo component build --workspace --exclude wasi-engine
       - name: Build
         run: |
           cargo build
@@ -57,15 +55,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           use-cross: false
 
-      - name: Test WASI project
-        working-directory: packages/aws-cli
+      - name: Test WebAssembly components
         run: |
-          cargo check
-          export CARGO_TARGET_WASM32_WASI_RUNNER="cargo bin wasmtime --dir /tmp -C cache=no -D debug-info -D log-to-files -W component-model -S preview2 -S common -S http"
+          cargo component check --workspace --exclude wasi-engine
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
           export RUST_TEST_NOCAPTURE=1
-          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo component test
-          cat wasmtime.dbg.main
+          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo component test --workspace --exclude wasi-engine
 
   pr-success:
     needs:
