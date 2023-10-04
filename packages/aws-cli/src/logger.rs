@@ -3,12 +3,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 use tracing_subscriber::{
+    EnvFilter, Registry,
     filter::LevelFilter,
     fmt::Layer as FormatLayer,
     layer::Layered,
     prelude::*,
     reload::{Handle, Layer},
-    EnvFilter, Registry,
 };
 
 pub struct ReloadHandles<R = Registry, L = FormatLayer<R>, S = Layered<Layer<L, R>, R>> {
@@ -45,7 +45,7 @@ pub fn tracing() -> &'static ReloadHandles {
     })
 }
 
-pub fn set_level(level: usize) -> anyhow::Result<()> {
+pub fn set_level(level: u8) -> anyhow::Result<()> {
     let filter: LevelFilter = match level {
         0 => LevelFilter::OFF,
         1 => LevelFilter::ERROR,

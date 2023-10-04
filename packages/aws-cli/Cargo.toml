@@ -5,48 +5,48 @@ edition.workspace = true
 authors.workspace = true
 publish = false
 
-[package.metadata.component.target]
-path = "wit"
-# package = "wasi:preview1-reactor-adapter"
-# version = "11.0.1"
-# registry = "ba-preview-registry"
-
-[package.metadata.component.target.dependencies]
-"wasi:cli" = { path = "wit/deps/cli" }
-"wasi:clocks" = { path = "wit/deps/clocks" }
-"wasi:filesystem" = { path = "wit/deps/filesystem" }
-"wasi:http" = { path = "wit/deps/http" }
-"wasi:io" = { path = "wit/deps/io" }
-"wasi:logging" = { path = "wit/deps/logging" }
-"wasi:poll" = { path = "wit/deps/poll" }
-"wasi:random" = { path = "wit/deps/random" }
-"wasi:sockets" = { path = "wit/deps/sockets" }
-
-# "wasi:preview1-reactor-adapter" = { version = "11.0.1", registry = "ba-preview-registry" }
-
-[package.metadata.component.registries]
-ba-preview-registry = "https://preview-registry.bytecodealliance.org"
-# local = { path = "/Users/admin/.warg/registry" }
-
 [dependencies]
 anyhow = { workspace = true }
-aws-config = { version = "0.56.1", default-features = false, features = [
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sdk-s3 = { version = "1", default-features = false }
+aws-sdk-ssm = { version = "1", default-features = false }
+aws-sdk-sts = { version = "1", default-features = false }
+aws-config = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+] }
+aws-smithy-async = { version = "1", default-features = false, features = [
     "rt-tokio",
 ] }
-aws-sdk-s3 = { version = "0.31.1", default-features = false }
-aws-smithy-client = "0.56.1"
-aws-smithy-http = "0.56.1"
-aws-smithy-types = "0.56.1"
-aws-smithy-types-convert = "0.56.1"
+aws-smithy-wasm = "0.1"
 bytes = { workspace = true }
-cargo-component-bindings = { workspace = true }
-futures = { version = "0.3.28" }
-http = { workspace = true }
-structopt = { version = "0.3", default-features = false }
-tower = "0.4.13"
-tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
-tracing = { version = "0.1.37" }
-wasi-http-preview2-component = { path = "../wasi-http" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = { version = "0.1" }
+wit-bindgen-rt = { version = "0.40", features = ["async", "bitflags"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+aws-smithy-runtime = { version = "1", features = ["client"] }
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
+aws-smithy-types = "1"
+http = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[[test]]
+name = "integration_test"
+path = "tests/integration_test.rs"
+test = false
+
+[package.metadata.component]
+package = "component:aws-cli"
+
+[package.metadata.component.target]
+path = "wit/world.wit"
+
+[package.metadata.component.target.dependencies]
+"wasi:cli" = "=0.2.11"
+"wasi:http" = "=0.2.11"

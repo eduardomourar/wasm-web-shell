@@ -1,54 +1,26 @@
-import { importObject, WasiHttp } from "@bytecodealliance/preview2-shim";
+import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { instantiate } from "../component/aws.js";
 
 /** @type { Parameters<typeof import("../component/aws").instantiate>[0] } */
-async function compileCore(url, _imports) {
+const compileCore = async(url, _imports) => {
   return fetch(url).then(WebAssembly.compileStreaming);
-}
-
-function getEnvironment() {
-  return Object.entries({
-    AWS_API_KEY: "",
-  });
-}
-
-function getArguments() {
-  return [
-    "--verbose",
-    "--region",
-    "us-east-2"
-  ];
-}
-
-const wasiHttp = new WasiHttp();
-importObject["http"] = {
-  ...importObject["http"],
-  outgoingHandler: wasiHttp,
-  types: wasiHttp,
-};
-importObject["io"] = {
-  ...importObject["io"],
-  streams: {
-    ...importObject["io"]["streams"],
-    ...wasiHttp,
-  },
-};
-importObject["cli"] = {
-  ...importObject["cli"],
-  environment: {
-    getEnvironment,
-    getArguments,
-  },
 };
 
-async function initialize(imports = {}) {
+const initialize = async (credentialsProvider, config = {}) => {
+  const limitedShim = new WASIShim(config);
+  const importObject = limitedShim.getImportObject();
   return await instantiate(compileCore, {
     ...importObject,
-    ...imports,
+    ["component:aws-cli/credentials-provider"]: credentialsProvider,
   });
-}
+};
 
-export {
-  importObject as wasiImport,
-  initialize,
-}
+export { initialize };
+
+export * as cli from "@bytecodealliance/preview2-shim/cli";
+export * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
+export * as io from "@bytecodealliance/preview2-shim/io";
+export * as random from "@bytecodealliance/preview2-shim/random";
+export * as clocks from "@bytecodealliance/preview2-shim/clocks";
+export * as sockets from "@bytecodealliance/preview2-shim/sockets";
+export * as http from "@bytecodealliance/preview2-shim/http";

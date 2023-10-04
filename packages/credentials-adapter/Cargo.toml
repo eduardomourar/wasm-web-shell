@@ -1,0 +1,22 @@
+[package]
+name = "credentials-adapter"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.40", features = ["async", "bitflags"] }
+
+[package.metadata.component]
+package = "component:credentials-adapter"
+
+[package.metadata.component.target]
+path = "wit"
+
+[package.metadata.component.target.dependencies]
+"wasi:cli" = "=0.2.11"
+"wasi:http" = "=0.2.11"
+"component:aws-cli" = { path = "../aws-cli/wit" }

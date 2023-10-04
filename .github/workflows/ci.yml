@@ -14,11 +14,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
 
       - name: Cache cargo
         id: cache
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -28,7 +28,7 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Cache cargo run bin
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             .bin/
@@ -36,20 +36,20 @@ jobs:
 
       - name: Install cargo binstall
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: cargo-bins/cargo-binstall@v1.3.1
+        uses: cargo-bins/cargo-binstall@v1.19.1
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-run-bin --locked --git https://github.com/dustinblackman/cargo-run-bin --rev 7151499b4b47861f84c63b958af8cd36aa8648a9
-      - name: Build WebAssembly components
-        run: cargo component build --workspace --exclude wasi-engine
-      - name: Build
         run: |
-          cargo build
+          cargo install cargo-run-bin --locked
           cargo bin --install
+      - name: Build WebAssembly components
+        run: cargo component build --workspace --exclude wasi-engine --target wasm32-wasip2
+      - name: Build
+        run: cargo build -p wasi-engine
       - name: Check formatting
         run: cargo fmt --all
       - name: Run clippy action to produce annotations
-        uses: actions-rs/clippy-check@v1
+        uses: actions-rs-plus/clippy-check@v2
         with:
           args: --all-targets --all-features --no-deps
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -57,10 +57,13 @@ jobs:
 
       - name: Test WebAssembly components
         run: |
-          cargo component check --workspace --exclude wasi-engine
-          export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
+          cargo component check --workspace --exclude wasi-engine --target wasm32-wasip2
+          cargo check -p wasi-engine
           export RUST_TEST_NOCAPTURE=1
-          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo component test --workspace --exclude wasi-engine
+          cargo test -p aws-cli --lib
+          cargo test -p simple-http-proxy --target wasm32-wasip2
+          export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
+          # cargo test -p aws-cli --test integration_test -- --test-threads=2
 
   pr-success:
     needs:

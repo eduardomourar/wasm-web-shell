@@ -3,12 +3,9 @@
   "version": "0.0.1",
   "type": "module",
   "main": "dist/main.js",
-  "engines" : { 
-    "node" : "18"
-  },
-  "volta" : { 
-    "node" : "18.17.1",
-    "npm": "9.6.7"
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
   },
   "scripts": {
     "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
@@ -17,7 +14,7 @@
   },
   "dependencies": {
     "aws-cli-wasm": "file://./aws-cli",
-    "comlink": "^4.4.1",
+    "cookie-store": "^4.0.0-next.4",
     "local-echo": "github:wavesoft/local-echo",
     "native-file-system-adapter": "github:jimmywarting/native-file-system-adapter",
     "react": "^17.0.2",
@@ -35,8 +32,8 @@
     "style-loader": "^3.3.3",
     "ts-loader": "^9.4.4",
     "typescript": "^5.2.2",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1"
+    "webpack": "^5.107.2",
+    "webpack-cli": "^7.0.3",
+    "webpack-dev-server": "^5.2.4"
   }
 }
