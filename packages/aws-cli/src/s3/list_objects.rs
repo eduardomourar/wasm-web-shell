@@ -1,22 +1,17 @@
-use crate::commands::BaseOpts;
 use anyhow::{Error, Result};
-use aws_sdk_s3::{operation::list_objects_v2::ListObjectsV2Output, Client};
-use structopt::StructOpt;
+use aws_sdk_s3::Client;
+use clap::Args;
 
-#[derive(Debug, Clone, StructOpt)]
-#[structopt(name = "list-objects")]
+#[derive(Debug, Clone, Args)]
 pub struct ListObjects {
-    #[structopt(long)]
+    #[arg(long)]
     bucket: Option<String>,
-    #[structopt(long)]
+    #[arg(long)]
     delimiter: Option<String>,
-    #[structopt(long)]
+    #[arg(long)]
     prefix: Option<String>,
-    #[structopt(long)]
+    #[arg(long)]
     max_keys: Option<i32>,
-
-    #[structopt(flatten)]
-    pub base_opts: BaseOpts,
 }
 
 pub(crate) async fn list_objects(
@@ -28,46 +23,98 @@ pub(crate) async fn list_objects(
         max_keys,
         ..
     }: ListObjects,
-) -> Result<ListObjectsV2Output, Error> {
+) -> Result<serde_json::Value, Error> {
     tracing::trace!("Preparing ListObjects operation to AWS SDK");
     let operation = client
         .list_objects_v2()
         .bucket(bucket.unwrap_or("nara-national-archives-catalog".to_string()))
         .delimiter(delimiter.unwrap_or("/".to_string()))
         .set_prefix(prefix)
-        .set_max_keys(max_keys)
-        .customize()
-        .await?;
+        .set_max_keys(max_keys);
 
-    let resp = operation.send().await.map_err(anyhow::Error::from);
+    let resp = operation.send().await.map_err(anyhow::Error::from)?;
     tracing::trace!("Operation response {:?}", resp);
-    resp
+    let contents = resp
+        .contents()
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "eTag": v.e_tag(),
+                "lastModified": v.last_modified().map(|v| v.to_string()),
+                "key": v.key(),
+                "size": v.size(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({"contents": contents}))
 }
 
 #[cfg(test)]
 mod test {
-    use super::{list_objects, ListObjects};
-    use crate::commands::{build_client, BaseOpts};
+    use super::{ListObjects, list_objects};
+    use crate::test_utils::{
+        TestConfigBuilder, async_test, mock_s3_list_objects_response, replay_event,
+    };
 
-    #[tokio::test]
-    pub async fn s3_list_objects() {
-        let base_opts = BaseOpts {
-            region: Some("us-east-2".to_string()),
-            verbose: 0,
-        };
+    #[async_test]
+    async fn test_list_objects_success() {
+        // Create mock HTTP response with S3 XML
+        let mock_response = mock_s3_list_objects_response(&[
+            "authority-records/organization/file1.xml",
+            "authority-records/organization/file2.xml",
+        ]);
+
+        let config = TestConfigBuilder::new()
+            .replay_event(replay_event(200, mock_response))
+            .build()
+            .await;
+
+        let client = aws_sdk_s3::Client::new(&config);
+
         let result = list_objects(
-            &build_client(base_opts.clone()).await.unwrap(),
+            &client,
             ListObjects {
-                bucket: Some("nara-national-archives-catalog".to_string()),
+                bucket: Some("test-bucket".to_string()),
                 delimiter: Some("/".to_string()),
                 prefix: Some("authority-records/organization/".to_string()),
                 max_keys: Some(2),
-                base_opts,
             },
         )
         .await
         .unwrap();
-        let objects = result.contents().unwrap();
-        assert!(objects.len() > 1);
+
+        // Verify response contains expected keys
+        let result_str = result.to_string();
+        assert!(result_str.contains("file1.xml"));
+        assert!(result_str.contains("file2.xml"));
+    }
+
+    #[async_test]
+    async fn test_list_objects_empty() {
+        // Empty bucket response
+        let mock_response = mock_s3_list_objects_response(&[]);
+
+        let config = TestConfigBuilder::new()
+            .replay_event(replay_event(200, mock_response))
+            .build()
+            .await;
+
+        let client = aws_sdk_s3::Client::new(&config);
+
+        let result = list_objects(
+            &client,
+            ListObjects {
+                bucket: Some("empty-bucket".to_string()),
+                delimiter: None,
+                prefix: None,
+                max_keys: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Should return valid JSON even if empty
+        let result_str = result.to_string();
+        assert!(result_str.contains("[]") || result_str.contains("objects"));
     }
 }

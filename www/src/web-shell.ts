@@ -1,4 +1,3 @@
-import * as Comlink from "comlink";
 // @ts-ignore
 import WasmWebTerm from "wasm-webterm";
 import {
@@ -6,9 +5,8 @@ import {
   FileSystemDirectoryHandle,
 } from "native-file-system-adapter";
 import { ITerminalAddon, Terminal } from "xterm";
-import { retrieveCredentials } from "./credentials";
-import type { main } from "./aws-command";
-import { Descriptor } from "aws-cli/component/imports/wasi-filesystem-types";
+import { provideCredentials, setCredentials } from "./credentials";
+import { main as awsCommand } from "./aws-command";
 
 interface WasmFile {
   name: string;
@@ -54,33 +52,24 @@ export const webShell = (wasmBinaryPath: string) => {
     wasmWebTerm.registerJsCommand(
       "aws",
       async (argsv: any[], stdinPreset: any) => {
-        const credentials = retrieveCredentials();
-        const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
-        const awsCommand = Comlink.wrap(worker) as unknown as typeof main;
-
+        // await setCredentials();
+        const envVars = {};
         let output = "";
         await awsCommand(
           argsv,
-          Object.entries({
-            AWS_API_KEY: credentials.apiKey,
-          }),
-          Comlink.proxy((_message: any) => {}),
-          Comlink.proxy((message: any) => (output += message + "\n")),
-          Comlink.proxy((message: any) => (output += message + "\n")),
-          Comlink.proxy(() => {
-            let directories: [Descriptor, string][] = [];
-            let index = 1;
-            for (const file of wasmFiles) {
-              directories.push([index, file.name]);
-              index++;
-            }
-            return directories;
-          })
-        );
-
+          envVars,
+          (_message: any) => {},
+          (message: any) => (output += message),
+          (message: any) => (output += message),
+          Array.from(preOpened.keys()).reduce((acc, v) => {
+            acc[v] = v;
+            return acc;
+          }, {} as Record<string, string>),
+          {
+            provideCredentials,
+          }
+        ).catch(console.warn);
         await wasmWebTerm._waitForOutputPause();
-
-        worker.terminate();
 
         return output;
       }
@@ -191,18 +180,19 @@ export const webShell = (wasmBinaryPath: string) => {
   wasmWebTerm.printWelcomeMessage = () => {
     // Converted with: https://cloudapps.herokuapp.com/imagetoascii/
     let intro = `\x1b[38;2;101;79;240m
-  ****************VMNNNNNNMV****************\r
-  ******************IVVVVI******************\r
-  ******************************************\r
-  ******************************************\r
-  ******************************************\r
-  ******************************************\r
-  **********::*****::*****::****::::********\r
-  **********:..***:...***..:***..::.:*******\r
-  ***********:.:*:.::.:*..:***..:**:.:******\r
-  ************:...:**:...:***..::::::..*****\r
-  *************:::****:::***:::******:::****\r
-  ******************************************\r
+  **************VMNNNNNNMV***************\r
+  ****************IVVVVI*****************\r
+  ***************************************\r
+  ***************************************\r
+  ***************************************\r
+  ***************************************\r
+  ***************************************\r
+  ********::*****::*****::****::::*******\r
+  ********:..***:...***..:***..::.:******\r
+  *********:.:*:.::.:*..:***..:**:.:*****\r
+  **********:...:**:...:***..::::::..****\r
+  ***********:::****:::***:::******:::***\r
+  ***************************************\r
 \r
 \x1b[37m\r`;
 
@@ -221,10 +211,10 @@ export const webShell = (wasmBinaryPath: string) => {
       `Example usage:\r
 \r
     # To list object from Amazon S3 Bucket\r
-    aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 5\r
+    aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request\r
 
     # To save object from Amazon S3 Bucket to in-browser temporary file system (IndexDB)\r
-    aws s3 get-object --region us-east-1 --bucket pan-ukb-us-east-1 --key sumstats_release/results_full.mt/README.txt | tee /sandbox/readme.txt\r
+    aws s3 get-object --region us-east-1 --bucket pan-ukb-us-east-1 --key --no-sign-request sumstats_release/results_full.mt/README.txt | tee /sandbox/readme.txt\r
 \r
 A complete list of public S3 Buckets can be found at:\r
     https://registry.opendata.aws/\r

@@ -1,21 +1,17 @@
-use crate::commands::BaseOpts;
 use anyhow::{Error, Result};
 use aws_sdk_s3::Client;
-use structopt::StructOpt;
+use clap::Args;
+use std::fs::{File, create_dir_all};
+use std::io::Write;
 
-#[derive(Debug, Clone, StructOpt)]
-#[structopt(name = "get-object")]
+#[derive(Debug, Clone, Args)]
 pub struct GetObject {
-    #[structopt(long)]
+    #[arg(long)]
     bucket: String,
-    #[structopt(long)]
+    #[arg(long)]
     key: String,
 
-    #[structopt(parse(from_os_str))]
     outfile: Option<std::path::PathBuf>,
-
-    #[structopt(flatten)]
-    pub base_opts: BaseOpts,
 }
 
 pub(crate) async fn get_object(
@@ -28,24 +24,44 @@ pub(crate) async fn get_object(
     }: GetObject,
 ) -> Result<Option<Vec<u8>>, Error> {
     tracing::trace!("Preparing GetObject operation to AWS SDK");
-    let operation = client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .customize()
-        .await?;
-    let resp = operation.send().await.map_err(anyhow::Error::from)?;
+    let operation = client.get_object().bucket(bucket).key(key);
+    let mut resp = operation.send().await.map_err(anyhow::Error::from)?;
     tracing::trace!("Operation response {:?}", resp);
-    let content_length = resp.content_length() as usize;
-    let inner = resp.body.collect().await;
-    let body = inner.map_err(anyhow::Error::from)?.to_vec();
+    let content_length = resp.content_length().unwrap_or_default() as usize;
     Ok(match outfile {
         Some(value) => {
-            std::fs::write(&value, &body).map_err(anyhow::Error::from)?;
-            assert_eq!(content_length, body.len());
+            if let Some(parent) = value.parent() {
+                create_dir_all(parent).map_err(anyhow::Error::from)?;
+            };
+            let mut file = File::create(value)?;
+
+            // iterate over the stream and write to the file
+            let mut bytes_len = 0;
+            while let Some(v) = resp.body.next().await {
+                let chunk = v.map_err(anyhow::Error::from)?;
+                bytes_len += chunk.len();
+                file.write_all(&chunk).map_err(anyhow::Error::from)?;
+            }
+            if cfg!(debug_assertions) {
+                assert_eq!(content_length, bytes_len);
+            }
             None
         }
-        None => Some(body.to_vec()),
+        None => {
+            // let inner = resp.body.collect().await;
+            let mut body: Vec<u8> = Vec::new();
+            // iterate over the stream and write to the file
+            let mut bytes_len = 0;
+            while let Some(v) = resp.body.next().await {
+                let chunk = v.map_err(anyhow::Error::from)?;
+                bytes_len += chunk.len();
+                body.extend_from_slice(&chunk);
+            }
+            if cfg!(debug_assertions) {
+                assert_eq!(content_length, bytes_len);
+            }
+            Some(body)
+        }
     })
 }
 
@@ -53,51 +69,99 @@ pub(crate) async fn get_object(
 mod test {
     use std::path::PathBuf;
 
-    use super::{get_object, GetObject};
-    use crate::commands::{build_client, BaseOpts};
+    use super::{GetObject, get_object};
+    use crate::test_utils::{TestConfigBuilder, async_test, replay_event};
 
-    #[tokio::test]
-    pub async fn s3_get_object_to_file() {
-        let base_opts = BaseOpts {
-            region: Some("us-east-1".to_string()),
-            verbose: 0,
-        };
-        let output = PathBuf::from("/tmp/readme.txt");
-        let client = build_client(base_opts.clone()).await.unwrap();
+    #[async_test]
+    async fn test_get_object_to_file() {
+        let test_content = "This is test README content.\nLine 2 of the file.\n";
+
+        let config = TestConfigBuilder::new()
+            .region("us-east-1")
+            .replay_event(replay_event(200, test_content))
+            .build()
+            .await;
+
+        let client = aws_sdk_s3::Client::new(&config);
+
+        let output = PathBuf::from("/tmp/test-readme.txt");
+
         let result = get_object(
             &client,
             GetObject {
-                bucket: "pan-ukb-us-east-1".to_string(),
-                key: "sumstats_release/results_full.mt/README.txt".to_string(),
+                bucket: "test-bucket".to_string(),
+                key: "test-file.txt".to_string(),
                 outfile: Some(output.clone()),
-                base_opts,
             },
         )
         .await
         .unwrap();
-        assert!(output.exists());
+
+        // When writing to file, result should be None
         assert!(result.is_none());
+
+        // Verify file was created
+        assert!(output.exists());
+
+        // Verify content
+        let content = std::fs::read_to_string(&output).unwrap();
+        assert_eq!(content, test_content);
+
+        // Clean up
+        std::fs::remove_file(output).ok();
     }
 
-    #[tokio::test]
-    pub async fn s3_get_object_to_stdout() {
-        let base_opts = BaseOpts {
-            region: Some("us-east-1".to_string()),
-            verbose: 0,
-        };
-        let client = build_client(base_opts.clone()).await.unwrap();
+    #[async_test]
+    async fn test_get_object_to_stdout() {
+        let test_content = "{\"test\":\"data\"}\n";
+
+        let config = TestConfigBuilder::new()
+            .replay_event(replay_event(200, test_content))
+            .build()
+            .await;
+
+        let client = aws_sdk_s3::Client::new(&config);
+
         let result = get_object(
             &client,
             GetObject {
-                bucket: "genome-browser".to_string(),
-                key: "htdocs/index.html".to_string(),
+                bucket: "test-bucket".to_string(),
+                key: "test.jsonl".to_string(),
                 outfile: None,
-                base_opts,
             },
         )
         .await
         .unwrap()
         .unwrap();
-        assert!(result.len() > 1);
+
+        // Verify content returned (get_object returns Vec<u8>)
+        let result_str = String::from_utf8_lossy(&result);
+        assert_eq!(result_str, test_content);
+        assert!(result_str.contains("test"));
+        assert!(result_str.contains("data"));
+    }
+
+    #[async_test]
+    async fn test_get_object_empty() {
+        let config = TestConfigBuilder::new()
+            .replay_event(replay_event(200, ""))
+            .build()
+            .await;
+
+        let client = aws_sdk_s3::Client::new(&config);
+
+        let result = get_object(
+            &client,
+            GetObject {
+                bucket: "test-bucket".to_string(),
+                key: "empty.txt".to_string(),
+                outfile: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result, Vec::<u8>::new());
     }
 }

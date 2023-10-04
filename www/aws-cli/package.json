@@ -17,6 +17,7 @@
         "component/"
     ],
     "dependencies": {
-        "@bytecodealliance/preview2-shim": "https://gitpkg.now.sh/bytecodealliance/jco/packages/preview2-shim?f2294ca77656d97317faa9bee688ec09993adf2b"
+        "@aws-sdk/client-sts": "^3.1058.0",
+        "@bytecodealliance/preview2-shim": "^0.18.0"
     }
 }
