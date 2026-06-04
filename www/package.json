@@ -10,7 +10,10 @@
   "scripts": {
     "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
     "dev": "webpack --mode development",
-    "start": "ASSET_PATH='/' webpack serve"
+    "start": "ASSET_PATH='/' webpack serve",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
     "@xterm/xterm": "^6.0.0",
@@ -22,6 +25,7 @@
     "wasm-terminal": "file://./wasm-terminal"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "copy-webpack-plugin": "^14.0.0",
