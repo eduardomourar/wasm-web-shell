@@ -1,0 +1,26 @@
+{
+  "name": "wasm-terminal",
+  "version": "1.0.0",
+  "description": "xterm.js addon to run WASI Preview2 WebAssembly components",
+  "main": "src/index.ts",
+  "type": "module",
+  "keywords": [
+    "xterm.js",
+    "wasi",
+    "wasi-preview2",
+    "component-model",
+    "wasm",
+    "webassembly",
+    "terminal"
+  ],
+  "author": "wasm-web-shell",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "comlink": "^4.4.2",
+    "local-echo": "github:wavesoft/local-echo",
+    "pako": "^2.1.0",
+    "shell-quote": "^1.8.2"
+  }
+}

@@ -13,6 +13,11 @@ wasmtime.dbg.*
 
 .bin/
 
+node_modules/
+dist/
+**/src/**/*.js
+**/src/**/*.d.ts
+!www/src/global.d.ts
 tsconfig.tsbuildinfo
 
 .claude/settings.local.json
