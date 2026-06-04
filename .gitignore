@@ -17,6 +17,7 @@ dist/
 **/src/**/*.js
 **/src/**/*.d.ts
 !www/src/global.d.ts
+!www/wasm-terminal/src/types.d.ts
 
 # TypeScript cache
 *.tsbuildinfo

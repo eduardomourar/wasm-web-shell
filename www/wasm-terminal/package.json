@@ -13,14 +13,13 @@
     "webassembly",
     "terminal"
   ],
-  "author": "wasm-web-shell",
+  "author": "Eduardo Rodrigues <16357187+eduardomourar@users.noreply.github.com>",
   "license": "Apache-2.0",
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "comlink": "^4.4.2",
-    "local-echo": "github:wavesoft/local-echo",
-    "pako": "^2.1.0",
-    "shell-quote": "^1.8.2"
+    "local-echo": "file:../local-echo",
+    "pako": "^2.1.0"
   }
 }

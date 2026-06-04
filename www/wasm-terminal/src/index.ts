@@ -1,10 +1,10 @@
-import { Terminal, ITerminalAddon, ITerminalOptions } from "@xterm/xterm";
+import { Terminal, ITerminalAddon } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import LocalEcho from "local-echo";
 import { parse } from "shell-quote";
 
-import LineBuffer from "./line-buffer";
 import History from "./history";
+import LineBuffer from "./line-buffer";
 
 export interface WasmFile {
   name: string;
@@ -74,12 +74,12 @@ export default class WasmTerminal implements ITerminalAddon {
       this._xtermFitAddon?.fit();
     });
 
-    // Create xterm local echo addon
+    // Create xterm local echo addon (internalized with paste fix)
     this._xtermEcho = new LocalEcho(undefined, { historySize: 1000 });
     this._xtermEcho.activate(this._xterm);
 
     // Patch history controller
-    this._xtermEcho.history = new History(this._xtermEcho.history.size || 10);
+    this._xtermEcho.history = new History(this._xtermEcho.history?.size || 10);
 
     // Initialize stdout/stderr buffers - write directly to xterm to avoid circular calls
     this._stdoutBuffer = new LineBuffer((data) => {
@@ -111,13 +111,13 @@ export default class WasmTerminal implements ITerminalAddon {
 
     // Write welcome message to terminal
     const welcomeMsg = await this.printWelcomeMessage();
-    this._xterm.writeln(welcomeMsg, () => {
-      // Start REPL
-      this.repl();
+    this._xterm.writeln(welcomeMsg);
 
-      // Focus terminal cursor
-      setTimeout(() => this._xterm?.focus(), 1);
-    });
+    // Start REPL
+    this.repl();
+
+    // Focus terminal cursor
+    setTimeout(() => this._xterm?.focus(), 1);
   }
 
   async dispose(): Promise<void> {
