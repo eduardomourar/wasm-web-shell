@@ -1,29 +1,34 @@
-import { STSClient, GetSessionTokenCommand } from "@aws-sdk/client-sts";
-import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
+import { STSClient, GetSessionTokenCommand, type STSServiceException } from "@aws-sdk/client-sts";
+import { WASIShim, type WASIShimConfig } from "@bytecodealliance/preview2-shim/instantiation";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { instantiate } from "../component/aws.js";
+import { instantiate, type ImportObject, type Root } from "../component/aws.js";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** @type { Parameters<typeof import("../component/aws").instantiate>[0] } */
-const compileCore = async (url) => {
+const compileCore: Parameters<typeof instantiate>[0] = async (url) => {
   const fullPath = path.resolve(dirname, "../component", url);
   const bytes = await fs.readFile(fullPath);
   return WebAssembly.compile(bytes);
 };
 
+interface AWSCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
 const credentialsFromEnv =
   () =>
-  async () => {
+  async (): Promise<AWSCredentials> => {
     const accessKeyId = process.env["AWS_ACCESS_KEY_ID"];
     const secretAccessKey = process.env["AWS_SECRET_ACCESS_KEY"];
     const sessionToken = process.env["AWS_SESSION_TOKEN"];
     if (!accessKeyId || !secretAccessKey) {
       throw new Error("Credentials not available");
     }
-    const credentials = {
+    const credentials: AWSCredentials = {
       accessKeyId,
       secretAccessKey,
       ...(sessionToken && { sessionToken }),
@@ -39,26 +44,31 @@ const client = new STSClient({
 });
 
 const provideCredentials = async () => {
-  let { accessKeyId, secretAccessKey, sessionToken} = await defaultCredentialsProvider().catch(err => {
+  let { accessKeyId, secretAccessKey, sessionToken } = await defaultCredentialsProvider().catch((err) => {
     console.debug({ err });
     return Promise.reject({ tag: "credentials-not-loaded" });
-  });;
-  let expiryAfter;
+  });
+  let expiryAfter: bigint | undefined;
   if (!sessionToken) {
     try {
       const command = new GetSessionTokenCommand({
         DurationSeconds: 3600,
       });
       const { Credentials } = await client.send(command);
-      accessKeyId = Credentials.AccessKeyId;
-      secretAccessKey = Credentials.SecretAccessKey;
-      sessionToken = Credentials.SessionToken;
+      accessKeyId = Credentials!.AccessKeyId!;
+      secretAccessKey = Credentials!.SecretAccessKey!;
+      sessionToken = Credentials!.SessionToken!;
       if (Credentials?.Expiration) {
         expiryAfter = BigInt(Credentials.Expiration.valueOf());
       }
-    } catch(err) {
+    } catch (err) {
       console.debug({ err });
-      if (err instanceof STSServiceException && ["InvalidClientTokenId", "SignatureDoesNotMatch"].includes(err.name)) {
+      if (
+        err &&
+        typeof err === "object" &&
+        "name" in err &&
+        ["InvalidClientTokenId", "SignatureDoesNotMatch"].includes(err.name as string)
+      ) {
         throw { tag: "provider-error" };
       }
     }
@@ -72,7 +82,10 @@ const provideCredentials = async () => {
   };
 };
 
-const initialize = async (credentialsProvider, config = {}) => {
+export const initialize = async (
+  credentialsProvider: ImportObject["component:aws-cli/credentials-provider"],
+  config: Partial<WASIShimConfig> = {}
+): Promise<Root> => {
   config.sandbox = {
     preopens: {
       "/tmp": "/tmp",
@@ -104,14 +117,12 @@ const initialize = async (credentialsProvider, config = {}) => {
   return await instantiate(compileCore, {
     ...importObject,
     ["component:aws-cli/credentials-provider"]: credentialsProvider,
-  });
+  } as any);
 };
 
-export { initialize };
-
 export * as cli from "@bytecodealliance/preview2-shim/cli";
-export * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
 export * as io from "@bytecodealliance/preview2-shim/io";
+export * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
 export * as random from "@bytecodealliance/preview2-shim/random";
 export * as clocks from "@bytecodealliance/preview2-shim/clocks";
 export * as sockets from "@bytecodealliance/preview2-shim/sockets";
