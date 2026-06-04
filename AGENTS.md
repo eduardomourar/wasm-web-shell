@@ -4,14 +4,15 @@ This file provides guidance to AI Agents when working with code in this reposito
 
 ## Project Overview
 
-This is a WebAssembly-based web shell that runs AWS CLI commands directly in the browser. The AWS CLI is written in Rust, compiled to WebAssembly components using the WASI P2 standard, and executed both in the browser and via wasmtime for testing.
+This is a WebAssembly-based web shell that runs AWS CLI commands directly in the browser. The AWS CLI is written in Rust, compiled to WebAssembly components using the WASI Preview2 standard, and executed both in the browser and via wasmtime for testing.
 
 **Key Architecture:**
 
-- **Rust WASM Components**: AWS CLI compiled to `wasm32-wasip2` target
-- **Browser Execution**: Web terminal using xterm.js with WASM execution in Web Workers
+- **Rust WASM Components**: AWS CLI compiled to `wasm32-wasip2` target (WASI Preview2)
+- **Browser Execution**: Custom `wasm-terminal` addon for xterm.js v6 with WASI Preview2 support
 - **Native Testing**: wasmtime engine for running and testing components locally
 - **Build Pipeline**: JS bindings auto-generated from WASM components via `js-component-bindgen`
+- **Terminal**: TypeScript-based terminal addon focused on WASI Preview2 components
 
 ## Build Commands
 
@@ -72,13 +73,18 @@ npm run build
 
 ### Web Application (`www/`)
 
-- **Main entry**: `src/index.ts`
-- **Terminal UI**: `src/web-shell.ts` - integrates xterm.js with WASM execution
+- **Main entry**: `src/index.tsx` - React application with xterm.js integration
+- **Terminal UI**: `src/web-shell.ts` - integrates wasm-terminal with WASM execution
 - **AWS Commands**: `src/aws-command.ts` - bridges terminal to WASM component
+- **Terminal Package**: `wasm-terminal/` - Local TypeScript terminal addon
+  - `src/index.ts` - Main WasmTerminal class (WASI Preview2 focus)
+  - `src/LineBuffer.ts` - Line buffering for stdout/stderr
+  - `src/History.ts` - Command history management
+  - **Key Fix**: Resolved circular dependency causing stack overflow
 - **Component Package**: `aws-cli/` - npm package wrapping WASM component
   - `component/` - auto-generated JS bindings from `wasi-engine/build.rs`
-  - `src/index-browser.js` - browser-specific initialization
-  - `src/index.js` - Node.js compatibility
+  - `src/index-browser.ts` - browser-specific initialization (TypeScript)
+  - `src/index.ts` - Node.js compatibility (TypeScript)
 
 ## Development Workflow
 
@@ -122,14 +128,80 @@ The **critical build dependency** is `packages/wasi-engine/build.rs`:
 
 Build profile detection: `debug` vs `release` based on `cfg!(debug_assertions)`.
 
+## wasm-terminal Package
+
+### Structure
+
+```
+www/wasm-terminal/
+├── package.json          # TypeScript package for WASI Preview2
+├── README.md            # Usage documentation
+├── MIGRATION.md         # Migration guide from wasm-webterm
+└── src/
+    ├── index.ts         # Main WasmTerminal class
+    ├── LineBuffer.ts    # Line buffering (fixed circular dependency)
+    ├── History.ts       # Command history
+    └── types.d.ts       # Type definitions for dependencies
+```
+
+### Key Implementation Details
+
+**LineBuffer Fix:**
+The LineBuffer had a critical circular dependency bug causing stack overflow:
+
+```typescript
+// WRONG - Causes infinite recursion
+this._stdoutBuffer = new LineBuffer((data) => this._stdout(data));
+private _stdout(data: string) {
+  this._stdoutBuffer?.write(data); // ← Calls back to _stdout infinitely
+}
+
+// CORRECT - Direct output
+this._stdoutBuffer = new LineBuffer((data) => {
+  this._xterm?.write(data.replace(/\n/g, "\r\n")); // ← Direct to terminal
+});
+private _stdout(data: string) {
+  this._stdoutBuffer?.write(data); // ← No circular call
+}
+```
+
+**WASI Preview2 Component Loading:**
+```typescript
+async _getOrFetchWasmModule(programName: string): Promise<WasmModule> {
+  const response = await fetch(`${this.wasmBinaryPath}/${programName}.wasm`);
+  const wasmBinary = await response.arrayBuffer();
+  const module = await WebAssembly.compile(wasmBinary);
+  return { name: programName, type: "wasi-preview2", module };
+}
+```
+
+### Troubleshooting
+
+**Stack Overflow Error:**
+```
+RangeError: Maximum call stack size exceeded at LineBuffer
+```
+- **Cause**: Circular dependency in output functions
+- **Solution**: Already fixed in current implementation
+- **Prevention**: Never call `_stdout`/`_stderr` from within the LineBuffer callback
+
+**Module Not Found:**
+```
+Unable to find WASI component for command X
+```
+- Check that `.wasm` file exists in binaries directory
+- Verify WASM is valid with `wasm-tools validate`
+- Ensure it's a WASI Preview2 component: `wasm-tools component wit`
+
 ## Key Technical Constraints
 
-### WASI P2 and HTTP
+### WASI Preview2 and HTTP
 
-- Target: `wasm32-wasip2` (WASI Preview 2)
+- Target: `wasm32-wasip2` (WASI Preview 2, not WASI Preview 1)
 - HTTP requests use `wasi:http` interface via `aws-smithy-wasm` crate
 - wasmtime runner configured with `-S http` to enable HTTP support
 - Browser execution uses `@bytecodealliance/preview2-shim`
+- **Important**: This project does NOT support Emscripten-compiled modules
 
 ### Async Runtime
 
@@ -154,12 +226,47 @@ Release profile for `aws-cli` uses:
 
 ## Browser Integration
 
-The web shell registers AWS commands via `wasmWebTerm.registerJsCommand("aws", handler)`:
+### Terminal System (wasm-terminal)
 
-- Commands execute in a Web Worker for non-blocking execution
-- Uses Comlink for Worker communication
+The project uses a custom TypeScript terminal addon (`wasm-terminal`) built on xterm.js v6:
+
+**Key Features:**
+- WASI Preview2 component focus
+- Fixed circular dependency in LineBuffer (no more stack overflow)
+- Command registration via `wasmTerminal.registerJsCommand("aws", handler)`
+- Line buffering for proper stdout/stderr handling
+- Command history with arrow key navigation
+- Pipe support (`|` operator)
+
+**Integration:**
+```typescript
+const wasmTerminal = new WasmTerminal("./binaries");
+wasmTerminal.registerJsCommand("aws", async (argv) => {
+  // Execute WASI Preview2 component
+  await awsCommand(argv, ...);
+});
+```
+
+**File System:**
 - File system backed by IndexedDB via `native-file-system-adapter`
 - Pre-opened directories available at `/sandbox`
+- WASI filesystem interface compatible
+
+### Migration from wasm-webterm
+
+The project migrated from `wasm-webterm` (Wasmer + Emscripten) to `wasm-terminal` (WASI Preview2 only):
+
+**Removed:**
+- Wasmer WASI runtime (~500KB)
+- Emscripten-specific code
+- Web Worker complexity
+- WAPM package fetching
+
+**Benefits:**
+- Smaller bundle size (999KB vs 1.56MB)
+- Better type safety (full TypeScript)
+- Standard WASI Preview2 interface
+- No stack overflow bugs
 
 ## CI/CD
 

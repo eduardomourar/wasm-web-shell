@@ -1,32 +1,18 @@
-// @ts-ignore
-import WasmWebTerm from "wasm-webterm";
+import WasmTerminal from "wasm-terminal";
+import type { WasmFile } from "wasm-terminal";
 import {
   getOriginPrivateDirectory,
   FileSystemDirectoryHandle,
 } from "native-file-system-adapter";
-import { ITerminalAddon, Terminal } from "xterm";
 import { provideCredentials, setCredentials } from "./credentials";
 import { main as awsCommand } from "./aws-command";
 
-interface WasmFile {
-  name: string;
-  timestamp: number;
-  bytes: Uint8Array;
-}
-
-interface WasmModule {
-  name: string;
-  type: "emscripten" | "wasmer";
-  module?: WebAssembly.Module;
-  runtime?: Blob;
-}
-
 export const webShell = (wasmBinaryPath: string) => {
   let preOpened = new Map<string, FileSystemDirectoryHandle>();
-  let wasmWebTerm = new WasmWebTerm(wasmBinaryPath);
-  const wasmFiles: WasmFile[] = wasmWebTerm._wasmFsFiles;
+  let wasmTerminal = new WasmTerminal(wasmBinaryPath);
+  const wasmFiles: WasmFile[] = wasmTerminal._wasmFsFiles;
 
-  wasmWebTerm.onActivated = async () => {
+  wasmTerminal.onActivated = async () => {
     preOpened.set(
       "/sandbox",
       await getOriginPrivateDirectory(
@@ -40,18 +26,20 @@ export const webShell = (wasmBinaryPath: string) => {
       bytes: new Uint8Array(),
     });
 
-    wasmWebTerm.registerJsCommand("help", (argsv: any[], stdinPreset: any) => {
-      return Promise.resolve(`
-  Currently available commands:
-  
-      aws, cat, cp, coreutils, dirname, echo, env, ls, mkdir,
-      mv, printenv, printf, pwd, rm, tee, touch
-      `);
+    wasmTerminal.registerJsCommand("help", async (argsv: string[]) => {
+      return `
+Currently available commands:
+
+    aws
+
+Example usage:
+    aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request
+      `;
     });
 
-    wasmWebTerm.registerJsCommand(
+    wasmTerminal.registerJsCommand(
       "aws",
-      async (argsv: any[], stdinPreset: any) => {
+      async (argsv: string[], stdinPreset: string | null) => {
         // await setCredentials();
         const envVars = {};
         let output = "";
@@ -69,14 +57,14 @@ export const webShell = (wasmBinaryPath: string) => {
             provideCredentials,
           }
         ).catch(console.warn);
-        await wasmWebTerm._waitForOutputPause();
+        await wasmTerminal._waitForOutputPause();
 
         return output;
       }
     );
   };
 
-  wasmWebTerm.onFileSystemUpdate = async (files: WasmFile[]) => {
+  wasmTerminal.onFileSystemUpdate = async (files: WasmFile[]) => {
     await Promise.all(
       files
         .filter((file) => {
@@ -91,94 +79,7 @@ export const webShell = (wasmBinaryPath: string) => {
     );
   };
 
-  wasmWebTerm._getOrFetchWasmModule = (programName: string) => {
-    return new Promise(async (resolve, reject) => {
-      let wasmModule: WasmModule | undefined;
-      let wasmBinary: BufferSource | undefined;
-      let localBinaryFound = false;
-
-      // check if there is an initialized module already
-      wasmWebTerm._wasmModules.forEach((moduleObj: WasmModule) => {
-        if (moduleObj.name == programName) wasmModule = moduleObj;
-      });
-
-      // if a module was found -> resolve
-      if (wasmModule?.module instanceof WebAssembly.Module) resolve(wasmModule);
-      else
-        try {
-          // if none is found -> initialize a new one
-
-          // create wasm module object (to resolve and to store)
-          wasmModule = { name: programName, type: "wasmer", module: undefined };
-
-          // explanation: .lnk files can contain a different module/runtime name.
-          // this enables `echo` and `ls` to both use `coreutils.wasm`, for example.
-
-          // try to fetch .lnk file
-          const linkResponse = await fetch(
-            wasmWebTerm.wasmBinaryPath + "/" + programName + ".lnk"
-          );
-          if (linkResponse?.ok) {
-            // read new program name from .lnk file
-            const linkedProgramName = await linkResponse.text();
-            const linkDestination =
-              wasmWebTerm.wasmBinaryPath + "/" + linkedProgramName + ".wasm";
-
-            // try to fetch the new binary
-            const linkedBinaryResponse = await fetch(linkDestination);
-            if (linkedBinaryResponse?.ok) {
-              // read binary from response
-              wasmBinary = await linkedBinaryResponse.arrayBuffer();
-
-              // validate if linkedBinaryResponse contains a wasm binary
-              if (WebAssembly.validate(wasmBinary)) {
-                // local binary was found -> do not fetch wapm
-                localBinaryFound = true;
-              }
-            }
-          }
-
-          // if none was found or it was invalid -> try for a .wasm file
-          else {
-            // try to fetch local wasm binaries first
-            const localBinaryResponse = await fetch(
-              wasmWebTerm.wasmBinaryPath + "/" + programName + ".wasm"
-            );
-
-            if (localBinaryResponse?.ok) {
-              // read binary from response
-              wasmBinary = await localBinaryResponse.arrayBuffer();
-
-              // validate if linkedBinaryResponse contains a wasm binary
-              if (WebAssembly.validate(wasmBinary)) {
-                // local binary was found -> do not fetch wapm
-                localBinaryFound = true;
-              }
-            }
-          }
-
-          if (!localBinaryFound || !wasmBinary) {
-            return reject(
-              new Error(`unable to find wasm module for command ${programName}`)
-            );
-          }
-
-          // compile fetched bytes into wasm module
-          wasmModule.module = await WebAssembly.compile(wasmBinary);
-
-          // store compiled module
-          wasmWebTerm._wasmModules.push(wasmModule);
-
-          // continue execution
-          resolve(wasmModule);
-        } catch (e) {
-          reject(e);
-        }
-    });
-  };
-
-  wasmWebTerm.printWelcomeMessage = () => {
-    // Converted with: https://cloudapps.herokuapp.com/imagetoascii/
+  wasmTerminal.printWelcomeMessage = () => {
     let intro = `\x1b[38;2;101;79;240m
   **************VMNNNNNNMV***************\r
   ****************IVVVVI*****************\r
@@ -203,8 +104,7 @@ export const webShell = (wasmBinaryPath: string) => {
 
     intro +=
       "Commands: " +
-      Array.from<[string]>(wasmWebTerm.jsCommands)
-        .map((commandObj) => commandObj[0])
+      Array.from(wasmTerminal.jsCommands.keys())
         .sort()
         .join(", ") +
       ".\r\n\r\n" +
@@ -222,7 +122,7 @@ A complete list of public S3 Buckets can be found at:\r
     return Promise.resolve(intro);
   };
 
-  return wasmWebTerm;
+  return wasmTerminal;
 };
 
 const upsertFile = (files: WasmFile[], file: WasmFile) => {

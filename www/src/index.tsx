@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ITerminalAddon } from "xterm";
+import type { ITerminalAddon } from "@xterm/xterm";
 
 import "./index.css";
 import XTerm from "./xterm-for-react";

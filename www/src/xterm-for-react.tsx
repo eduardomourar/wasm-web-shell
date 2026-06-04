@@ -1,9 +1,9 @@
 import * as React from "react";
 
-import "xterm/css/xterm.css";
+import "@xterm/xterm/css/xterm.css";
 
-import { Terminal } from "xterm";
-import type { ITerminalOptions, ITerminalAddon } from "xterm";
+import { Terminal } from "@xterm/xterm";
+import type { ITerminalOptions, ITerminalAddon } from "@xterm/xterm";
 
 interface IProps {
 	/**
