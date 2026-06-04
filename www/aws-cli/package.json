@@ -2,14 +2,13 @@
     "name": "aws-cli-wasm",
     "version": "0.0.1",
     "scripts": {
-        "start": "node src/index.js"
+        "start": "node --experimental-wasm-jspi src/index.ts"
     },
     "type": "module",
-    "types": "src/index.d.ts",
     "exports": {
         ".": {
-            "node": "./src/index.js",
-            "default": "./src/index-browser.js"
+            "node": "./src/index.ts",
+            "default": "./src/index-browser.ts"
         }
     },
     "files": [
@@ -18,6 +17,9 @@
     ],
     "dependencies": {
         "@aws-sdk/client-sts": "^3.1058.0",
-        "@bytecodealliance/preview2-shim": "^0.18.0"
+        "@bytecodealliance/preview2-shim": "^0.18.1"
+    },
+    "devDependencies": {
+        "@types/node": "^25.9.1"
     }
 }

@@ -1,9 +1,10 @@
 {
   "compilerOptions": {
-    "target": "es5",
-    "module": "esnext",
+    "target": "ES2022",
+    "module": "ESNext",
     "declaration": true,
     "lib": ["dom", "dom.iterable", "esnext"],
+    "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -11,16 +12,18 @@
     "resolveJsonModule": true,
     "allowJs": true,
     "allowSyntheticDefaultImports": true,
-    "baseUrl": ".",
     "isolatedModules": true,
     "jsx": "react",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "noFallthroughCasesInSwitch": true,
     "noImplicitReturns": true,
     "noPropertyAccessFromIndexSignature": true,
     "incremental": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "paths": {
+      "aws-cli-wasm": ["./aws-cli/src/index-browser.ts"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "aws-cli/src/**/*.ts"],
   "exclude": ["node_modules"]
 }

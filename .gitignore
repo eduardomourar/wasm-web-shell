@@ -13,5 +13,7 @@ wasmtime.dbg.*
 
 .bin/
 
+tsconfig.tsbuildinfo
+
 .claude/settings.local.json
 .codesight/

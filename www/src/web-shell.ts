@@ -214,7 +214,7 @@ export const webShell = (wasmBinaryPath: string) => {
     aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request\r
 
     # To save object from Amazon S3 Bucket to in-browser temporary file system (IndexDB)\r
-    aws s3 get-object --region us-east-1 --bucket pan-ukb-us-east-1 --key --no-sign-request sumstats_release/results_full.mt/README.txt | tee /sandbox/readme.txt\r
+    aws s3 get-object --region us-east-1 --no-sign-request --bucket pan-ukb-us-east-1 --key sumstats_release/results_full.mt/README.txt | tee /sandbox/readme.txt\r
 \r
 A complete list of public S3 Buckets can be found at:\r
     https://registry.opendata.aws/\r
