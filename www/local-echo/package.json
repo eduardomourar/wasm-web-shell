@@ -1,0 +1,19 @@
+{
+  "name": "local-echo",
+  "version": "1.0.0",
+  "description": "Local echo controller for xterm.js with TypeScript support",
+  "main": "src/index.ts",
+  "type": "module",
+  "keywords": [
+    "xterm.js",
+    "terminal",
+    "readline",
+    "local-echo",
+    "typescript"
+  ],
+  "author": "Eduardo Rodrigues <16357187+eduardomourar@users.noreply.github.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/xterm": "^6.0.0"
+  }
+}

@@ -128,6 +128,54 @@ The **critical build dependency** is `packages/wasi-engine/build.rs`:
 
 Build profile detection: `debug` vs `release` based on `cfg!(debug_assertions)`.
 
+## local-echo Package
+
+Local echo controller for xterm.js - internalized TypeScript implementation.
+
+### Structure
+
+```
+www/local-echo/
+├── package.json         # TypeScript package for local echo
+├── LICENSE              # MIT license (from original local-echo project)
+├── README.md            # Usage documentation
+└── src/
+    ├── index.ts         # LocalEcho class implementation
+    └── index.d.ts       # Type definitions (auto-generated)
+```
+
+### Origin and Modifications
+
+This is a TypeScript rewrite of [local-echo](https://github.com/wavesoft/local-echo) by Ioannis Charalampidis (MIT License), with key modifications:
+
+- **TypeScript migration** - Full type safety and modern ES modules
+- **Paste fix** - Bulk insert for pasted content prevents visual duplication on long wrapped lines
+- **Cursor positioning fix** - Changed `col > maxCols` to `col >= maxCols` in `offsetToColRow` to fix cursor misalignment on line 3+
+- **xterm.js v6 API** - Updated for latest xterm API (removed old .on/.off event methods)
+- **Removed autocomplete** - Stripped out autocomplete functionality (not needed for this project)
+
+### Key Fixes
+
+1. **Paste handling** (lines 397-411 in index.ts):
+
+   ```typescript
+   // Detect paste (data.length > 3) and handle as bulk insert
+   if (data.length > 3 && data.charCodeAt(0) !== 0x1b) {
+     const cleanData = data.replace(/[\r\n]+/g, "");
+     this.handleCursorInsert(cleanData);
+     return;
+   }
+   ```
+
+2. **Cursor positioning** (lines 43-57):
+   ```typescript
+   // Fixed: wrap when col reaches maxCols (not col > maxCols)
+   if (col >= maxCols) {
+     col = 0;
+     row += 1;
+   }
+   ```
+
 ## wasm-terminal Package
 
 ### Structure
@@ -136,13 +184,17 @@ Build profile detection: `debug` vs `release` based on `cfg!(debug_assertions)`.
 www/wasm-terminal/
 ├── package.json          # TypeScript package for WASI Preview2
 ├── README.md            # Usage documentation
-├── MIGRATION.md         # Migration guide from wasm-webterm
+from wasm-webterm
 └── src/
     ├── index.ts         # Main WasmTerminal class
-    ├── LineBuffer.ts    # Line buffering (fixed circular dependency)
-    ├── History.ts       # Command history
+    ├── line-buffer.ts   # Line buffering (fixed circular dependency)
+    ├── history.ts       # Command history
     └── types.d.ts       # Type definitions for dependencies
 ```
+
+**Dependencies:**
+
+- Uses `local-echo` (file:../local-echo) for readline-like terminal interaction
 
 ### Key Implementation Details
 
@@ -166,6 +218,7 @@ private _stdout(data: string) {
 ```
 
 **WASI Preview2 Component Loading:**
+
 ```typescript
 async _getOrFetchWasmModule(programName: string): Promise<WasmModule> {
   const response = await fetch(`${this.wasmBinaryPath}/${programName}.wasm`);
@@ -178,17 +231,21 @@ async _getOrFetchWasmModule(programName: string): Promise<WasmModule> {
 ### Troubleshooting
 
 **Stack Overflow Error:**
+
 ```
 RangeError: Maximum call stack size exceeded at LineBuffer
 ```
+
 - **Cause**: Circular dependency in output functions
 - **Solution**: Already fixed in current implementation
 - **Prevention**: Never call `_stdout`/`_stderr` from within the LineBuffer callback
 
 **Module Not Found:**
+
 ```
 Unable to find WASI component for command X
 ```
+
 - Check that `.wasm` file exists in binaries directory
 - Verify WASM is valid with `wasm-tools validate`
 - Ensure it's a WASI Preview2 component: `wasm-tools component wit`
@@ -231,6 +288,7 @@ Release profile for `aws-cli` uses:
 The project uses a custom TypeScript terminal addon (`wasm-terminal`) built on xterm.js v6:
 
 **Key Features:**
+
 - WASI Preview2 component focus
 - Fixed circular dependency in LineBuffer (no more stack overflow)
 - Command registration via `wasmTerminal.registerJsCommand("aws", handler)`
@@ -239,6 +297,7 @@ The project uses a custom TypeScript terminal addon (`wasm-terminal`) built on x
 - Pipe support (`|` operator)
 
 **Integration:**
+
 ```typescript
 const wasmTerminal = new WasmTerminal("./binaries");
 wasmTerminal.registerJsCommand("aws", async (argv) => {
@@ -248,6 +307,7 @@ wasmTerminal.registerJsCommand("aws", async (argv) => {
 ```
 
 **File System:**
+
 - File system backed by IndexedDB via `native-file-system-adapter`
 - Pre-opened directories available at `/sandbox`
 - WASI filesystem interface compatible
@@ -257,12 +317,14 @@ wasmTerminal.registerJsCommand("aws", async (argv) => {
 The project migrated from `wasm-webterm` (Wasmer + Emscripten) to `wasm-terminal` (WASI Preview2 only):
 
 **Removed:**
+
 - Wasmer WASI runtime (~500KB)
 - Emscripten-specific code
 - Web Worker complexity
 - WAPM package fetching
 
 **Benefits:**
+
 - Smaller bundle size (999KB vs 1.56MB)
 - Better type safety (full TypeScript)
 - Standard WASI Preview2 interface
