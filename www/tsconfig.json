@@ -24,6 +24,6 @@
       "aws-cli-wasm": ["./aws-cli/src/index-browser.ts"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "aws-cli/src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "aws-cli/src/**/*.ts", "aws-cli/types.d.ts"],
   "exclude": ["node_modules"]
 }
