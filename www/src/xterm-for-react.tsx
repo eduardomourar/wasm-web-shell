@@ -104,7 +104,7 @@ export default class Xterm extends React.Component {
   /**
    * The ref for the containing element.
    */
-  terminalRef: React.RefObject<HTMLDivElement>;
+  terminalRef: React.RefObject<HTMLDivElement | null>;
 
   /**
    * XTerm.js Terminal object.
@@ -114,7 +114,7 @@ export default class Xterm extends React.Component {
   constructor(public props: IProps) {
     super(props);
 
-    this.terminalRef = React.createRef();
+    this.terminalRef = React.createRef<HTMLDivElement>();
 
     // Bind Methods
     this.onData = this.onData.bind(this);

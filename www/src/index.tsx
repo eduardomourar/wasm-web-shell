@@ -1,5 +1,5 @@
 import React from "react";
-import ReactDom from "react-dom";
+import { createRoot } from "react-dom/client";
 import type { ITerminalAddon } from "xterm";
 
 import "./index.css";
@@ -25,4 +25,8 @@ export class WebShellComponent extends React.Component {
 }
 
 // initialize web shell component
-ReactDom.render(<WebShellComponent />, document.getElementById("web-shell"));
+const container = document.getElementById("web-shell");
+if (container) {
+  const root = createRoot(container);
+  root.render(<WebShellComponent />);
+}
