@@ -13,12 +13,17 @@ wasmtime.dbg.*
 
 .bin/
 
-node_modules/
 dist/
 **/src/**/*.js
 **/src/**/*.d.ts
 !www/src/global.d.ts
-tsconfig.tsbuildinfo
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Playwright
+playwright-report
+test-results
 
 .claude/settings.local.json
 .codesight/
