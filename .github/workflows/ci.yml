@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: "${{ github.workspace }}/target"
     permissions:
       checks: write
       contents: read
@@ -25,7 +27,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
+            ${CARGO_TARGET_DIR}/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Cache cargo run bin
         uses: actions/cache@v5
@@ -35,17 +37,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
       - name: Install cargo binstall
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: cargo-bins/cargo-binstall@v1.19.1
+        uses: cargo-bins/cargo-binstall@v1.20.1
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          cargo install cargo-run-bin --locked
+          cargo binstall cargo-run-bin -y --locked
           cargo bin --install
-      - name: Build WebAssembly components
-        run: cargo component build --workspace --exclude wasi-engine --target wasm32-wasip2
       - name: Build
-        run: cargo build -p wasi-engine
+        run: |
+          CARGO_PROFILE_DEV_LTO=thin cargo component build --target wasm32-wasip2 --workspace --exclude wasi-engine
+          cargo build -p wasi-engine
       - name: Check formatting
         run: cargo fmt --all
       - name: Run clippy action to produce annotations
@@ -57,13 +58,13 @@ jobs:
 
       - name: Test WebAssembly components
         run: |
-          cargo component check --workspace --exclude wasi-engine --target wasm32-wasip2
+          CARGO_PROFILE_DEV_LTO=thin cargo component check --target wasm32-wasip2 --workspace --exclude wasi-engine
           cargo check -p wasi-engine
           export RUST_TEST_NOCAPTURE=1
           cargo test -p aws-cli --lib
           cargo test -p simple-http-proxy --target wasm32-wasip2
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
-          # cargo test -p aws-cli --test integration_test -- --test-threads=2
+          cargo test -p aws-cli --test integration_test -- --test-threads=2
 
   pr-success:
     needs:

@@ -6,8 +6,8 @@ use aws_smithy_wasm::wasi::WasiHttpClientBuilder;
 use clap::{ArgAction, Args};
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::bindings::component::aws_cli::credentials_provider::{
-    Credentials, CredentialsError, provide_credentials,
+use crate::bindings::component::aws_cli::providers::{
+    Credentials, CredentialsError, provide_credentials, provide_region,
 };
 
 const HOST_CREDENTIALS: &str = "Host";
@@ -53,7 +53,10 @@ impl From<CredentialsError> for aws_credential_types::provider::error::Credentia
 }
 
 #[derive(Debug, Default)]
-struct DefaultCredentialsProvider {}
+struct DefaultCredentialsProvider {
+    // Identifier for the AWS service to request credentials
+    service_id: Option<String>,
+}
 
 impl ProvideCredentials for DefaultCredentialsProvider {
     fn provide_credentials<'a>(
@@ -63,18 +66,22 @@ impl ProvideCredentials for DefaultCredentialsProvider {
         Self: 'a,
     {
         aws_credential_types::provider::future::ProvideCredentials::ready(
-            provide_credentials()
+            provide_credentials(self.service_id.as_deref())
                 .map(aws_credential_types::Credentials::from)
                 .map_err(aws_credential_types::provider::error::CredentialsError::from),
         )
+    }
+
+    fn fallback_on_interrupt(&self) -> Option<aws_credential_types::Credentials> {
+        None
     }
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct BaseOpts {
     /// The region to use. Overrides config/env settings.
-    #[arg(long, global = true, default_value_t = String::from("us-east-2"))]
-    pub region: String,
+    #[arg(long, global = true)]
+    pub region: Option<String>,
 
     /// Do not sign requests. Credentials will not be loaded if this argument is provided.
     #[arg(long, global = true, default_value_t = false)]
@@ -86,6 +93,7 @@ pub struct BaseOpts {
 }
 
 pub(crate) async fn build_config(
+    service_id: Option<String>,
     BaseOpts {
         region,
         no_sign_request,
@@ -96,24 +104,33 @@ pub(crate) async fn build_config(
 
     let http_client = WasiHttpClientBuilder::new().build();
 
-    let region_provider = RegionProviderChain::first_try(Region::new(region));
-    let region = region_provider
-        .region()
-        .await
-        .unwrap_or(Region::new("us-east-2"));
+    let region_provider = RegionProviderChain::first_try(Region::new(
+        provide_region(region.as_deref()).unwrap_or("us-east-1".to_string()),
+    ));
+    tracing::debug!("AWS client region: {:?}", region_provider.region().await);
 
     let mut base_config = aws_config::defaults(BehaviorVersion::latest())
         .http_client(http_client)
         .sleep_impl(TokioSleep::new())
+        .timeout_config(
+            aws_config::timeout::TimeoutConfig::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(60))
+                .operation_timeout(Duration::from_secs(120))
+                .operation_attempt_timeout(Duration::from_secs(90))
+                .build(),
+        )
+        .stalled_stream_protection(
+            aws_config::stalled_stream_protection::StalledStreamProtectionConfig::disabled(),
+        )
         .region(region_provider);
     base_config = if no_sign_request {
         base_config.no_credentials()
     } else {
-        base_config.credentials_provider(DefaultCredentialsProvider::default())
+        base_config.credentials_provider(DefaultCredentialsProvider { service_id })
     };
     let shared_config = base_config.load().await;
 
-    tracing::debug!("AWS client region: {:?}", region);
     tracing::debug!("AWS client config: {:?}", shared_config);
 
     Ok(shared_config)
@@ -129,7 +146,7 @@ mod test {
     impl Default for BaseOpts {
         fn default() -> Self {
             Self {
-                region: "us-east-2".to_string(),
+                region: Some("us-east-2".to_string()),
                 no_sign_request: false,
                 verbose: 0,
             }
@@ -143,7 +160,7 @@ mod test {
             ..
         }: BaseOpts,
     ) -> Result<SdkConfig, Error> {
-        let mut base_config = TestConfigBuilder::new().region(region);
+        let mut base_config = TestConfigBuilder::new().region(region.unwrap());
         if no_sign_request {
             base_config = base_config.no_credentials();
         }
@@ -160,7 +177,7 @@ mod test {
     #[async_test]
     async fn test_custom_region() {
         let config = build_config(BaseOpts {
-            region: "us-west-1".to_string(),
+            region: Some("us-west-1".to_string()),
             ..BaseOpts::default()
         })
         .await

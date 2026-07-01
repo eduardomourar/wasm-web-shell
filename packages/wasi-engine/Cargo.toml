@@ -13,5 +13,5 @@ wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
 
 [build-dependencies]
-js-component-bindgen = { version = "1.19.4" }
+js-component-bindgen = "2"
 wac-graph = "0.10"

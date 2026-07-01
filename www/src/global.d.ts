@@ -8,3 +8,6 @@ declare module "@xterm/xterm/css/xterm.css" {
   const content: any;
   export default content;
 }
+
+// Webpack public path override
+declare let __webpack_public_path__: string;

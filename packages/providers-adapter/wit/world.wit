@@ -1,0 +1,9 @@
+package component:providers-adapter;
+
+world adapter {
+    // Import WASI CLI environment interface to read env vars
+    import wasi:cli/environment@0.2.12;
+
+    // Export the credentials and region provider interface
+    export component:aws-cli/providers;
+}

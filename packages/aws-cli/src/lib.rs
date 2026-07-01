@@ -3,7 +3,36 @@ mod bindings;
 mod commands;
 mod config;
 mod logger;
+
+// Service modules
+mod apigatewayv2;
+mod athena;
+mod cloudfront;
+mod cloudtrail;
+mod cloudwatch;
+mod cognito_idp;
+mod configservice;
+mod dynamodb;
+mod ec2;
+mod ecs;
+mod efs;
+mod eks;
+mod elasticache;
+mod elbv2;
+mod events;
+mod glacier;
+mod iam;
+mod kms;
+mod lambda;
+mod logs;
+mod rds;
+mod redshift;
+mod route53;
 mod s3;
+mod s3api;
+mod secretsmanager;
+mod sns;
+mod sqs;
 mod ssm;
 mod sts;
 

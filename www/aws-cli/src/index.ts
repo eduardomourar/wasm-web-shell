@@ -1,4 +1,4 @@
-import { STSClient, GetSessionTokenCommand, type STSServiceException } from "@aws-sdk/client-sts";
+import { STSClient, GetSessionTokenCommand } from "@aws-sdk/client-sts";
 import { WASIShim, type WASIShimConfig } from "@bytecodealliance/preview2-shim/instantiation";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -40,12 +40,20 @@ const defaultCredentialsProvider = credentialsFromEnv();
 
 const client = new STSClient({
   credentials: defaultCredentialsProvider,
-  region: process.env["AWS_REGION"] ?? "us-east-1",
+  region: "us-east-1",
+  useGlobalEndpoint: true,
 });
+
+const provideRegion = async (region: string | undefined) => {
+  if (region) {
+    return region;
+  }
+  return process.env["AWS_REGION"] ?? process.env["AWS_DEFAULT_REGION"] ?? "us-east-1";
+};
 
 const provideCredentials = async () => {
   let { accessKeyId, secretAccessKey, sessionToken } = await defaultCredentialsProvider().catch((err) => {
-    console.debug({ err });
+    // console.debug(`[node provideCredentials defaultCredentialsProvider] ${err}`);
     return Promise.reject({ tag: "credentials-not-loaded" });
   });
   let expiryAfter: bigint | undefined;
@@ -62,7 +70,7 @@ const provideCredentials = async () => {
         expiryAfter = BigInt(Credentials.Expiration.valueOf());
       }
     } catch (err) {
-      console.debug({ err });
+      // console.debug(`[node provideCredentials getSessionToken] ${err}`);
       if (
         err &&
         typeof err === "object" &&
@@ -83,7 +91,7 @@ const provideCredentials = async () => {
 };
 
 export const initialize = async (
-  credentialsProvider: ImportObject["component:aws-cli/credentials-provider"],
+  providers: ImportObject["component:aws-cli/providers"],
   config: Partial<WASIShimConfig> = {}
 ): Promise<Root> => {
   config.sandbox = {
@@ -93,7 +101,7 @@ export const initialize = async (
     env: {},
     args: [
       "aws",
-      "s3",
+      "s3api",
       "list-objects",
       "-vvv",
       "--region",
@@ -116,19 +124,12 @@ export const initialize = async (
   const importObject = wasiShim.getImportObject();
   return await instantiate(compileCore, {
     ...importObject,
-    ["component:aws-cli/credentials-provider"]: credentialsProvider,
+    ["component:aws-cli/providers"]: providers,
   } as any);
 };
 
-export * as cli from "@bytecodealliance/preview2-shim/cli";
-export * as io from "@bytecodealliance/preview2-shim/io";
-export * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
-export * as random from "@bytecodealliance/preview2-shim/random";
-export * as clocks from "@bytecodealliance/preview2-shim/clocks";
-export * as sockets from "@bytecodealliance/preview2-shim/sockets";
-export * as http from "@bytecodealliance/preview2-shim/http";
-
 const command = await initialize({
   provideCredentials,
+  provideRegion,
 });
 await command.run.run();

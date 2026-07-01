@@ -1,4 +1,4 @@
-/** @module Interface wasi:filesystem/types@0.2.11 **/
+/** @module Interface wasi:filesystem/types@0.2.12 **/
 export type Filesize = bigint;
 export type InputStream = import('./wasi-io-streams.js').InputStream;
 /**
@@ -131,6 +131,10 @@ export interface MetadataHashValue {
   lower: bigint,
   upper: bigint,
 }
+export interface DirectoryEntry {
+  type: DescriptorType,
+  name: string,
+}
 
 export class Descriptor {
   /**
@@ -141,10 +145,20 @@ export class Descriptor {
   writeViaStream(offset: Filesize): OutputStream;
   appendViaStream(): OutputStream;
   getFlags(): DescriptorFlags;
+  readDirectory(): DirectoryEntryStream;
   createDirectoryAt(path: string): void;
   stat(): DescriptorStat;
   statAt(pathFlags: PathFlags, path: string): DescriptorStat;
   openAt(pathFlags: PathFlags, path: string, openFlags: OpenFlags, flags: DescriptorFlags): Descriptor;
+  unlinkFileAt(path: string): void;
   metadataHash(): MetadataHashValue;
   metadataHashAt(pathFlags: PathFlags, path: string): MetadataHashValue;
+}
+
+export class DirectoryEntryStream {
+  /**
+   * This type does not have a public constructor.
+   */
+  private constructor();
+  readDirectoryEntry(): DirectoryEntry | undefined;
 }

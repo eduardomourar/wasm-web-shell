@@ -1,0 +1,870 @@
+{
+  "qbusiness": {
+    "tbId": "amazonq/business",
+    "label": "Amazon Q Business"
+  },
+  "health-agent": {
+    "tbId": "connect-health",
+    "label": "Amazon Connect Health"
+  },
+  "iot": {
+    "tbId": "iotv2",
+    "label": "IoT Core"
+  },
+  "iottwinmaker": {
+    "tbId": "iottwinmaker",
+    "label": "IoT TwinMaker"
+  },
+  "ses": {
+    "tbId": "ses",
+    "label": "Amazon Simple Email Service"
+  },
+  "ram": {
+    "tbId": "ram",
+    "label": "Resource Access Manager"
+  },
+  "appstudio": {
+    "tbId": "appstudio",
+    "label": "AWS App Studio"
+  },
+  "globalaccelerator": {
+    "tbId": "globalaccelerator",
+    "label": "Global Accelerator"
+  },
+  "panorama": {
+    "tbId": "panorama",
+    "label": "AWS Panorama"
+  },
+  "mediatailor": {
+    "tbId": "mediatailor",
+    "label": "MediaTailor"
+  },
+  "route53": {
+    "tbId": "route53/v2",
+    "label": "Route 53"
+  },
+  "datatransferterminal": {
+    "tbId": "datatransferterminal",
+    "label": "AWS Data Transfer Terminal"
+  },
+  "codedeploy": {
+    "tbId": "codesuite/codedeploy",
+    "label": "CodeDeploy"
+  },
+  "route53resolver": {
+    "tbId": "route53resolver",
+    "label": "Route 53 Resolver"
+  },
+  "billingconductor": {
+    "tbId": "billingconductor",
+    "label": "AWS Billing Conductor"
+  },
+  "codebuild": {
+    "tbId": "codesuite/codebuild",
+    "label": "CodeBuild"
+  },
+  "securityagent": {
+    "tbId": "securityagent",
+    "label": "AWS Security Agent"
+  },
+  "connect": {
+    "tbId": "connect/v2",
+    "label": "Amazon Connect Customer"
+  },
+  "mq": {
+    "tbId": "amazon-mq",
+    "label": "Amazon MQ"
+  },
+  "sms-voice": {
+    "tbId": "sms-voice",
+    "label": "AWS End User Messaging SMS"
+  },
+  "dynamodb": {
+    "tbId": "dynamodb",
+    "label": "ddb"
+  },
+  "trustedadvisor": {
+    "tbId": "trustedadvisor",
+    "label": "Trusted Advisor"
+  },
+  "b2bi": {
+    "tbId": "b2bi",
+    "label": "AWS B2B Data Interchange"
+  },
+  "config": {
+    "tbId": "config",
+    "label": "AWS Config"
+  },
+  "resiliencehub": {
+    "tbId": "resiliencehub/v2",
+    "label": "AWS Resilience Hub"
+  },
+  "rds": {
+    "tbId": "rds",
+    "label": "Aurora and RDS"
+  },
+  "macie": {
+    "tbId": "macie",
+    "label": "Amazon Macie"
+  },
+  "appsync": {
+    "tbId": "appsync",
+    "label": "AWS AppSync"
+  },
+  "xray": {
+    "tbId": "xray",
+    "label": "X-Ray"
+  },
+  "acm": {
+    "tbId": "acm",
+    "label": "Certificate Manager"
+  },
+  "eks": {
+    "tbId": "eks",
+    "label": "Elastic Kubernetes Service"
+  },
+  "cloudfront": {
+    "tbId": "cloudfront/v4",
+    "label": "CloudFront"
+  },
+  "kinesis": {
+    "tbId": "kinesis",
+    "label": "Kinesis"
+  },
+  "cassandra": {
+    "tbId": "keyspaces/v2",
+    "label": "Amazon Keyspaces"
+  },
+  "frauddetector": {
+    "tbId": "frauddetector",
+    "label": "Amazon Fraud Detector"
+  },
+  "chime": {
+    "tbId": "chime-sdk",
+    "label": "Amazon Chime SDK"
+  },
+  "iotwireless": {
+    "tbId": "iotwireless",
+    "label": "AWS IoT Core for LoRaWAN"
+  },
+  "aidevops": {
+    "tbId": "aidevops",
+    "label": "AWS DevOps Agent"
+  },
+  "elasticmapreduce": {
+    "tbId": "emr",
+    "label": "EMR"
+  },
+  "iotevents": {
+    "tbId": "iotevents",
+    "label": "IoT Events"
+  },
+  "bedrock-mantle": {
+    "tbId": "bedrock-mantle",
+    "label": "Amazon Bedrock (mantle endpoint)"
+  },
+  "apprunner": {
+    "tbId": "apprunner",
+    "label": "AWS App Runner"
+  },
+  "kinesisanalytics": {
+    "tbId": "flink",
+    "label": "Managed Apache Flink"
+  },
+  "ssm-incidents": {
+    "tbId": "systems-manager/incidents",
+    "label": "Incident Manager"
+  },
+  "neptune-db": {
+    "tbId": "neptune",
+    "label": "Neptune"
+  },
+  "networkmanager": {
+    "tbId": "networkmanager",
+    "label": "Network Manager"
+  },
+  "scn": {
+    "tbId": "scn",
+    "label": "Amazon Connect Decisions"
+  },
+  "appconfig": {
+    "tbId": "systems-manager/appconfig",
+    "label": "AWS AppConfig"
+  },
+  "states": {
+    "tbId": "states",
+    "label": "Step Functions"
+  },
+  "greengrass": {
+    "tbId": "greengrass",
+    "label": "IoT Greengrass"
+  },
+  "redshift": {
+    "tbId": "redshiftv2",
+    "label": "Amazon Redshift"
+  },
+  "repostspace": {
+    "tbId": "repost-private",
+    "label": "AWS re:Post Private"
+  },
+  "managedblockchain": {
+    "tbId": "managedblockchain",
+    "label": "Amazon Managed Blockchain"
+  },
+  "waf": {
+    "tbId": "wafv2-pro",
+    "label": "WAF &amp; Shield"
+  },
+  "ivs": {
+    "tbId": "ivs",
+    "label": "Amazon Interactive Video Service"
+  },
+  "ec2:vpc": {
+    "tbId": "vpc",
+    "label": "VPC"
+  },
+  "profile": {
+    "tbId": "customer-profiles",
+    "label": "customer-profiles"
+  },
+  "route53globalresolver": {
+    "tbId": "route53globalresolver",
+    "label": "Amazon Route 53 Global Resolver"
+  },
+  "mgh": {
+    "tbId": "migrationhub",
+    "label": "AWS Migration Hub"
+  },
+  "backup": {
+    "tbId": "backup",
+    "label": "AWS Backup"
+  },
+  "servicecatalog": {
+    "tbId": "servicecatalog",
+    "label": "Service Catalog"
+  },
+  "eos": {
+    "tbId": "tnb",
+    "label": "AWS Telco Network Builder"
+  },
+  "dms": {
+    "tbId": "dms/v2",
+    "label": "Database Migration Service"
+  },
+  "elemental-inference": {
+    "tbId": "elemental-inference",
+    "label": "Elemental Inference"
+  },
+  "transcribe": {
+    "tbId": "transcribe",
+    "label": "Amazon Transcribe"
+  },
+  "es": {
+    "tbId": "aos",
+    "label": "Amazon OpenSearch Service"
+  },
+  "verifiedpermissions": {
+    "tbId": "verifiedpermissions",
+    "label": "Amazon Verified Permissions"
+  },
+  "groundstation": {
+    "tbId": "groundstation",
+    "label": "Ground Station"
+  },
+  "devicefarm": {
+    "tbId": "devicefarm",
+    "label": "Device Farm"
+  },
+  "cleanrooms": {
+    "tbId": "cleanrooms",
+    "label": "AWS Clean Rooms"
+  },
+  "signer": {
+    "tbId": "signer",
+    "label": "AWS Signer"
+  },
+  "cognito-identity": {
+    "tbId": "cognito/v2",
+    "label": "Cognito"
+  },
+  "resource-groups": {
+    "tbId": "resource-groups",
+    "label": "Resource Groups &amp; Tag Editor"
+  },
+  "fis": {
+    "tbId": "fis",
+    "label": "AWS FIS"
+  },
+  "grafana": {
+    "tbId": "grafana",
+    "label": "Amazon Grafana"
+  },
+  "cloudwatch": {
+    "tbId": "cloudwatch",
+    "label": "CloudWatch"
+  },
+  "secretsmanager": {
+    "tbId": "secretsmanager",
+    "label": "Secrets Manager"
+  },
+  "fsx": {
+    "tbId": "fsx",
+    "label": "FSx"
+  },
+  "amplify": {
+    "tbId": "amplify",
+    "label": "AWS Amplify"
+  },
+  "medialive": {
+    "tbId": "medialive",
+    "label": "MediaLive"
+  },
+  "auditmanager": {
+    "tbId": "auditmanager",
+    "label": "AWS Audit Manager"
+  },
+  "transform": {
+    "tbId": "transform",
+    "label": "AWS Transform"
+  },
+  "cloudformation": {
+    "tbId": "cloudformation",
+    "label": "CloudFormation"
+  },
+  "outposts": {
+    "tbId": "outposts",
+    "label": "AWS Outposts"
+  },
+  "timestream": {
+    "tbId": "timestream",
+    "label": "Amazon Timestream"
+  },
+  "workdocs": {
+    "tbId": "zocalo",
+    "label": "Amazon WorkDocs"
+  },
+  "discovery": {
+    "tbId": "discovery",
+    "label": "Application Discovery Service"
+  },
+  "codecommit": {
+    "tbId": "codecommit",
+    "label": "CodeCommit"
+  },
+  "sns": {
+    "tbId": "sns/v3",
+    "label": "Simple Notification Service"
+  },
+  "elasticbeanstalk": {
+    "tbId": "elasticbeanstalk",
+    "label": "Elastic Beanstalk"
+  },
+  "airflow": {
+    "tbId": "mwaa",
+    "label": "Managed Apache Airflow"
+  },
+  "proton": {
+    "tbId": "proton",
+    "label": "AWS Proton"
+  },
+  "mobiletargeting": {
+    "tbId": "pinpoint",
+    "label": "pinpoint"
+  },
+  "entityresolution": {
+    "tbId": "entityresolution",
+    "label": "AWS Entity Resolution"
+  },
+  "dsql": {
+    "tbId": "dsql",
+    "label": "Aurora DSQL"
+  },
+  "memorydb": {
+    "tbId": "memorydb",
+    "label": "Amazon MemoryDB"
+  },
+  "drs": {
+    "tbId": "drs",
+    "label": "AWS Elastic Disaster Recovery"
+  },
+  "claude-platform-on-aws": {
+    "tbId": "claude-platform",
+    "label": "Claude Platform on AWS"
+  },
+  "sustainability": {
+    "tbId": "sustainability",
+    "label": "AWS Sustainability"
+  },
+  "personalize": {
+    "tbId": "personalize",
+    "label": "Amazon Personalize"
+  },
+  "finops-agent": {
+    "tbId": "finops-agent",
+    "label": "AWS FinOps Agent"
+  },
+  "textract": {
+    "tbId": "textract",
+    "label": "Amazon Textract"
+  },
+  "activate": {
+    "tbId": "activate",
+    "label": "Activate for Startups"
+  },
+  "geo": {
+    "tbId": "location",
+    "label": "Amazon Location Service"
+  },
+  "databrew": {
+    "tbId": "databrew",
+    "label": "AWS Glue DataBrew"
+  },
+  "pcs": {
+    "tbId": "pcs",
+    "label": "Parallel Computing Service"
+  },
+  "codepipeline": {
+    "tbId": "codesuite/codepipeline",
+    "label": "CodePipeline"
+  },
+  "securityhub": {
+    "tbId": "securityhub/v2",
+    "label": "Security Hub"
+  },
+  "sqs": {
+    "tbId": "sqs/v3",
+    "label": "Simple Queue Service"
+  },
+  "compute-optimizer": {
+    "tbId": "compute-optimizer",
+    "label": "AWS Compute Optimizer"
+  },
+  "refactor-spaces": {
+    "tbId": "migrationhub/refactor-spaces",
+    "label": "Refactor Spaces"
+  },
+  "support": {
+    "tbId": "support",
+    "label": "Support"
+  },
+  "launchwizard": {
+    "tbId": "launchwizard",
+    "label": "Launch Wizard"
+  },
+  "inspector": {
+    "tbId": "inspector/v2",
+    "label": "Amazon Inspector"
+  },
+  "codeartifact": {
+    "tbId": "codesuite/codeartifact",
+    "label": "CodeArtifact"
+  },
+  "comprehend": {
+    "tbId": "comprehend",
+    "label": "Amazon Comprehend"
+  },
+  "docdb": {
+    "tbId": "docdb",
+    "label": "Amazon DocumentDB"
+  },
+  "glue": {
+    "tbId": "glue",
+    "label": "AWS Glue"
+  },
+  "iotdeviceadvisor": {
+    "tbId": "deviceadvisor",
+    "label": "AWS IoT Core Device Advisor"
+  },
+  "lambda": {
+    "tbId": "lambda",
+    "label": "Lambda"
+  },
+  "mgn": {
+    "tbId": "mgn",
+    "label": "AWS Transform MGN"
+  },
+  "dataexchange": {
+    "tbId": "dataexchange",
+    "label": "AWS Data Exchange"
+  },
+  "machinelearning": {
+    "tbId": "machinelearning",
+    "label": "Amazon Machine Learning"
+  },
+  "guardduty": {
+    "tbId": "guardduty",
+    "label": "GuardDuty"
+  },
+  "events": {
+    "tbId": "events",
+    "label": "Amazon EventBridge"
+  },
+  "sagemaker": {
+    "tbId": "sagemaker",
+    "label": "Amazon SageMaker AI"
+  },
+  "mediaconnect": {
+    "tbId": "mediaconnect",
+    "label": "MediaConnect"
+  },
+  "s3": {
+    "tbId": "s3",
+    "label": "S3"
+  },
+  "lakeformation": {
+    "tbId": "lakeformation",
+    "label": "AWS Lake Formation"
+  },
+  "serverlessrepo": {
+    "tbId": "serverlessrepo",
+    "label": "Serverless Application Repository"
+  },
+  "forecast": {
+    "tbId": "forecast",
+    "label": "Amazon Forecast"
+  },
+  "nova-act": {
+    "tbId": "nova-act",
+    "label": "Amazon Nova Act"
+  },
+  "mediapackage": {
+    "tbId": "mediapackage",
+    "label": "MediaPackage"
+  },
+  "servicediscovery": {
+    "tbId": "cloudmap",
+    "label": "AWS Cloud Map"
+  },
+  "athena": {
+    "tbId": "athena",
+    "label": "Athena"
+  },
+  "notifications": {
+    "tbId": "notifications",
+    "label": "AWS User Notifications"
+  },
+  "wickr": {
+    "tbId": "wickr",
+    "label": "AWS Wickr"
+  },
+  "partnercentral": {
+    "tbId": "partnercentral",
+    "label": "AWS Partner Central"
+  },
+  "finspace": {
+    "tbId": "finspace",
+    "label": "Amazon FinSpace"
+  },
+  "iam": {
+    "tbId": "iam",
+    "label": "IAM"
+  },
+  "workmail": {
+    "tbId": "workmail/v2",
+    "label": "Amazon WorkMail"
+  },
+  "ssm": {
+    "tbId": "systems-manager",
+    "label": "Systems Manager"
+  },
+  "ds": {
+    "tbId": "directoryservicev2",
+    "label": "Directory Service"
+  },
+  "bedrock": {
+    "tbId": "bedrock",
+    "label": "Amazon Bedrock"
+  },
+  "appflow": {
+    "tbId": "appflow",
+    "label": "Amazon AppFlow"
+  },
+  "swf": {
+    "tbId": "swf/v2",
+    "label": "SWF"
+  },
+  "autoscaling": {
+    "tbId": "ec2autoscaling",
+    "label": "EC2 Autoscaling"
+  },
+  "iotsitewise": {
+    "tbId": "iotsitewise",
+    "label": "IoT SiteWise"
+  },
+  "workspaces-web": {
+    "tbId": "workspaces-web",
+    "label": "WorkSpaces Secure Browser"
+  },
+  "workspaces": {
+    "tbId": "workspaces/v2",
+    "label": "WorkSpaces"
+  },
+  "elasticache": {
+    "tbId": "elasticache",
+    "label": "ElastiCache"
+  },
+  "firehose": {
+    "tbId": "firehose",
+    "label": "Amazon Data Firehose"
+  },
+  "storagegateway": {
+    "tbId": "storagegateway",
+    "label": "Storage Gateway"
+  },
+  "batch": {
+    "tbId": "batch",
+    "label": "Batch"
+  },
+  "cloudtrail": {
+    "tbId": "cloudtrailv2",
+    "label": "CloudTrail"
+  },
+  "rtbfabric": {
+    "tbId": "rtbfabric",
+    "label": "RTB Fabric"
+  },
+  "gameliftstreams": {
+    "tbId": "gameliftstreams",
+    "label": "Amazon GameLift Streams"
+  },
+  "amazonq": {
+    "tbId": "amazonq",
+    "label": "Amazon Q"
+  },
+  "polly": {
+    "tbId": "polly",
+    "label": "Amazon Polly"
+  },
+  "license-manager": {
+    "tbId": "license-manager",
+    "label": "AWS License Manager"
+  },
+  "acm-pca": {
+    "tbId": "acm-pca",
+    "label": "AWS Private Certificate Authority"
+  },
+  "comprehendmedical": {
+    "tbId": "comprehendmedical",
+    "label": "Amazon Comprehend Medical"
+  },
+  "payment-cryptography": {
+    "tbId": "payment-cryptography",
+    "label": "AWS Payment Cryptography"
+  },
+  "wellarchitected": {
+    "tbId": "wellarchitected",
+    "label": "AWS Well-Architected Tool"
+  },
+  "kendra": {
+    "tbId": "kendra",
+    "label": "Amazon Kendra"
+  },
+  "healthlake": {
+    "tbId": "healthlake",
+    "label": "AWS HealthLake"
+  },
+  "lightsail": {
+    "tbId": "lightsail",
+    "label": "Lightsail"
+  },
+  "cloudsearch": {
+    "tbId": "cloudsearchv2",
+    "label": "CloudSearch"
+  },
+  "sqlworkbench": {
+    "tbId": "sqlworkbench",
+    "label": "Redshift query editor v2"
+  },
+  "lex": {
+    "tbId": "lexv2",
+    "label": "Amazon Lex"
+  },
+  "braket": {
+    "tbId": "braket",
+    "label": "Amazon Braket"
+  },
+  "artifact": {
+    "tbId": "artifact/v2",
+    "label": "AWS Artifact"
+  },
+  "ce": {
+    "tbId": "cost-reports",
+    "label": "AWS Cost Explorer"
+  },
+  "odb": {
+    "tbId": "odb",
+    "label": "Oracle Database@AWS"
+  },
+  "cloudshell": {
+    "tbId": "cloudshell",
+    "label": "CloudShell"
+  },
+  "sso": {
+    "tbId": "singlesignon",
+    "label": "IAM Identity Center"
+  },
+  "devops-guru": {
+    "tbId": "devops-guru",
+    "label": "Amazon DevOps Guru"
+  },
+  "apigateway": {
+    "tbId": "apigateway",
+    "label": "API Gateway"
+  },
+  "lookoutequipment": {
+    "tbId": "lookoutequipment",
+    "label": "Amazon Lookout for Equipment"
+  },
+  "appmesh": {
+    "tbId": "appmesh",
+    "label": "AWS App Mesh"
+  },
+  "resource-explorer-2": {
+    "tbId": "resource-explorer",
+    "label": "AWS Resource Explorer"
+  },
+  "aps": {
+    "tbId": "prometheus",
+    "label": "Amazon Prometheus"
+  },
+  "biodiscovery": {
+    "tbId": "biodiscovery",
+    "label": "Amazon Bio Discovery"
+  },
+  "kinesisvideo": {
+    "tbId": "kinesisvideo",
+    "label": "Kinesis Video Streams"
+  },
+  "kms": {
+    "tbId": "kms",
+    "label": "Key Management Service"
+  },
+  "cloudhsm": {
+    "tbId": "cloudhsm",
+    "label": "CloudHSM"
+  },
+  "codeguru": {
+    "tbId": "codeguru",
+    "label": "Amazon CodeGuru"
+  },
+  "directconnect": {
+    "tbId": "directconnect/v2",
+    "label": "Direct Connect"
+  },
+  "ec2": {
+    "tbId": "ec2",
+    "label": "EC2"
+  },
+  "monitron": {
+    "tbId": "monitron",
+    "label": "Amazon Monitron"
+  },
+  "chatbot": {
+    "tbId": "chatbot",
+    "label": "Amazon Q Developer in chat applications (previously AWS Chatbot)"
+  },
+  "gamelift": {
+    "tbId": "gameliftservers",
+    "label": "Amazon GameLift Servers"
+  },
+  "appstream": {
+    "tbId": "appstream2",
+    "label": "WorkSpaces Applications"
+  },
+  "iotfleetwise": {
+    "tbId": "iotfleetwise",
+    "label": "AWS IoT FleetWise"
+  },
+  "kafka": {
+    "tbId": "msk",
+    "label": "MSK"
+  },
+  "translate": {
+    "tbId": "translate",
+    "label": "Amazon Translate"
+  },
+  "ecs": {
+    "tbId": "ecs/v2",
+    "label": "Elastic Container Service"
+  },
+  "ecr": {
+    "tbId": "ecr",
+    "label": "Elastic Container Registry"
+  },
+  "ec2:ipam": {
+    "tbId": "ipam",
+    "label": "ipam"
+  },
+  "controltower": {
+    "tbId": "controltower",
+    "label": "Control Tower"
+  },
+  "cloud9": {
+    "tbId": "cloud9",
+    "label": "Cloud9"
+  },
+  "detective": {
+    "tbId": "detective",
+    "label": "Detective"
+  },
+  "transfer": {
+    "tbId": "transfer",
+    "label": "AWS Transfer Family"
+  },
+  "access-analyzer": {
+    "tbId": "access-analyzer",
+    "label": "Access Analyzer"
+  },
+  "security-ir": {
+    "tbId": "security-ir",
+    "label": "AWS Security Incident Response"
+  },
+  "medical-imaging": {
+    "tbId": "medical-imaging",
+    "label": "AWS HealthImaging"
+  },
+  "mediastore": {
+    "tbId": "mediastore",
+    "label": "MediaStore"
+  },
+  "imagebuilder": {
+    "tbId": "imagebuilder",
+    "label": "EC2 Image Builder"
+  },
+  "rekognition": {
+    "tbId": "rekognition",
+    "label": "Amazon Rekognition"
+  },
+  "glacier": {
+    "tbId": "glacier",
+    "label": "S3 Glacier"
+  },
+  "mediaconvert": {
+    "tbId": "mediaconvert",
+    "label": "MediaConvert"
+  },
+  "fms": {
+    "tbId": "wafv2/fmsv2",
+    "label": "AWS Firewall Manager"
+  },
+  "servicequotas": {
+    "tbId": "servicequotas",
+    "label": "Service Quotas"
+  },
+  "elasticfilesystem": {
+    "tbId": "efs",
+    "label": "EFS"
+  },
+  "datasync": {
+    "tbId": "datasync",
+    "label": "DataSync"
+  },
+  "route53-recovery-control": {
+    "tbId": "route53recovery",
+    "label": "Application Recovery Controller"
+  },
+  "organizations": {
+    "tbId": "organizations/v2",
+    "label": "AWS Organizations"
+  }
+}

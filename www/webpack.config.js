@@ -2,10 +2,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import HtmlWebpackPlugin from "html-webpack-plugin";
 import CopyWebpackPlugin from "copy-webpack-plugin";
+import webpack from "webpack";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const ASSET_PATH = process.env.ASSET_PATH || "./";
+const outputDir = path.resolve(dirname, "../extension/shell");
 
 export default {
   mode: "development",
@@ -19,13 +21,13 @@ export default {
       },
       {
         test: /\.tsx?$/,
-        use: 'ts-loader',
+        use: "ts-loader",
         exclude: [/node_modules/, /\.d\.ts$/],
-      }
+      },
     ],
   },
   resolve: {
-    extensions: ['.tsx', '.ts', '.js'],
+    extensions: [".tsx", ".ts", ".js"],
   },
   plugins: [
     new HtmlWebpackPlugin({
@@ -35,33 +37,35 @@ export default {
     new CopyWebpackPlugin({
       patterns: [
         {
-          from: path.resolve(dirname, "node_modules/**/aws*.wasm"),
-          to: path.resolve(dirname, "dist", "[name][ext]"),
+          from: "node_modules/aws-cli-wasm/component/aws.core*.wasm",
+          to: path.resolve(outputDir, "[name][ext]"),
         },
-        { 
-          from: path.resolve(dirname, "static", "binaries"),
-          to: path.resolve(dirname, "dist", "binaries"),
+        {
+          from: "node_modules/coreutils-wasm/component/coreutils.core*.wasm",
+          to: path.resolve(outputDir, "[name][ext]"),
         },
       ],
     }),
+    new webpack.ContextReplacementPlugin(/aws-cli\/component/, /\.js$/),
+    new webpack.ContextReplacementPlugin(/coreutils\/component/, /\.js$/),
   ],
   output: {
     filename: "main.js",
-    path: path.resolve(dirname, "dist"),
+    path: outputDir,
     publicPath: ASSET_PATH,
+    clean: true,
   },
   devtool: "source-map",
   devServer: {
     port: 8080,
     headers: {
       "Cross-Origin-Embedder-Policy": "require-corp",
-      "Cross-Origin-Opener-Policy": "same-origin"
+      "Cross-Origin-Opener-Policy": "same-origin",
     },
     compress: false,
     static: false,
   },
   experiments: {
     asyncWebAssembly: true,
-    // topLevelAwait: true,
   },
 };

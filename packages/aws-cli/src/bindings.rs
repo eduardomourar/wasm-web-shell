@@ -6,7 +6,7 @@
 pub mod component {
     pub mod aws_cli {
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-        pub mod credentials_provider {
+        pub mod providers {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
@@ -93,8 +93,11 @@ pub mod component {
                 }
             }
             impl std::error::Error for CredentialsError {}
+            pub type Region = _rt::String;
             #[allow(unused_unsafe, clippy::all)]
-            pub fn provide_credentials() -> Result<Credentials, CredentialsError> {
+            pub fn provide_credentials(
+                service_id: Option<&str>,
+            ) -> Result<Credentials, CredentialsError> {
                 unsafe {
                     #[repr(align(8))]
                     struct RetArea(
@@ -106,116 +109,128 @@ pub mod component {
                         [::core::mem::MaybeUninit::uninit(); 40
                             + 8 * ::core::mem::size_of::<*const u8>()],
                     );
-                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    let (result1_0, result1_1, result1_2) = match service_id {
+                        Some(e) => {
+                            let vec0 = e;
+                            let ptr0 = vec0.as_ptr().cast::<u8>();
+                            let len0 = vec0.len();
+                            (1i32, ptr0.cast_mut(), len0)
+                        }
+                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                    };
+                    let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(
-                        wasm_import_module = "component:aws-cli/credentials-provider"
-                    )]
+                    #[link(wasm_import_module = "component:aws-cli/providers")]
                     unsafe extern "C" {
                         #[link_name = "provide-credentials"]
-                        fn wit_import1(_: *mut u8);
+                        fn wit_import3(_: i32, _: *mut u8, _: usize, _: *mut u8);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    unsafe extern "C" fn wit_import1(_: *mut u8) {
+                    unsafe extern "C" fn wit_import3(
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
                         unreachable!()
                     }
-                    unsafe { wit_import1(ptr0) };
-                    let l2 = i32::from(*ptr0.add(0).cast::<u8>());
-                    let result22 = match l2 {
+                    unsafe { wit_import3(result1_0, result1_1, result1_2, ptr2) };
+                    let l4 = i32::from(*ptr2.add(0).cast::<u8>());
+                    let result24 = match l4 {
                         0 => {
                             let e = {
-                                let l3 = *ptr0.add(8).cast::<*mut u8>();
-                                let l4 = *ptr0
+                                let l5 = *ptr2.add(8).cast::<*mut u8>();
+                                let l6 = *ptr2
                                     .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                     .cast::<usize>();
-                                let len5 = l4;
-                                let bytes5 = _rt::Vec::from_raw_parts(
-                                    l3.cast(),
-                                    len5,
-                                    len5,
+                                let len7 = l6;
+                                let bytes7 = _rt::Vec::from_raw_parts(
+                                    l5.cast(),
+                                    len7,
+                                    len7,
                                 );
-                                let l6 = *ptr0
+                                let l8 = *ptr2
                                     .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                     .cast::<*mut u8>();
-                                let l7 = *ptr0
+                                let l9 = *ptr2
                                     .add(8 + 3 * ::core::mem::size_of::<*const u8>())
                                     .cast::<usize>();
-                                let len8 = l7;
-                                let bytes8 = _rt::Vec::from_raw_parts(
-                                    l6.cast(),
-                                    len8,
-                                    len8,
+                                let len10 = l9;
+                                let bytes10 = _rt::Vec::from_raw_parts(
+                                    l8.cast(),
+                                    len10,
+                                    len10,
                                 );
-                                let l9 = i32::from(
-                                    *ptr0
+                                let l11 = i32::from(
+                                    *ptr2
                                         .add(8 + 4 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
-                                let l13 = i32::from(
-                                    *ptr0
+                                let l15 = i32::from(
+                                    *ptr2
                                         .add(16 + 6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
-                                let l15 = i32::from(
-                                    *ptr0
+                                let l17 = i32::from(
+                                    *ptr2
                                         .add(32 + 6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
                                 Credentials {
-                                    access_key_id: _rt::string_lift(bytes5),
-                                    secret_access_key: _rt::string_lift(bytes8),
-                                    session_token: match l9 {
+                                    access_key_id: _rt::string_lift(bytes7),
+                                    secret_access_key: _rt::string_lift(bytes10),
+                                    session_token: match l11 {
                                         0 => None,
                                         1 => {
                                             let e = {
-                                                let l10 = *ptr0
+                                                let l12 = *ptr2
                                                     .add(8 + 5 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<*mut u8>();
-                                                let l11 = *ptr0
+                                                let l13 = *ptr2
                                                     .add(8 + 6 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<usize>();
-                                                let len12 = l11;
-                                                let bytes12 = _rt::Vec::from_raw_parts(
-                                                    l10.cast(),
-                                                    len12,
-                                                    len12,
+                                                let len14 = l13;
+                                                let bytes14 = _rt::Vec::from_raw_parts(
+                                                    l12.cast(),
+                                                    len14,
+                                                    len14,
                                                 );
-                                                _rt::string_lift(bytes12)
+                                                _rt::string_lift(bytes14)
                                             };
                                             Some(e)
                                         }
                                         _ => _rt::invalid_enum_discriminant(),
                                     },
-                                    expires_after: match l13 {
+                                    expires_after: match l15 {
                                         0 => None,
                                         1 => {
                                             let e = {
-                                                let l14 = *ptr0
+                                                let l16 = *ptr2
                                                     .add(24 + 6 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<i64>();
-                                                l14 as u64
+                                                l16 as u64
                                             };
                                             Some(e)
                                         }
                                         _ => _rt::invalid_enum_discriminant(),
                                     },
-                                    account_id: match l15 {
+                                    account_id: match l17 {
                                         0 => None,
                                         1 => {
                                             let e = {
-                                                let l16 = *ptr0
+                                                let l18 = *ptr2
                                                     .add(32 + 7 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<*mut u8>();
-                                                let l17 = *ptr0
+                                                let l19 = *ptr2
                                                     .add(32 + 8 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<usize>();
-                                                let len18 = l17;
-                                                let bytes18 = _rt::Vec::from_raw_parts(
-                                                    l16.cast(),
-                                                    len18,
-                                                    len18,
+                                                let len20 = l19;
+                                                let bytes20 = _rt::Vec::from_raw_parts(
+                                                    l18.cast(),
+                                                    len20,
+                                                    len20,
                                                 );
-                                                _rt::string_lift(bytes18)
+                                                _rt::string_lift(bytes20)
                                             };
                                             Some(e)
                                         }
@@ -227,15 +242,15 @@ pub mod component {
                         }
                         1 => {
                             let e = {
-                                let l19 = i32::from(*ptr0.add(8).cast::<u8>());
-                                let v21 = match l19 {
+                                let l21 = i32::from(*ptr2.add(8).cast::<u8>());
+                                let v23 = match l21 {
                                     0 => CredentialsError::CredentialsNotLoaded,
                                     1 => {
-                                        let e21 = {
-                                            let l20 = *ptr0.add(16).cast::<i64>();
-                                            Timeout { duration: l20 as u64 }
+                                        let e23 = {
+                                            let l22 = *ptr2.add(16).cast::<i64>();
+                                            Timeout { duration: l22 as u64 }
                                         };
-                                        CredentialsError::ProviderTimedOut(e21)
+                                        CredentialsError::ProviderTimedOut(e23)
                                     }
                                     2 => CredentialsError::InvalidConfiguration,
                                     3 => CredentialsError::ProviderError,
@@ -244,13 +259,79 @@ pub mod component {
                                         CredentialsError::Unhandled
                                     }
                                 };
-                                v21
+                                v23
                             };
                             Err(e)
                         }
                         _ => _rt::invalid_enum_discriminant(),
                     };
-                    result22
+                    result24
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn provide_region(region: Option<&str>) -> Option<Region> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let (result1_0, result1_1, result1_2) = match region {
+                        Some(e) => {
+                            let vec0 = e;
+                            let ptr0 = vec0.as_ptr().cast::<u8>();
+                            let len0 = vec0.len();
+                            (1i32, ptr0.cast_mut(), len0)
+                        }
+                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                    };
+                    let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "component:aws-cli/providers")]
+                    unsafe extern "C" {
+                        #[link_name = "provide-region"]
+                        fn wit_import3(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import3(
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import3(result1_0, result1_1, result1_2, ptr2) };
+                    let l4 = i32::from(*ptr2.add(0).cast::<u8>());
+                    let result8 = match l4 {
+                        0 => None,
+                        1 => {
+                            let e = {
+                                let l5 = *ptr2
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l6 = *ptr2
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len7 = l6;
+                                let bytes7 = _rt::Vec::from_raw_parts(
+                                    l5.cast(),
+                                    len7,
+                                    len7,
+                                );
+                                _rt::string_lift(bytes7)
+                            };
+                            Some(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result8
                 }
             }
         }
@@ -290,7 +371,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/environment@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/environment@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-environment"]
                         fn wit_import1(_: *mut u8);
@@ -355,7 +436,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/environment@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/environment@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-arguments"]
                         fn wit_import1(_: *mut u8);
@@ -413,7 +494,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/environment@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/environment@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "initial-cwd"]
                         fn wit_import1(_: *mut u8);
@@ -455,6 +536,7 @@ pub mod wasi {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
             #[allow(unused_unsafe, clippy::all)]
             /// Exit the current instance and any linked instances.
             pub fn exit(status: Result<(), ()>) -> () {
@@ -464,7 +546,7 @@ pub mod wasi {
                         Err(_) => 1i32,
                     };
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/exit@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/exit@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "exit"]
                         fn wit_import1(_: i32);
@@ -474,6 +556,30 @@ pub mod wasi {
                         unreachable!()
                     }
                     unsafe { wit_import1(result0) };
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// Exit the current instance and any linked instances, reporting the
+            /// specified status code to the host.
+            ///
+            /// The meaning of the code depends on the context, with 0 usually meaning
+            /// "success", and other values indicating various types of failure.
+            ///
+            /// This function does not return; the effect is analogous to a trap, but
+            /// without the connotation that something bad has happened.
+            pub fn exit_with_code(status_code: u8) -> () {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "wasi:cli/exit@0.2.12")]
+                    unsafe extern "C" {
+                        #[link_name = "exit-with-code"]
+                        fn wit_import0(_: i32);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0(_: i32) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import0(_rt::as_i32(&status_code)) };
                 }
             }
         }
@@ -487,7 +593,7 @@ pub mod wasi {
             pub fn get_stdin() -> InputStream {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/stdin@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/stdin@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-stdin"]
                         fn wit_import0() -> i32;
@@ -515,7 +621,7 @@ pub mod wasi {
             pub fn get_stdout() -> OutputStream {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/stdout@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/stdout@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-stdout"]
                         fn wit_import0() -> i32;
@@ -543,7 +649,7 @@ pub mod wasi {
             pub fn get_stderr() -> OutputStream {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/stderr@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/stderr@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-stderr"]
                         fn wit_import0() -> i32;
@@ -601,7 +707,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:cli/terminal-input@0.2.11")]
+                        #[link(wasm_import_module = "wasi:cli/terminal-input@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]terminal-input"]
                             fn drop(_: u32);
@@ -651,7 +757,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:cli/terminal-output@0.2.11")]
+                        #[link(wasm_import_module = "wasi:cli/terminal-output@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]terminal-output"]
                             fn drop(_: u32);
@@ -680,7 +786,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/terminal-stdin@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/terminal-stdin@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-terminal-stdin"]
                         fn wit_import1(_: *mut u8);
@@ -729,7 +835,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/terminal-stdout@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/terminal-stdout@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-terminal-stdout"]
                         fn wit_import1(_: *mut u8);
@@ -778,7 +884,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:cli/terminal-stderr@0.2.11")]
+                    #[link(wasm_import_module = "wasi:cli/terminal-stderr@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-terminal-stderr"]
                         fn wit_import1(_: *mut u8);
@@ -823,7 +929,7 @@ pub mod wasi {
             pub fn now() -> Instant {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "now"]
                         fn wit_import0() -> i64;
@@ -840,7 +946,7 @@ pub mod wasi {
             pub fn resolution() -> Duration {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "resolution"]
                         fn wit_import0() -> i64;
@@ -857,7 +963,7 @@ pub mod wasi {
             pub fn subscribe_instant(when: Instant) -> Pollable {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "subscribe-instant"]
                         fn wit_import0(_: i64) -> i32;
@@ -878,7 +984,7 @@ pub mod wasi {
             pub fn subscribe_duration(when: Duration) -> Pollable {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/monotonic-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "subscribe-duration"]
                         fn wit_import0(_: i64) -> i32;
@@ -926,7 +1032,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 16]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/wall-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/wall-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "now"]
                         fn wit_import1(_: *mut u8);
@@ -953,7 +1059,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 16]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/wall-clock@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/wall-clock@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "resolution"]
                         fn wit_import1(_: *mut u8);
@@ -1018,7 +1124,7 @@ pub mod wasi {
                     } = when;
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/timezone@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/timezone@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "display"]
                         fn wit_import2(_: i64, _: i32, _: *mut u8);
@@ -1062,7 +1168,7 @@ pub mod wasi {
                         nanoseconds: nanoseconds0,
                     } = when;
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:clocks/timezone@0.2.11")]
+                    #[link(wasm_import_module = "wasi:clocks/timezone@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "utc-offset"]
                         fn wit_import1(_: i64, _: i32) -> i32;
@@ -1520,7 +1626,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]descriptor"]
                             fn drop(_: u32);
@@ -1557,7 +1663,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]directory-entry-stream"]
                             fn drop(_: u32);
@@ -1580,7 +1686,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.read-via-stream"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -1636,7 +1742,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.write-via-stream"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -1689,7 +1795,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.append-via-stream"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -1741,7 +1847,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.advise"]
                             fn wit_import1(_: i32, _: i64, _: i64, _: i32, _: *mut u8);
@@ -1795,7 +1901,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.sync-data"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -1835,7 +1941,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.get-flags"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -1879,7 +1985,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.get-type"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -1922,7 +2028,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.set-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -1990,7 +2096,7 @@ pub mod wasi {
                         };
                         let ptr4 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.set-times"]
                             fn wit_import5(
@@ -2069,7 +2175,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.read"]
                             fn wit_import1(_: i32, _: i64, _: i64, _: *mut u8);
@@ -2147,7 +2253,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.write"]
                             fn wit_import2(
@@ -2210,7 +2316,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.read-directory"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -2253,7 +2359,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.sync"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -2296,7 +2402,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.create-directory-at"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -2348,7 +2454,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.stat"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -2453,7 +2559,7 @@ pub mod wasi {
                         let len1 = vec1.len();
                         let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.stat-at"]
                             fn wit_import3(
@@ -2602,7 +2708,7 @@ pub mod wasi {
                         };
                         let ptr6 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.set-times-at"]
                             fn wit_import7(
@@ -2693,7 +2799,7 @@ pub mod wasi {
                         let len2 = vec2.len();
                         let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.link-at"]
                             fn wit_import4(
@@ -2774,7 +2880,7 @@ pub mod wasi {
                         let flags3 = flags;
                         let ptr4 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.open-at"]
                             fn wit_import5(
@@ -2852,7 +2958,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.readlink-at"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -2923,7 +3029,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.remove-directory-at"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -2986,7 +3092,7 @@ pub mod wasi {
                         let len1 = vec1.len();
                         let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.rename-at"]
                             fn wit_import3(
@@ -3062,7 +3168,7 @@ pub mod wasi {
                         let len1 = vec1.len();
                         let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.symlink-at"]
                             fn wit_import3(
@@ -3128,7 +3234,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.unlink-file-at"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -3174,7 +3280,7 @@ pub mod wasi {
                 pub fn is_same_object(&self, other: &Descriptor) -> bool {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.is-same-object"]
                             fn wit_import0(_: i32, _: i32) -> i32;
@@ -3201,7 +3307,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.metadata-hash"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -3256,7 +3362,7 @@ pub mod wasi {
                         let len1 = vec1.len();
                         let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]descriptor.metadata-hash-at"]
                             fn wit_import3(
@@ -3331,7 +3437,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]directory-entry-stream.read-directory-entry"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -3404,7 +3510,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 2]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:filesystem/types@0.2.11")]
+                    #[link(wasm_import_module = "wasi:filesystem/types@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "filesystem-error-code"]
                         fn wit_import1(_: i32, _: *mut u8);
@@ -3453,7 +3559,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:filesystem/preopens@0.2.11")]
+                    #[link(wasm_import_module = "wasi:filesystem/preopens@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-directories"]
                         fn wit_import1(_: *mut u8);
@@ -3936,7 +4042,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]fields"]
                             fn drop(_: u32);
@@ -3978,7 +4084,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]incoming-request"]
                             fn drop(_: u32);
@@ -4016,7 +4122,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]outgoing-request"]
                             fn drop(_: u32);
@@ -4059,7 +4165,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]request-options"]
                             fn drop(_: u32);
@@ -4101,7 +4207,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]response-outparam"]
                             fn drop(_: u32);
@@ -4141,7 +4247,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]incoming-response"]
                             fn drop(_: u32);
@@ -4186,7 +4292,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]incoming-body"]
                             fn drop(_: u32);
@@ -4228,7 +4334,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]future-trailers"]
                             fn drop(_: u32);
@@ -4266,7 +4372,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]outgoing-response"]
                             fn drop(_: u32);
@@ -4319,7 +4425,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]outgoing-body"]
                             fn drop(_: u32);
@@ -4361,7 +4467,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]future-incoming-response"]
                             fn drop(_: u32);
@@ -4378,7 +4484,7 @@ pub mod wasi {
                 pub fn new() -> Self {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[constructor]fields"]
                             fn wit_import0() -> i32;
@@ -4456,7 +4562,7 @@ pub mod wasi {
                         }
                         let ptr4 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[static]fields.from-list"]
                             fn wit_import5(_: *mut u8, _: usize, _: *mut u8);
@@ -4527,7 +4633,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.get"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -4589,7 +4695,7 @@ pub mod wasi {
                         let ptr0 = vec0.as_ptr().cast::<u8>();
                         let len0 = vec0.len();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.has"]
                             fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
@@ -4662,7 +4768,7 @@ pub mod wasi {
                         }
                         let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.set"]
                             fn wit_import4(
@@ -4746,7 +4852,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.delete"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -4823,7 +4929,7 @@ pub mod wasi {
                         let len1 = vec1.len();
                         let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.append"]
                             fn wit_import3(
@@ -4909,7 +5015,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.entries"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -4972,7 +5078,7 @@ pub mod wasi {
                 pub fn clone(&self) -> Fields {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]fields.clone"]
                             fn wit_import0(_: i32) -> i32;
@@ -5004,7 +5110,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.method"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5068,7 +5174,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.path-with-query"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5123,7 +5229,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.scheme"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5192,7 +5298,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.authority"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5242,7 +5348,7 @@ pub mod wasi {
                 pub fn headers(&self) -> Headers {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.headers"]
                             fn wit_import0(_: i32) -> i32;
@@ -5269,7 +5375,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-request.consume"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5313,7 +5419,7 @@ pub mod wasi {
                 pub fn new(headers: Headers) -> Self {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[constructor]outgoing-request"]
                             fn wit_import0(_: i32) -> i32;
@@ -5346,7 +5452,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.body"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5393,7 +5499,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.method"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5463,7 +5569,7 @@ pub mod wasi {
                             }
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.set-method"]
                             fn wit_import2(_: i32, _: i32, _: *mut u8, _: usize) -> i32;
@@ -5518,7 +5624,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.path-with-query"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5575,7 +5681,7 @@ pub mod wasi {
                             None => (0i32, ::core::ptr::null_mut(), 0usize),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.set-path-with-query"]
                             fn wit_import2(_: i32, _: i32, _: *mut u8, _: usize) -> i32;
@@ -5630,7 +5736,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.scheme"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5705,7 +5811,7 @@ pub mod wasi {
                             None => (0i32, 0i32, ::core::ptr::null_mut(), 0usize),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.set-scheme"]
                             fn wit_import3(
@@ -5769,7 +5875,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.authority"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5824,7 +5930,7 @@ pub mod wasi {
                             None => (0i32, ::core::ptr::null_mut(), 0usize),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.set-authority"]
                             fn wit_import2(_: i32, _: i32, _: *mut u8, _: usize) -> i32;
@@ -5873,7 +5979,7 @@ pub mod wasi {
                 pub fn headers(&self) -> Headers {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-request.headers"]
                             fn wit_import0(_: i32) -> i32;
@@ -5893,7 +5999,7 @@ pub mod wasi {
                 pub fn new() -> Self {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[constructor]request-options"]
                             fn wit_import0() -> i32;
@@ -5919,7 +6025,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.connect-timeout"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -5959,7 +6065,7 @@ pub mod wasi {
                             None => (0i32, 0i64),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.set-connect-timeout"]
                             fn wit_import1(_: i32, _: i32, _: i64) -> i32;
@@ -5997,7 +6103,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.first-byte-timeout"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -6037,7 +6143,7 @@ pub mod wasi {
                             None => (0i32, 0i64),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.set-first-byte-timeout"]
                             fn wit_import1(_: i32, _: i32, _: i64) -> i32;
@@ -6076,7 +6182,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.between-bytes-timeout"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -6117,7 +6223,7 @@ pub mod wasi {
                             None => (0i32, 0i64),
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]request-options.set-between-bytes-timeout"]
                             fn wit_import1(_: i32, _: i32, _: i64) -> i32;
@@ -6837,7 +6943,7 @@ pub mod wasi {
                             }
                         };
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[static]response-outparam.set"]
                             fn wit_import39(
@@ -6888,7 +6994,7 @@ pub mod wasi {
                 pub fn status(&self) -> StatusCode {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-response.status"]
                             fn wit_import0(_: i32) -> i32;
@@ -6914,7 +7020,7 @@ pub mod wasi {
                 pub fn headers(&self) -> Headers {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-response.headers"]
                             fn wit_import0(_: i32) -> i32;
@@ -6941,7 +7047,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-response.consume"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -6996,7 +7102,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-body.stream"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -7036,7 +7142,7 @@ pub mod wasi {
                 pub fn finish(this: IncomingBody) -> FutureTrailers {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[static]incoming-body.finish"]
                             fn wit_import0(_: i32) -> i32;
@@ -7058,7 +7164,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]future-trailers.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -7113,7 +7219,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]future-trailers.get"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -7703,7 +7809,7 @@ pub mod wasi {
                 pub fn new(headers: Headers) -> Self {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[constructor]outgoing-response"]
                             fn wit_import0(_: i32) -> i32;
@@ -7725,7 +7831,7 @@ pub mod wasi {
                 pub fn status_code(&self) -> StatusCode {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-response.status-code"]
                             fn wit_import0(_: i32) -> i32;
@@ -7749,7 +7855,7 @@ pub mod wasi {
                 ) -> Result<(), ()> {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-response.set-status-code"]
                             fn wit_import0(_: i32, _: i32) -> i32;
@@ -7788,7 +7894,7 @@ pub mod wasi {
                 pub fn headers(&self) -> Headers {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-response.headers"]
                             fn wit_import0(_: i32) -> i32;
@@ -7818,7 +7924,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-response.body"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -7867,7 +7973,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-body.write"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -7932,7 +8038,7 @@ pub mod wasi {
                         };
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[static]outgoing-body.finish"]
                             fn wit_import2(_: i32, _: i32, _: i32, _: *mut u8);
@@ -8496,7 +8602,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]future-incoming-response.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -8546,7 +8652,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                        #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]future-incoming-response.get"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -9142,7 +9248,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:http/types@0.2.11")]
+                    #[link(wasm_import_module = "wasi:http/types@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "http-error-code"]
                         fn wit_import1(_: i32, _: *mut u8);
@@ -9727,7 +9833,7 @@ pub mod wasi {
                     };
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:http/outgoing-handler@0.2.11")]
+                    #[link(wasm_import_module = "wasi:http/outgoing-handler@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "handle"]
                         fn wit_import2(_: i32, _: i32, _: i32, _: *mut u8);
@@ -10327,7 +10433,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:io/poll@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/poll@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]pollable"]
                             fn drop(_: u32);
@@ -10341,7 +10447,7 @@ pub mod wasi {
                 pub fn ready(&self) -> bool {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/poll@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/poll@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]pollable.ready"]
                             fn wit_import0(_: i32) -> i32;
@@ -10360,7 +10466,7 @@ pub mod wasi {
                 pub fn block(&self) -> () {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/poll@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/poll@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]pollable.block"]
                             fn wit_import0(_: i32);
@@ -10410,7 +10516,7 @@ pub mod wasi {
                     }
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:io/poll@0.2.11")]
+                    #[link(wasm_import_module = "wasi:io/poll@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "poll"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -10467,7 +10573,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:io/error@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/error@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]error"]
                             fn drop(_: u32);
@@ -10493,7 +10599,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/error@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/error@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]error.to-debug-string"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -10581,7 +10687,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]input-stream"]
                             fn drop(_: u32);
@@ -10618,7 +10724,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]output-stream"]
                             fn drop(_: u32);
@@ -10644,7 +10750,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]input-stream.read"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -10725,7 +10831,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]input-stream.blocking-read"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -10797,7 +10903,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]input-stream.skip"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -10859,7 +10965,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]input-stream.blocking-skip"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -10915,7 +11021,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]input-stream.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -10944,7 +11050,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.check-write"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -11007,7 +11113,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.write"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -11082,7 +11188,7 @@ pub mod wasi {
                         let len0 = vec0.len();
                         let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.blocking-write-and-flush"]
                             fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -11151,7 +11257,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.flush"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -11208,7 +11314,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.blocking-flush"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -11259,7 +11365,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -11288,7 +11394,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.write-zeroes"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -11350,7 +11456,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.blocking-write-zeroes-and-flush"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -11413,7 +11519,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.splice"]
                             fn wit_import1(_: i32, _: i32, _: i64, _: *mut u8);
@@ -11489,7 +11595,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:io/streams@0.2.11")]
+                        #[link(wasm_import_module = "wasi:io/streams@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]output-stream.blocking-splice"]
                             fn wit_import1(_: i32, _: i32, _: i64, _: *mut u8);
@@ -11575,7 +11681,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:random/random@0.2.11")]
+                    #[link(wasm_import_module = "wasi:random/random@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-random-bytes"]
                         fn wit_import1(_: i64, _: *mut u8);
@@ -11598,7 +11704,7 @@ pub mod wasi {
             pub fn get_random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:random/random@0.2.11")]
+                    #[link(wasm_import_module = "wasi:random/random@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-random-u64"]
                         fn wit_import0() -> i64;
@@ -11634,7 +11740,7 @@ pub mod wasi {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:random/insecure@0.2.11")]
+                    #[link(wasm_import_module = "wasi:random/insecure@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-insecure-random-bytes"]
                         fn wit_import1(_: i64, _: *mut u8);
@@ -11657,7 +11763,7 @@ pub mod wasi {
             pub fn get_insecure_random_u64() -> u64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:random/insecure@0.2.11")]
+                    #[link(wasm_import_module = "wasi:random/insecure@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "get-insecure-random-u64"]
                         fn wit_import0() -> i64;
@@ -11684,7 +11790,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 16]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:random/insecure-seed@0.2.11")]
+                    #[link(wasm_import_module = "wasi:random/insecure-seed@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "insecure-seed"]
                         fn wit_import1(_: *mut u8);
@@ -11738,7 +11844,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:sockets/network@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/network@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]network"]
                             fn drop(_: u32);
@@ -12003,7 +12109,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 2]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:sockets/network@0.2.11")]
+                    #[link(wasm_import_module = "wasi:sockets/network@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "network-error-code"]
                         fn wit_import1(_: i32, _: *mut u8);
@@ -12039,7 +12145,7 @@ pub mod wasi {
             pub fn instance_network() -> Network {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:sockets/instance-network@0.2.11")]
+                    #[link(wasm_import_module = "wasi:sockets/instance-network@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "instance-network"]
                         fn wit_import0() -> i32;
@@ -12128,7 +12234,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]udp-socket"]
                             fn drop(_: u32);
@@ -12165,7 +12271,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]incoming-datagram-stream"]
                             fn drop(_: u32);
@@ -12202,7 +12308,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]outgoing-datagram-stream"]
                             fn drop(_: u32);
@@ -12286,7 +12392,7 @@ pub mod wasi {
                         };
                         let ptr6 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.start-bind"]
                             fn wit_import7(
@@ -12378,7 +12484,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.finish-bind"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -12536,7 +12642,7 @@ pub mod wasi {
                         };
                         let ptr7 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.stream"]
                             fn wit_import8(
@@ -12635,7 +12741,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.local-address"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -12729,7 +12835,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.remote-address"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -12817,7 +12923,7 @@ pub mod wasi {
                 pub fn address_family(&self) -> IpAddressFamily {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.address-family"]
                             fn wit_import0(_: i32) -> i32;
@@ -12844,7 +12950,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.unicast-hop-limit"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -12889,7 +12995,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.set-unicast-hop-limit"]
                             fn wit_import1(_: i32, _: i32, _: *mut u8);
@@ -12937,7 +13043,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.receive-buffer-size"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -12985,7 +13091,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.set-receive-buffer-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -13033,7 +13139,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.send-buffer-size"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -13078,7 +13184,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.set-send-buffer-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -13120,7 +13226,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]udp-socket.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -13158,7 +13264,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-datagram-stream.receive"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -13348,7 +13454,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]incoming-datagram-stream.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -13377,7 +13483,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-datagram-stream.check-send"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -13542,7 +13648,7 @@ pub mod wasi {
                         }
                         let ptr8 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-datagram-stream.send"]
                             fn wit_import9(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -13591,7 +13697,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/udp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]outgoing-datagram-stream.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -13629,7 +13735,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:sockets/udp-create-socket@0.2.11")]
+                    #[link(wasm_import_module = "wasi:sockets/udp-create-socket@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "create-udp-socket"]
                         fn wit_import1(_: i32, _: *mut u8);
@@ -13748,7 +13854,7 @@ pub mod wasi {
                     unreachable!();
                     #[cfg(target_arch = "wasm32")]
                     {
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]tcp-socket"]
                             fn drop(_: u32);
@@ -13832,7 +13938,7 @@ pub mod wasi {
                         };
                         let ptr6 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.start-bind"]
                             fn wit_import7(
@@ -13924,7 +14030,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.finish-bind"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14030,7 +14136,7 @@ pub mod wasi {
                         };
                         let ptr6 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.start-connect"]
                             fn wit_import7(
@@ -14124,7 +14230,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.finish-connect"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14181,7 +14287,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.start-listen"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14223,7 +14329,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.finish-listen"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14267,7 +14373,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.accept"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14326,7 +14432,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.local-address"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14420,7 +14526,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.remote-address"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14508,7 +14614,7 @@ pub mod wasi {
                 pub fn is_listening(&self) -> bool {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.is-listening"]
                             fn wit_import0(_: i32) -> i32;
@@ -14527,7 +14633,7 @@ pub mod wasi {
                 pub fn address_family(&self) -> IpAddressFamily {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.address-family"]
                             fn wit_import0(_: i32) -> i32;
@@ -14557,7 +14663,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-listen-backlog-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -14605,7 +14711,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.keep-alive-enabled"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14653,7 +14759,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-keep-alive-enabled"]
                             fn wit_import1(_: i32, _: i32, _: *mut u8);
@@ -14704,7 +14810,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.keep-alive-idle-time"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14752,7 +14858,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-keep-alive-idle-time"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -14796,7 +14902,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.keep-alive-interval"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14844,7 +14950,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-keep-alive-interval"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -14888,7 +14994,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.keep-alive-count"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -14933,7 +15039,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-keep-alive-count"]
                             fn wit_import1(_: i32, _: i32, _: *mut u8);
@@ -14981,7 +15087,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.hop-limit"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -15026,7 +15132,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-hop-limit"]
                             fn wit_import1(_: i32, _: i32, _: *mut u8);
@@ -15074,7 +15180,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.receive-buffer-size"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -15122,7 +15228,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-receive-buffer-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -15170,7 +15276,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.send-buffer-size"]
                             fn wit_import1(_: i32, _: *mut u8);
@@ -15215,7 +15321,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.set-send-buffer-size"]
                             fn wit_import1(_: i32, _: i64, _: *mut u8);
@@ -15257,7 +15363,7 @@ pub mod wasi {
                 pub fn subscribe(&self) -> Pollable {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.subscribe"]
                             fn wit_import0(_: i32) -> i32;
@@ -15289,7 +15395,7 @@ pub mod wasi {
                         );
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.11")]
+                        #[link(wasm_import_module = "wasi:sockets/tcp@0.2.12")]
                         unsafe extern "C" {
                             #[link_name = "[method]tcp-socket.shutdown"]
                             fn wit_import1(_: i32, _: i32, _: *mut u8);
@@ -15346,7 +15452,7 @@ pub mod wasi {
                     let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:sockets/tcp-create-socket@0.2.11")]
+                    #[link(wasm_import_module = "wasi:sockets/tcp-create-socket@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "create-tcp-socket"]
                         fn wit_import1(_: i32, _: *mut u8);
@@ -15423,7 +15529,7 @@ pub mod wasi {
                     #[cfg(target_arch = "wasm32")]
                     {
                         #[link(
-                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.11"
+                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.12"
                         )]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]resolve-address-stream"]
@@ -15447,7 +15553,7 @@ pub mod wasi {
                         let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                         #[cfg(target_arch = "wasm32")]
                         #[link(
-                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.11"
+                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.12"
                         )]
                         unsafe extern "C" {
                             #[link_name = "[method]resolve-address-stream.resolve-next-address"]
@@ -15535,7 +15641,7 @@ pub mod wasi {
                     unsafe {
                         #[cfg(target_arch = "wasm32")]
                         #[link(
-                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.11"
+                            wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.12"
                         )]
                         unsafe extern "C" {
                             #[link_name = "[method]resolve-address-stream.subscribe"]
@@ -15568,7 +15674,7 @@ pub mod wasi {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.11")]
+                    #[link(wasm_import_module = "wasi:sockets/ip-name-lookup@0.2.12")]
                     unsafe extern "C" {
                         #[link_name = "resolve-addresses"]
                         fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
@@ -15643,16 +15749,16 @@ pub mod exports {
                     fn run() -> Result<(), ()>;
                 }
                 #[doc(hidden)]
-                macro_rules! __export_wasi_cli_run_0_2_11_cabi {
+                macro_rules! __export_wasi_cli_run_0_2_12_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "wasi:cli/run@0.2.11#run")] unsafe extern "C" fn export_run() ->
+                        "wasi:cli/run@0.2.12#run")] unsafe extern "C" fn export_run() ->
                         i32 { unsafe { $($path_to_types)*:: _export_run_cabi::<$ty > () }
                         } };
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_wasi_cli_run_0_2_11_cabi;
+                pub(crate) use __export_wasi_cli_run_0_2_12_cabi;
             }
         }
     }
@@ -15881,7 +15987,7 @@ macro_rules! __export_cli_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::wasi::cli::run::__export_wasi_cli_run_0_2_11_cabi!($ty with_types_in
+        exports::wasi::cli::run::__export_wasi_cli_run_0_2_12_cabi!($ty with_types_in
         $($path_to_types_root)*:: exports::wasi::cli::run);
     };
 }
@@ -15891,253 +15997,255 @@ pub(crate) use __export_cli_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:component:aws-cli:cli:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 16255] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x85~\x01A\x02\x01AU\x01\
-B\x0b\x01ks\x01kw\x01r\x05\x0daccess-key-ids\x11secret-access-keys\x0dsession-to\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 16342] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xdc~\x01A\x02\x01AU\x01\
+B\x10\x01ks\x01kw\x01r\x05\x0daccess-key-ids\x11secret-access-keys\x0dsession-to\
 ken\0\x0dexpires-after\x01\x0aaccount-id\0\x04\0\x0bcredentials\x03\0\x02\x01r\x01\
 \x08durationw\x04\0\x07timeout\x03\0\x04\x01q\x05\x16credentials-not-loaded\0\0\x12\
 provider-timed-out\x01\x05\0\x15invalid-configuration\0\0\x0eprovider-error\0\0\x09\
-unhandled\0\0\x04\0\x11credentials-error\x03\0\x06\x01j\x01\x03\x01\x07\x01@\0\0\
-\x08\x04\0\x13provide-credentials\x01\x09\x03\0&component:aws-cli/credentials-pr\
-ovider\x05\0\x01B\x0a\x04\0\x08pollable\x03\x01\x01h\0\x01@\x01\x04self\x01\0\x7f\
-\x04\0\x16[method]pollable.ready\x01\x02\x01@\x01\x04self\x01\x01\0\x04\0\x16[me\
-thod]pollable.block\x01\x03\x01p\x01\x01py\x01@\x01\x02in\x04\0\x05\x04\0\x04pol\
-l\x01\x06\x03\0\x13wasi:io/poll@0.2.11\x05\x01\x02\x03\0\x01\x08pollable\x01B\x0f\
-\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\0\x01w\x04\0\x07instant\x03\0\x02\x01\
-w\x04\0\x08duration\x03\0\x04\x01@\0\0\x03\x04\0\x03now\x01\x06\x01@\0\0\x05\x04\
-\0\x0aresolution\x01\x07\x01i\x01\x01@\x01\x04when\x03\0\x08\x04\0\x11subscribe-\
-instant\x01\x09\x01@\x01\x04when\x05\0\x08\x04\0\x12subscribe-duration\x01\x0a\x03\
-\0\"wasi:clocks/monotonic-clock@0.2.11\x05\x03\x01B\x04\x04\0\x05error\x03\x01\x01\
-h\0\x01@\x01\x04self\x01\0s\x04\0\x1d[method]error.to-debug-string\x01\x02\x03\0\
-\x14wasi:io/error@0.2.11\x05\x04\x02\x03\0\x03\x05error\x01B(\x02\x03\x02\x01\x05\
-\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\x02\x01i\x01\
-\x01q\x02\x15last-operation-failed\x01\x04\0\x06closed\0\0\x04\0\x0cstream-error\
-\x03\0\x05\x04\0\x0cinput-stream\x03\x01\x04\0\x0doutput-stream\x03\x01\x01h\x07\
-\x01p}\x01j\x01\x0a\x01\x06\x01@\x02\x04self\x09\x03lenw\0\x0b\x04\0\x19[method]\
-input-stream.read\x01\x0c\x04\0\"[method]input-stream.blocking-read\x01\x0c\x01j\
-\x01w\x01\x06\x01@\x02\x04self\x09\x03lenw\0\x0d\x04\0\x19[method]input-stream.s\
-kip\x01\x0e\x04\0\"[method]input-stream.blocking-skip\x01\x0e\x01i\x03\x01@\x01\x04\
-self\x09\0\x0f\x04\0\x1e[method]input-stream.subscribe\x01\x10\x01h\x08\x01@\x01\
-\x04self\x11\0\x0d\x04\0![method]output-stream.check-write\x01\x12\x01j\0\x01\x06\
-\x01@\x02\x04self\x11\x08contents\x0a\0\x13\x04\0\x1b[method]output-stream.write\
-\x01\x14\x04\0.[method]output-stream.blocking-write-and-flush\x01\x14\x01@\x01\x04\
-self\x11\0\x13\x04\0\x1b[method]output-stream.flush\x01\x15\x04\0$[method]output\
--stream.blocking-flush\x01\x15\x01@\x01\x04self\x11\0\x0f\x04\0\x1f[method]outpu\
-t-stream.subscribe\x01\x16\x01@\x02\x04self\x11\x03lenw\0\x13\x04\0\"[method]out\
-put-stream.write-zeroes\x01\x17\x04\05[method]output-stream.blocking-write-zeroe\
-s-and-flush\x01\x17\x01@\x03\x04self\x11\x03src\x09\x03lenw\0\x0d\x04\0\x1c[meth\
-od]output-stream.splice\x01\x18\x04\0%[method]output-stream.blocking-splice\x01\x18\
-\x03\0\x16wasi:io/streams@0.2.11\x05\x06\x02\x03\0\x02\x08duration\x02\x03\0\x04\
-\x0cinput-stream\x02\x03\0\x04\x0doutput-stream\x01B\xc1\x01\x02\x03\x02\x01\x07\
-\x04\0\x08duration\x03\0\0\x02\x03\x02\x01\x08\x04\0\x0cinput-stream\x03\0\x02\x02\
-\x03\x02\x01\x09\x04\0\x0doutput-stream\x03\0\x04\x02\x03\x02\x01\x05\x04\0\x08i\
-o-error\x03\0\x06\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\x08\x01q\x0a\x03ge\
-t\0\0\x04head\0\0\x04post\0\0\x03put\0\0\x06delete\0\0\x07connect\0\0\x07options\
-\0\0\x05trace\0\0\x05patch\0\0\x05other\x01s\0\x04\0\x06method\x03\0\x0a\x01q\x03\
-\x04HTTP\0\0\x05HTTPS\0\0\x05other\x01s\0\x04\0\x06scheme\x03\0\x0c\x01ks\x01k{\x01\
-r\x02\x05rcode\x0e\x09info-code\x0f\x04\0\x11DNS-error-payload\x03\0\x10\x01k}\x01\
-r\x02\x08alert-id\x12\x0dalert-message\x0e\x04\0\x1aTLS-alert-received-payload\x03\
-\0\x13\x01ky\x01r\x02\x0afield-name\x0e\x0afield-size\x15\x04\0\x12field-size-pa\
-yload\x03\0\x16\x01kw\x01k\x17\x01q'\x0bDNS-timeout\0\0\x09DNS-error\x01\x11\0\x15\
-destination-not-found\0\0\x17destination-unavailable\0\0\x19destination-IP-prohi\
-bited\0\0\x19destination-IP-unroutable\0\0\x12connection-refused\0\0\x15connecti\
-on-terminated\0\0\x12connection-timeout\0\0\x17connection-read-timeout\0\0\x18co\
-nnection-write-timeout\0\0\x18connection-limit-reached\0\0\x12TLS-protocol-error\
-\0\0\x15TLS-certificate-error\0\0\x12TLS-alert-received\x01\x14\0\x13HTTP-reques\
-t-denied\0\0\x1cHTTP-request-length-required\0\0\x16HTTP-request-body-size\x01\x18\
-\0\x1bHTTP-request-method-invalid\0\0\x18HTTP-request-URI-invalid\0\0\x19HTTP-re\
-quest-URI-too-long\0\0\x20HTTP-request-header-section-size\x01\x15\0\x18HTTP-req\
-uest-header-size\x01\x19\0!HTTP-request-trailer-section-size\x01\x15\0\x19HTTP-r\
-equest-trailer-size\x01\x17\0\x18HTTP-response-incomplete\0\0!HTTP-response-head\
-er-section-size\x01\x15\0\x19HTTP-response-header-size\x01\x17\0\x17HTTP-respons\
-e-body-size\x01\x18\0\"HTTP-response-trailer-section-size\x01\x15\0\x1aHTTP-resp\
-onse-trailer-size\x01\x17\0\x1dHTTP-response-transfer-coding\x01\x0e\0\x1cHTTP-r\
-esponse-content-coding\x01\x0e\0\x15HTTP-response-timeout\0\0\x13HTTP-upgrade-fa\
-iled\0\0\x13HTTP-protocol-error\0\0\x0dloop-detected\0\0\x13configuration-error\0\
-\0\x0einternal-error\x01\x0e\0\x04\0\x0aerror-code\x03\0\x1a\x01q\x03\x0einvalid\
--syntax\0\0\x09forbidden\0\0\x09immutable\0\0\x04\0\x0cheader-error\x03\0\x1c\x01\
-s\x04\0\x09field-key\x03\0\x1e\x04\0\x0afield-name\x03\0\x1f\x01p}\x04\0\x0bfiel\
-d-value\x03\0!\x04\0\x06fields\x03\x01\x04\0\x07headers\x03\0#\x04\0\x08trailers\
-\x03\0#\x04\0\x10incoming-request\x03\x01\x04\0\x10outgoing-request\x03\x01\x04\0\
-\x0frequest-options\x03\x01\x04\0\x11response-outparam\x03\x01\x01{\x04\0\x0bsta\
-tus-code\x03\0*\x04\0\x11incoming-response\x03\x01\x04\0\x0dincoming-body\x03\x01\
-\x04\0\x0ffuture-trailers\x03\x01\x04\0\x11outgoing-response\x03\x01\x04\0\x0dou\
-tgoing-body\x03\x01\x04\0\x18future-incoming-response\x03\x01\x01i#\x01@\0\02\x04\
-\0\x13[constructor]fields\x013\x01o\x02\x20\"\x01p4\x01j\x012\x01\x1d\x01@\x01\x07\
-entries5\06\x04\0\x18[static]fields.from-list\x017\x01h#\x01p\"\x01@\x02\x04self\
-8\x04name\x20\09\x04\0\x12[method]fields.get\x01:\x01@\x02\x04self8\x04name\x20\0\
-\x7f\x04\0\x12[method]fields.has\x01;\x01j\0\x01\x1d\x01@\x03\x04self8\x04name\x20\
-\x05value9\0<\x04\0\x12[method]fields.set\x01=\x01@\x02\x04self8\x04name\x20\0<\x04\
-\0\x15[method]fields.delete\x01>\x01@\x03\x04self8\x04name\x20\x05value\"\0<\x04\
-\0\x15[method]fields.append\x01?\x01@\x01\x04self8\05\x04\0\x16[method]fields.en\
-tries\x01@\x01@\x01\x04self8\02\x04\0\x14[method]fields.clone\x01A\x01h&\x01@\x01\
-\x04self\xc2\0\0\x0b\x04\0\x1f[method]incoming-request.method\x01C\x01@\x01\x04s\
-elf\xc2\0\0\x0e\x04\0([method]incoming-request.path-with-query\x01D\x01k\x0d\x01\
-@\x01\x04self\xc2\0\0\xc5\0\x04\0\x1f[method]incoming-request.scheme\x01F\x04\0\"\
-[method]incoming-request.authority\x01D\x01i$\x01@\x01\x04self\xc2\0\0\xc7\0\x04\
-\0\x20[method]incoming-request.headers\x01H\x01i-\x01j\x01\xc9\0\0\x01@\x01\x04s\
-elf\xc2\0\0\xca\0\x04\0\x20[method]incoming-request.consume\x01K\x01i'\x01@\x01\x07\
-headers\xc7\0\0\xcc\0\x04\0\x1d[constructor]outgoing-request\x01M\x01h'\x01i0\x01\
-j\x01\xcf\0\0\x01@\x01\x04self\xce\0\0\xd0\0\x04\0\x1d[method]outgoing-request.b\
-ody\x01Q\x01@\x01\x04self\xce\0\0\x0b\x04\0\x1f[method]outgoing-request.method\x01\
-R\x01j\0\0\x01@\x02\x04self\xce\0\x06method\x0b\0\xd3\0\x04\0#[method]outgoing-r\
-equest.set-method\x01T\x01@\x01\x04self\xce\0\0\x0e\x04\0([method]outgoing-reque\
-st.path-with-query\x01U\x01@\x02\x04self\xce\0\x0fpath-with-query\x0e\0\xd3\0\x04\
-\0,[method]outgoing-request.set-path-with-query\x01V\x01@\x01\x04self\xce\0\0\xc5\
-\0\x04\0\x1f[method]outgoing-request.scheme\x01W\x01@\x02\x04self\xce\0\x06schem\
-e\xc5\0\0\xd3\0\x04\0#[method]outgoing-request.set-scheme\x01X\x04\0\"[method]ou\
-tgoing-request.authority\x01U\x01@\x02\x04self\xce\0\x09authority\x0e\0\xd3\0\x04\
-\0&[method]outgoing-request.set-authority\x01Y\x01@\x01\x04self\xce\0\0\xc7\0\x04\
-\0\x20[method]outgoing-request.headers\x01Z\x01i(\x01@\0\0\xdb\0\x04\0\x1c[const\
-ructor]request-options\x01\\\x01h(\x01k\x01\x01@\x01\x04self\xdd\0\0\xde\0\x04\0\
-'[method]request-options.connect-timeout\x01_\x01@\x02\x04self\xdd\0\x08duration\
-\xde\0\0\xd3\0\x04\0+[method]request-options.set-connect-timeout\x01`\x04\0*[met\
-hod]request-options.first-byte-timeout\x01_\x04\0.[method]request-options.set-fi\
-rst-byte-timeout\x01`\x04\0-[method]request-options.between-bytes-timeout\x01_\x04\
-\01[method]request-options.set-between-bytes-timeout\x01`\x01i)\x01i/\x01j\x01\xe2\
-\0\x01\x1b\x01@\x02\x05param\xe1\0\x08response\xe3\0\x01\0\x04\0\x1d[static]resp\
-onse-outparam.set\x01d\x01h,\x01@\x01\x04self\xe5\0\0+\x04\0\x20[method]incoming\
--response.status\x01f\x01@\x01\x04self\xe5\0\0\xc7\0\x04\0![method]incoming-resp\
-onse.headers\x01g\x01@\x01\x04self\xe5\0\0\xca\0\x04\0![method]incoming-response\
-.consume\x01h\x01h-\x01i\x03\x01j\x01\xea\0\0\x01@\x01\x04self\xe9\0\0\xeb\0\x04\
-\0\x1c[method]incoming-body.stream\x01l\x01i.\x01@\x01\x04this\xc9\0\0\xed\0\x04\
-\0\x1c[static]incoming-body.finish\x01n\x01h.\x01i\x09\x01@\x01\x04self\xef\0\0\xf0\
-\0\x04\0![method]future-trailers.subscribe\x01q\x01i%\x01k\xf2\0\x01j\x01\xf3\0\x01\
-\x1b\x01j\x01\xf4\0\0\x01k\xf5\0\x01@\x01\x04self\xef\0\0\xf6\0\x04\0\x1b[method\
-]future-trailers.get\x01w\x01@\x01\x07headers\xc7\0\0\xe2\0\x04\0\x1e[constructo\
-r]outgoing-response\x01x\x01h/\x01@\x01\x04self\xf9\0\0+\x04\0%[method]outgoing-\
-response.status-code\x01z\x01@\x02\x04self\xf9\0\x0bstatus-code+\0\xd3\0\x04\0)[\
-method]outgoing-response.set-status-code\x01{\x01@\x01\x04self\xf9\0\0\xc7\0\x04\
-\0![method]outgoing-response.headers\x01|\x01@\x01\x04self\xf9\0\0\xd0\0\x04\0\x1e\
-[method]outgoing-response.body\x01}\x01h0\x01i\x05\x01j\x01\xff\0\0\x01@\x01\x04\
-self\xfe\0\0\x80\x01\x04\0\x1b[method]outgoing-body.write\x01\x81\x01\x01j\0\x01\
-\x1b\x01@\x02\x04this\xcf\0\x08trailers\xf3\0\0\x82\x01\x04\0\x1c[static]outgoin\
-g-body.finish\x01\x83\x01\x01h1\x01@\x01\x04self\x84\x01\0\xf0\0\x04\0*[method]f\
-uture-incoming-response.subscribe\x01\x85\x01\x01i,\x01j\x01\x86\x01\x01\x1b\x01\
-j\x01\x87\x01\0\x01k\x88\x01\x01@\x01\x04self\x84\x01\0\x89\x01\x04\0$[method]fu\
-ture-incoming-response.get\x01\x8a\x01\x01h\x07\x01k\x1b\x01@\x01\x03err\x8b\x01\
-\0\x8c\x01\x04\0\x0fhttp-error-code\x01\x8d\x01\x03\0\x16wasi:http/types@0.2.11\x05\
-\x0a\x02\x03\0\x05\x10outgoing-request\x02\x03\0\x05\x0frequest-options\x02\x03\0\
-\x05\x18future-incoming-response\x02\x03\0\x05\x0aerror-code\x01B\x0f\x02\x03\x02\
-\x01\x0b\x04\0\x10outgoing-request\x03\0\0\x02\x03\x02\x01\x0c\x04\0\x0frequest-\
-options\x03\0\x02\x02\x03\x02\x01\x0d\x04\0\x18future-incoming-response\x03\0\x04\
-\x02\x03\x02\x01\x0e\x04\0\x0aerror-code\x03\0\x06\x01i\x01\x01i\x03\x01k\x09\x01\
-i\x05\x01j\x01\x0b\x01\x07\x01@\x02\x07request\x08\x07options\x0a\0\x0c\x04\0\x06\
-handle\x01\x0d\x03\0!wasi:http/outgoing-handler@0.2.11\x05\x0f\x01B\x0a\x01o\x02\
-ss\x01p\0\x01@\0\0\x01\x04\0\x0fget-environment\x01\x02\x01ps\x01@\0\0\x03\x04\0\
-\x0dget-arguments\x01\x04\x01ks\x01@\0\0\x05\x04\0\x0binitial-cwd\x01\x06\x03\0\x1b\
-wasi:cli/environment@0.2.11\x05\x10\x01B\x03\x01j\0\0\x01@\x01\x06status\0\x01\0\
-\x04\0\x04exit\x01\x01\x03\0\x14wasi:cli/exit@0.2.11\x05\x11\x01B\x05\x02\x03\x02\
-\x01\x08\x04\0\x0cinput-stream\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x09get-stdin\x01\
-\x03\x03\0\x15wasi:cli/stdin@0.2.11\x05\x12\x01B\x05\x02\x03\x02\x01\x09\x04\0\x0d\
-output-stream\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x0aget-stdout\x01\x03\x03\0\x16\
-wasi:cli/stdout@0.2.11\x05\x13\x01B\x05\x02\x03\x02\x01\x09\x04\0\x0doutput-stre\
-am\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x0aget-stderr\x01\x03\x03\0\x16wasi:cli/s\
-tderr@0.2.11\x05\x14\x01B\x01\x04\0\x0eterminal-input\x03\x01\x03\0\x1ewasi:cli/\
-terminal-input@0.2.11\x05\x15\x01B\x01\x04\0\x0fterminal-output\x03\x01\x03\0\x1f\
-wasi:cli/terminal-output@0.2.11\x05\x16\x02\x03\0\x0c\x0eterminal-input\x01B\x06\
-\x02\x03\x02\x01\x17\x04\0\x0eterminal-input\x03\0\0\x01i\x01\x01k\x02\x01@\0\0\x03\
-\x04\0\x12get-terminal-stdin\x01\x04\x03\0\x1ewasi:cli/terminal-stdin@0.2.11\x05\
-\x18\x02\x03\0\x0d\x0fterminal-output\x01B\x06\x02\x03\x02\x01\x19\x04\0\x0fterm\
-inal-output\x03\0\0\x01i\x01\x01k\x02\x01@\0\0\x03\x04\0\x13get-terminal-stdout\x01\
-\x04\x03\0\x1fwasi:cli/terminal-stdout@0.2.11\x05\x1a\x01B\x06\x02\x03\x02\x01\x19\
+unhandled\0\0\x04\0\x11credentials-error\x03\0\x06\x01s\x04\0\x06region\x03\0\x08\
+\x01j\x01\x03\x01\x07\x01@\x01\x0aservice-id\0\0\x0a\x04\0\x13provide-credential\
+s\x01\x0b\x01k\x09\x01@\x01\x06region\x0c\0\x0c\x04\0\x0eprovide-region\x01\x0d\x03\
+\0\x1bcomponent:aws-cli/providers\x05\0\x01B\x0a\x04\0\x08pollable\x03\x01\x01h\0\
+\x01@\x01\x04self\x01\0\x7f\x04\0\x16[method]pollable.ready\x01\x02\x01@\x01\x04\
+self\x01\x01\0\x04\0\x16[method]pollable.block\x01\x03\x01p\x01\x01py\x01@\x01\x02\
+in\x04\0\x05\x04\0\x04poll\x01\x06\x03\0\x13wasi:io/poll@0.2.12\x05\x01\x02\x03\0\
+\x01\x08pollable\x01B\x0f\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\0\x01w\x04\
+\0\x07instant\x03\0\x02\x01w\x04\0\x08duration\x03\0\x04\x01@\0\0\x03\x04\0\x03n\
+ow\x01\x06\x01@\0\0\x05\x04\0\x0aresolution\x01\x07\x01i\x01\x01@\x01\x04when\x03\
+\0\x08\x04\0\x11subscribe-instant\x01\x09\x01@\x01\x04when\x05\0\x08\x04\0\x12su\
+bscribe-duration\x01\x0a\x03\0\"wasi:clocks/monotonic-clock@0.2.12\x05\x03\x01B\x04\
+\x04\0\x05error\x03\x01\x01h\0\x01@\x01\x04self\x01\0s\x04\0\x1d[method]error.to\
+-debug-string\x01\x02\x03\0\x14wasi:io/error@0.2.12\x05\x04\x02\x03\0\x03\x05err\
+or\x01B(\x02\x03\x02\x01\x05\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x02\x04\0\x08\
+pollable\x03\0\x02\x01i\x01\x01q\x02\x15last-operation-failed\x01\x04\0\x06close\
+d\0\0\x04\0\x0cstream-error\x03\0\x05\x04\0\x0cinput-stream\x03\x01\x04\0\x0dout\
+put-stream\x03\x01\x01h\x07\x01p}\x01j\x01\x0a\x01\x06\x01@\x02\x04self\x09\x03l\
+enw\0\x0b\x04\0\x19[method]input-stream.read\x01\x0c\x04\0\"[method]input-stream\
+.blocking-read\x01\x0c\x01j\x01w\x01\x06\x01@\x02\x04self\x09\x03lenw\0\x0d\x04\0\
+\x19[method]input-stream.skip\x01\x0e\x04\0\"[method]input-stream.blocking-skip\x01\
+\x0e\x01i\x03\x01@\x01\x04self\x09\0\x0f\x04\0\x1e[method]input-stream.subscribe\
+\x01\x10\x01h\x08\x01@\x01\x04self\x11\0\x0d\x04\0![method]output-stream.check-w\
+rite\x01\x12\x01j\0\x01\x06\x01@\x02\x04self\x11\x08contents\x0a\0\x13\x04\0\x1b\
+[method]output-stream.write\x01\x14\x04\0.[method]output-stream.blocking-write-a\
+nd-flush\x01\x14\x01@\x01\x04self\x11\0\x13\x04\0\x1b[method]output-stream.flush\
+\x01\x15\x04\0$[method]output-stream.blocking-flush\x01\x15\x01@\x01\x04self\x11\
+\0\x0f\x04\0\x1f[method]output-stream.subscribe\x01\x16\x01@\x02\x04self\x11\x03\
+lenw\0\x13\x04\0\"[method]output-stream.write-zeroes\x01\x17\x04\05[method]outpu\
+t-stream.blocking-write-zeroes-and-flush\x01\x17\x01@\x03\x04self\x11\x03src\x09\
+\x03lenw\0\x0d\x04\0\x1c[method]output-stream.splice\x01\x18\x04\0%[method]outpu\
+t-stream.blocking-splice\x01\x18\x03\0\x16wasi:io/streams@0.2.12\x05\x06\x02\x03\
+\0\x02\x08duration\x02\x03\0\x04\x0cinput-stream\x02\x03\0\x04\x0doutput-stream\x01\
+B\xc1\x01\x02\x03\x02\x01\x07\x04\0\x08duration\x03\0\0\x02\x03\x02\x01\x08\x04\0\
+\x0cinput-stream\x03\0\x02\x02\x03\x02\x01\x09\x04\0\x0doutput-stream\x03\0\x04\x02\
+\x03\x02\x01\x05\x04\0\x08io-error\x03\0\x06\x02\x03\x02\x01\x02\x04\0\x08pollab\
+le\x03\0\x08\x01q\x0a\x03get\0\0\x04head\0\0\x04post\0\0\x03put\0\0\x06delete\0\0\
+\x07connect\0\0\x07options\0\0\x05trace\0\0\x05patch\0\0\x05other\x01s\0\x04\0\x06\
+method\x03\0\x0a\x01q\x03\x04HTTP\0\0\x05HTTPS\0\0\x05other\x01s\0\x04\0\x06sche\
+me\x03\0\x0c\x01ks\x01k{\x01r\x02\x05rcode\x0e\x09info-code\x0f\x04\0\x11DNS-err\
+or-payload\x03\0\x10\x01k}\x01r\x02\x08alert-id\x12\x0dalert-message\x0e\x04\0\x1a\
+TLS-alert-received-payload\x03\0\x13\x01ky\x01r\x02\x0afield-name\x0e\x0afield-s\
+ize\x15\x04\0\x12field-size-payload\x03\0\x16\x01kw\x01k\x17\x01q'\x0bDNS-timeou\
+t\0\0\x09DNS-error\x01\x11\0\x15destination-not-found\0\0\x17destination-unavail\
+able\0\0\x19destination-IP-prohibited\0\0\x19destination-IP-unroutable\0\0\x12co\
+nnection-refused\0\0\x15connection-terminated\0\0\x12connection-timeout\0\0\x17c\
+onnection-read-timeout\0\0\x18connection-write-timeout\0\0\x18connection-limit-r\
+eached\0\0\x12TLS-protocol-error\0\0\x15TLS-certificate-error\0\0\x12TLS-alert-r\
+eceived\x01\x14\0\x13HTTP-request-denied\0\0\x1cHTTP-request-length-required\0\0\
+\x16HTTP-request-body-size\x01\x18\0\x1bHTTP-request-method-invalid\0\0\x18HTTP-\
+request-URI-invalid\0\0\x19HTTP-request-URI-too-long\0\0\x20HTTP-request-header-\
+section-size\x01\x15\0\x18HTTP-request-header-size\x01\x19\0!HTTP-request-traile\
+r-section-size\x01\x15\0\x19HTTP-request-trailer-size\x01\x17\0\x18HTTP-response\
+-incomplete\0\0!HTTP-response-header-section-size\x01\x15\0\x19HTTP-response-hea\
+der-size\x01\x17\0\x17HTTP-response-body-size\x01\x18\0\"HTTP-response-trailer-s\
+ection-size\x01\x15\0\x1aHTTP-response-trailer-size\x01\x17\0\x1dHTTP-response-t\
+ransfer-coding\x01\x0e\0\x1cHTTP-response-content-coding\x01\x0e\0\x15HTTP-respo\
+nse-timeout\0\0\x13HTTP-upgrade-failed\0\0\x13HTTP-protocol-error\0\0\x0dloop-de\
+tected\0\0\x13configuration-error\0\0\x0einternal-error\x01\x0e\0\x04\0\x0aerror\
+-code\x03\0\x1a\x01q\x03\x0einvalid-syntax\0\0\x09forbidden\0\0\x09immutable\0\0\
+\x04\0\x0cheader-error\x03\0\x1c\x01s\x04\0\x09field-key\x03\0\x1e\x04\0\x0afiel\
+d-name\x03\0\x1f\x01p}\x04\0\x0bfield-value\x03\0!\x04\0\x06fields\x03\x01\x04\0\
+\x07headers\x03\0#\x04\0\x08trailers\x03\0#\x04\0\x10incoming-request\x03\x01\x04\
+\0\x10outgoing-request\x03\x01\x04\0\x0frequest-options\x03\x01\x04\0\x11respons\
+e-outparam\x03\x01\x01{\x04\0\x0bstatus-code\x03\0*\x04\0\x11incoming-response\x03\
+\x01\x04\0\x0dincoming-body\x03\x01\x04\0\x0ffuture-trailers\x03\x01\x04\0\x11ou\
+tgoing-response\x03\x01\x04\0\x0doutgoing-body\x03\x01\x04\0\x18future-incoming-\
+response\x03\x01\x01i#\x01@\0\02\x04\0\x13[constructor]fields\x013\x01o\x02\x20\"\
+\x01p4\x01j\x012\x01\x1d\x01@\x01\x07entries5\06\x04\0\x18[static]fields.from-li\
+st\x017\x01h#\x01p\"\x01@\x02\x04self8\x04name\x20\09\x04\0\x12[method]fields.ge\
+t\x01:\x01@\x02\x04self8\x04name\x20\0\x7f\x04\0\x12[method]fields.has\x01;\x01j\
+\0\x01\x1d\x01@\x03\x04self8\x04name\x20\x05value9\0<\x04\0\x12[method]fields.se\
+t\x01=\x01@\x02\x04self8\x04name\x20\0<\x04\0\x15[method]fields.delete\x01>\x01@\
+\x03\x04self8\x04name\x20\x05value\"\0<\x04\0\x15[method]fields.append\x01?\x01@\
+\x01\x04self8\05\x04\0\x16[method]fields.entries\x01@\x01@\x01\x04self8\02\x04\0\
+\x14[method]fields.clone\x01A\x01h&\x01@\x01\x04self\xc2\0\0\x0b\x04\0\x1f[metho\
+d]incoming-request.method\x01C\x01@\x01\x04self\xc2\0\0\x0e\x04\0([method]incomi\
+ng-request.path-with-query\x01D\x01k\x0d\x01@\x01\x04self\xc2\0\0\xc5\0\x04\0\x1f\
+[method]incoming-request.scheme\x01F\x04\0\"[method]incoming-request.authority\x01\
+D\x01i$\x01@\x01\x04self\xc2\0\0\xc7\0\x04\0\x20[method]incoming-request.headers\
+\x01H\x01i-\x01j\x01\xc9\0\0\x01@\x01\x04self\xc2\0\0\xca\0\x04\0\x20[method]inc\
+oming-request.consume\x01K\x01i'\x01@\x01\x07headers\xc7\0\0\xcc\0\x04\0\x1d[con\
+structor]outgoing-request\x01M\x01h'\x01i0\x01j\x01\xcf\0\0\x01@\x01\x04self\xce\
+\0\0\xd0\0\x04\0\x1d[method]outgoing-request.body\x01Q\x01@\x01\x04self\xce\0\0\x0b\
+\x04\0\x1f[method]outgoing-request.method\x01R\x01j\0\0\x01@\x02\x04self\xce\0\x06\
+method\x0b\0\xd3\0\x04\0#[method]outgoing-request.set-method\x01T\x01@\x01\x04se\
+lf\xce\0\0\x0e\x04\0([method]outgoing-request.path-with-query\x01U\x01@\x02\x04s\
+elf\xce\0\x0fpath-with-query\x0e\0\xd3\0\x04\0,[method]outgoing-request.set-path\
+-with-query\x01V\x01@\x01\x04self\xce\0\0\xc5\0\x04\0\x1f[method]outgoing-reques\
+t.scheme\x01W\x01@\x02\x04self\xce\0\x06scheme\xc5\0\0\xd3\0\x04\0#[method]outgo\
+ing-request.set-scheme\x01X\x04\0\"[method]outgoing-request.authority\x01U\x01@\x02\
+\x04self\xce\0\x09authority\x0e\0\xd3\0\x04\0&[method]outgoing-request.set-autho\
+rity\x01Y\x01@\x01\x04self\xce\0\0\xc7\0\x04\0\x20[method]outgoing-request.heade\
+rs\x01Z\x01i(\x01@\0\0\xdb\0\x04\0\x1c[constructor]request-options\x01\\\x01h(\x01\
+k\x01\x01@\x01\x04self\xdd\0\0\xde\0\x04\0'[method]request-options.connect-timeo\
+ut\x01_\x01@\x02\x04self\xdd\0\x08duration\xde\0\0\xd3\0\x04\0+[method]request-o\
+ptions.set-connect-timeout\x01`\x04\0*[method]request-options.first-byte-timeout\
+\x01_\x04\0.[method]request-options.set-first-byte-timeout\x01`\x04\0-[method]re\
+quest-options.between-bytes-timeout\x01_\x04\01[method]request-options.set-betwe\
+en-bytes-timeout\x01`\x01i)\x01i/\x01j\x01\xe2\0\x01\x1b\x01@\x02\x05param\xe1\0\
+\x08response\xe3\0\x01\0\x04\0\x1d[static]response-outparam.set\x01d\x01h,\x01@\x01\
+\x04self\xe5\0\0+\x04\0\x20[method]incoming-response.status\x01f\x01@\x01\x04sel\
+f\xe5\0\0\xc7\0\x04\0![method]incoming-response.headers\x01g\x01@\x01\x04self\xe5\
+\0\0\xca\0\x04\0![method]incoming-response.consume\x01h\x01h-\x01i\x03\x01j\x01\xea\
+\0\0\x01@\x01\x04self\xe9\0\0\xeb\0\x04\0\x1c[method]incoming-body.stream\x01l\x01\
+i.\x01@\x01\x04this\xc9\0\0\xed\0\x04\0\x1c[static]incoming-body.finish\x01n\x01\
+h.\x01i\x09\x01@\x01\x04self\xef\0\0\xf0\0\x04\0![method]future-trailers.subscri\
+be\x01q\x01i%\x01k\xf2\0\x01j\x01\xf3\0\x01\x1b\x01j\x01\xf4\0\0\x01k\xf5\0\x01@\
+\x01\x04self\xef\0\0\xf6\0\x04\0\x1b[method]future-trailers.get\x01w\x01@\x01\x07\
+headers\xc7\0\0\xe2\0\x04\0\x1e[constructor]outgoing-response\x01x\x01h/\x01@\x01\
+\x04self\xf9\0\0+\x04\0%[method]outgoing-response.status-code\x01z\x01@\x02\x04s\
+elf\xf9\0\x0bstatus-code+\0\xd3\0\x04\0)[method]outgoing-response.set-status-cod\
+e\x01{\x01@\x01\x04self\xf9\0\0\xc7\0\x04\0![method]outgoing-response.headers\x01\
+|\x01@\x01\x04self\xf9\0\0\xd0\0\x04\0\x1e[method]outgoing-response.body\x01}\x01\
+h0\x01i\x05\x01j\x01\xff\0\0\x01@\x01\x04self\xfe\0\0\x80\x01\x04\0\x1b[method]o\
+utgoing-body.write\x01\x81\x01\x01j\0\x01\x1b\x01@\x02\x04this\xcf\0\x08trailers\
+\xf3\0\0\x82\x01\x04\0\x1c[static]outgoing-body.finish\x01\x83\x01\x01h1\x01@\x01\
+\x04self\x84\x01\0\xf0\0\x04\0*[method]future-incoming-response.subscribe\x01\x85\
+\x01\x01i,\x01j\x01\x86\x01\x01\x1b\x01j\x01\x87\x01\0\x01k\x88\x01\x01@\x01\x04\
+self\x84\x01\0\x89\x01\x04\0$[method]future-incoming-response.get\x01\x8a\x01\x01\
+h\x07\x01k\x1b\x01@\x01\x03err\x8b\x01\0\x8c\x01\x04\0\x0fhttp-error-code\x01\x8d\
+\x01\x03\0\x16wasi:http/types@0.2.12\x05\x0a\x02\x03\0\x05\x10outgoing-request\x02\
+\x03\0\x05\x0frequest-options\x02\x03\0\x05\x18future-incoming-response\x02\x03\0\
+\x05\x0aerror-code\x01B\x0f\x02\x03\x02\x01\x0b\x04\0\x10outgoing-request\x03\0\0\
+\x02\x03\x02\x01\x0c\x04\0\x0frequest-options\x03\0\x02\x02\x03\x02\x01\x0d\x04\0\
+\x18future-incoming-response\x03\0\x04\x02\x03\x02\x01\x0e\x04\0\x0aerror-code\x03\
+\0\x06\x01i\x01\x01i\x03\x01k\x09\x01i\x05\x01j\x01\x0b\x01\x07\x01@\x02\x07requ\
+est\x08\x07options\x0a\0\x0c\x04\0\x06handle\x01\x0d\x03\0!wasi:http/outgoing-ha\
+ndler@0.2.12\x05\x0f\x01B\x0a\x01o\x02ss\x01p\0\x01@\0\0\x01\x04\0\x0fget-enviro\
+nment\x01\x02\x01ps\x01@\0\0\x03\x04\0\x0dget-arguments\x01\x04\x01ks\x01@\0\0\x05\
+\x04\0\x0binitial-cwd\x01\x06\x03\0\x1bwasi:cli/environment@0.2.12\x05\x10\x01B\x05\
+\x01j\0\0\x01@\x01\x06status\0\x01\0\x04\0\x04exit\x01\x01\x01@\x01\x0bstatus-co\
+de}\x01\0\x04\0\x0eexit-with-code\x01\x02\x03\0\x14wasi:cli/exit@0.2.12\x05\x11\x01\
+B\x05\x02\x03\x02\x01\x08\x04\0\x0cinput-stream\x03\0\0\x01i\x01\x01@\0\0\x02\x04\
+\0\x09get-stdin\x01\x03\x03\0\x15wasi:cli/stdin@0.2.12\x05\x12\x01B\x05\x02\x03\x02\
+\x01\x09\x04\0\x0doutput-stream\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x0aget-stdou\
+t\x01\x03\x03\0\x16wasi:cli/stdout@0.2.12\x05\x13\x01B\x05\x02\x03\x02\x01\x09\x04\
+\0\x0doutput-stream\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x0aget-stderr\x01\x03\x03\
+\0\x16wasi:cli/stderr@0.2.12\x05\x14\x01B\x01\x04\0\x0eterminal-input\x03\x01\x03\
+\0\x1ewasi:cli/terminal-input@0.2.12\x05\x15\x01B\x01\x04\0\x0fterminal-output\x03\
+\x01\x03\0\x1fwasi:cli/terminal-output@0.2.12\x05\x16\x02\x03\0\x0c\x0eterminal-\
+input\x01B\x06\x02\x03\x02\x01\x17\x04\0\x0eterminal-input\x03\0\0\x01i\x01\x01k\
+\x02\x01@\0\0\x03\x04\0\x12get-terminal-stdin\x01\x04\x03\0\x1ewasi:cli/terminal\
+-stdin@0.2.12\x05\x18\x02\x03\0\x0d\x0fterminal-output\x01B\x06\x02\x03\x02\x01\x19\
 \x04\0\x0fterminal-output\x03\0\0\x01i\x01\x01k\x02\x01@\0\0\x03\x04\0\x13get-te\
-rminal-stderr\x01\x04\x03\0\x1fwasi:cli/terminal-stderr@0.2.11\x05\x1b\x01B\x05\x01\
-r\x02\x07secondsw\x0bnanosecondsy\x04\0\x08datetime\x03\0\0\x01@\0\0\x01\x04\0\x03\
-now\x01\x02\x04\0\x0aresolution\x01\x02\x03\0\x1dwasi:clocks/wall-clock@0.2.11\x05\
-\x1c\x02\x03\0\x11\x08datetime\x01B\x08\x02\x03\x02\x01\x1d\x04\0\x08datetime\x03\
-\0\0\x01r\x03\x0autc-offsetz\x04names\x17in-daylight-saving-time\x7f\x04\0\x10ti\
-mezone-display\x03\0\x02\x01@\x01\x04when\x01\0\x03\x04\0\x07display\x01\x04\x01\
-@\x01\x04when\x01\0z\x04\0\x0autc-offset\x01\x05\x03\0\x1bwasi:clocks/timezone@0\
-.2.11\x05\x1e\x02\x03\0\x04\x05error\x01Br\x02\x03\x02\x01\x08\x04\0\x0cinput-st\
-ream\x03\0\0\x02\x03\x02\x01\x09\x04\0\x0doutput-stream\x03\0\x02\x02\x03\x02\x01\
-\x1f\x04\0\x05error\x03\0\x04\x02\x03\x02\x01\x1d\x04\0\x08datetime\x03\0\x06\x01\
-w\x04\0\x08filesize\x03\0\x08\x01m\x08\x07unknown\x0cblock-device\x10character-d\
-evice\x09directory\x04fifo\x0dsymbolic-link\x0cregular-file\x06socket\x04\0\x0fd\
-escriptor-type\x03\0\x0a\x01n\x06\x04read\x05write\x13file-integrity-sync\x13dat\
-a-integrity-sync\x14requested-write-sync\x10mutate-directory\x04\0\x10descriptor\
--flags\x03\0\x0c\x01n\x01\x0esymlink-follow\x04\0\x0apath-flags\x03\0\x0e\x01n\x04\
-\x06create\x09directory\x09exclusive\x08truncate\x04\0\x0aopen-flags\x03\0\x10\x01\
-w\x04\0\x0alink-count\x03\0\x12\x01k\x07\x01r\x06\x04type\x0b\x0alink-count\x13\x04\
-size\x09\x15data-access-timestamp\x14\x1bdata-modification-timestamp\x14\x17stat\
-us-change-timestamp\x14\x04\0\x0fdescriptor-stat\x03\0\x15\x01q\x03\x09no-change\
-\0\0\x03now\0\0\x09timestamp\x01\x07\0\x04\0\x0dnew-timestamp\x03\0\x17\x01r\x02\
-\x04type\x0b\x04names\x04\0\x0fdirectory-entry\x03\0\x19\x01m%\x06access\x0bwoul\
-d-block\x07already\x0ebad-descriptor\x04busy\x08deadlock\x05quota\x05exist\x0efi\
-le-too-large\x15illegal-byte-sequence\x0bin-progress\x0binterrupted\x07invalid\x02\
-io\x0cis-directory\x04loop\x0etoo-many-links\x0cmessage-size\x0dname-too-long\x09\
-no-device\x08no-entry\x07no-lock\x13insufficient-memory\x12insufficient-space\x0d\
-not-directory\x09not-empty\x0fnot-recoverable\x0bunsupported\x06no-tty\x0eno-suc\
-h-device\x08overflow\x0dnot-permitted\x04pipe\x09read-only\x0cinvalid-seek\x0ete\
-xt-file-busy\x0ccross-device\x04\0\x0aerror-code\x03\0\x1b\x01m\x06\x06normal\x0a\
-sequential\x06random\x09will-need\x09dont-need\x08no-reuse\x04\0\x06advice\x03\0\
-\x1d\x01r\x02\x05lowerw\x05upperw\x04\0\x13metadata-hash-value\x03\0\x1f\x04\0\x0a\
-descriptor\x03\x01\x04\0\x16directory-entry-stream\x03\x01\x01h!\x01i\x01\x01j\x01\
-$\x01\x1c\x01@\x02\x04self#\x06offset\x09\0%\x04\0\"[method]descriptor.read-via-\
-stream\x01&\x01i\x03\x01j\x01'\x01\x1c\x01@\x02\x04self#\x06offset\x09\0(\x04\0#\
-[method]descriptor.write-via-stream\x01)\x01@\x01\x04self#\0(\x04\0$[method]desc\
-riptor.append-via-stream\x01*\x01j\0\x01\x1c\x01@\x04\x04self#\x06offset\x09\x06\
-length\x09\x06advice\x1e\0+\x04\0\x19[method]descriptor.advise\x01,\x01@\x01\x04\
-self#\0+\x04\0\x1c[method]descriptor.sync-data\x01-\x01j\x01\x0d\x01\x1c\x01@\x01\
-\x04self#\0.\x04\0\x1c[method]descriptor.get-flags\x01/\x01j\x01\x0b\x01\x1c\x01\
-@\x01\x04self#\00\x04\0\x1b[method]descriptor.get-type\x011\x01@\x02\x04self#\x04\
-size\x09\0+\x04\0\x1b[method]descriptor.set-size\x012\x01@\x03\x04self#\x15data-\
-access-timestamp\x18\x1bdata-modification-timestamp\x18\0+\x04\0\x1c[method]desc\
-riptor.set-times\x013\x01p}\x01o\x024\x7f\x01j\x015\x01\x1c\x01@\x03\x04self#\x06\
-length\x09\x06offset\x09\06\x04\0\x17[method]descriptor.read\x017\x01j\x01\x09\x01\
-\x1c\x01@\x03\x04self#\x06buffer4\x06offset\x09\08\x04\0\x18[method]descriptor.w\
-rite\x019\x01i\"\x01j\x01:\x01\x1c\x01@\x01\x04self#\0;\x04\0![method]descriptor\
-.read-directory\x01<\x04\0\x17[method]descriptor.sync\x01-\x01@\x02\x04self#\x04\
-paths\0+\x04\0&[method]descriptor.create-directory-at\x01=\x01j\x01\x16\x01\x1c\x01\
-@\x01\x04self#\0>\x04\0\x17[method]descriptor.stat\x01?\x01@\x03\x04self#\x0apat\
-h-flags\x0f\x04paths\0>\x04\0\x1a[method]descriptor.stat-at\x01@\x01@\x05\x04sel\
-f#\x0apath-flags\x0f\x04paths\x15data-access-timestamp\x18\x1bdata-modification-\
-timestamp\x18\0+\x04\0\x1f[method]descriptor.set-times-at\x01A\x01@\x05\x04self#\
-\x0eold-path-flags\x0f\x08old-paths\x0enew-descriptor#\x08new-paths\0+\x04\0\x1a\
-[method]descriptor.link-at\x01B\x01i!\x01j\x01\xc3\0\x01\x1c\x01@\x05\x04self#\x0a\
-path-flags\x0f\x04paths\x0aopen-flags\x11\x05flags\x0d\0\xc4\0\x04\0\x1a[method]\
-descriptor.open-at\x01E\x01j\x01s\x01\x1c\x01@\x02\x04self#\x04paths\0\xc6\0\x04\
-\0\x1e[method]descriptor.readlink-at\x01G\x04\0&[method]descriptor.remove-direct\
-ory-at\x01=\x01@\x04\x04self#\x08old-paths\x0enew-descriptor#\x08new-paths\0+\x04\
-\0\x1c[method]descriptor.rename-at\x01H\x01@\x03\x04self#\x08old-paths\x08new-pa\
-ths\0+\x04\0\x1d[method]descriptor.symlink-at\x01I\x04\0![method]descriptor.unli\
-nk-file-at\x01=\x01@\x02\x04self#\x05other#\0\x7f\x04\0![method]descriptor.is-sa\
-me-object\x01J\x01j\x01\x20\x01\x1c\x01@\x01\x04self#\0\xcb\0\x04\0\x20[method]d\
-escriptor.metadata-hash\x01L\x01@\x03\x04self#\x0apath-flags\x0f\x04paths\0\xcb\0\
-\x04\0#[method]descriptor.metadata-hash-at\x01M\x01h\"\x01k\x1a\x01j\x01\xcf\0\x01\
-\x1c\x01@\x01\x04self\xce\0\0\xd0\0\x04\03[method]directory-entry-stream.read-di\
-rectory-entry\x01Q\x01h\x05\x01k\x1c\x01@\x01\x03err\xd2\0\0\xd3\0\x04\0\x15file\
-system-error-code\x01T\x03\0\x1cwasi:filesystem/types@0.2.11\x05\x20\x02\x03\0\x13\
-\x0adescriptor\x01B\x07\x02\x03\x02\x01!\x04\0\x0adescriptor\x03\0\0\x01i\x01\x01\
-o\x02\x02s\x01p\x03\x01@\0\0\x04\x04\0\x0fget-directories\x01\x05\x03\0\x1fwasi:\
-filesystem/preopens@0.2.11\x05\"\x01B\x17\x02\x03\x02\x01\x05\x04\0\x05error\x03\
-\0\0\x04\0\x07network\x03\x01\x01m\x15\x07unknown\x0daccess-denied\x0dnot-suppor\
-ted\x10invalid-argument\x0dout-of-memory\x07timeout\x14concurrency-conflict\x0fn\
-ot-in-progress\x0bwould-block\x0dinvalid-state\x10new-socket-limit\x14address-no\
-t-bindable\x0eaddress-in-use\x12remote-unreachable\x12connection-refused\x10conn\
-ection-reset\x12connection-aborted\x12datagram-too-large\x11name-unresolvable\x1a\
-temporary-resolver-failure\x1apermanent-resolver-failure\x04\0\x0aerror-code\x03\
-\0\x03\x01m\x02\x04ipv4\x04ipv6\x04\0\x11ip-address-family\x03\0\x05\x01o\x04}}}\
-}\x04\0\x0cipv4-address\x03\0\x07\x01o\x08{{{{{{{{\x04\0\x0cipv6-address\x03\0\x09\
-\x01q\x02\x04ipv4\x01\x08\0\x04ipv6\x01\x0a\0\x04\0\x0aip-address\x03\0\x0b\x01r\
-\x02\x04port{\x07address\x08\x04\0\x13ipv4-socket-address\x03\0\x0d\x01r\x04\x04\
-port{\x09flow-infoy\x07address\x0a\x08scope-idy\x04\0\x13ipv6-socket-address\x03\
-\0\x0f\x01q\x02\x04ipv4\x01\x0e\0\x04ipv6\x01\x10\0\x04\0\x11ip-socket-address\x03\
-\0\x11\x01h\x01\x01k\x04\x01@\x01\x03err\x13\0\x14\x04\0\x12network-error-code\x01\
-\x15\x03\0\x1bwasi:sockets/network@0.2.11\x05#\x02\x03\0\x15\x07network\x01B\x05\
-\x02\x03\x02\x01$\x04\0\x07network\x03\0\0\x01i\x01\x01@\0\0\x02\x04\0\x10instan\
-ce-network\x01\x03\x03\0$wasi:sockets/instance-network@0.2.11\x05%\x02\x03\0\x15\
-\x0aerror-code\x02\x03\0\x15\x11ip-socket-address\x02\x03\0\x15\x11ip-address-fa\
-mily\x01BD\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\0\x02\x03\x02\x01$\x04\0\x07\
-network\x03\0\x02\x02\x03\x02\x01&\x04\0\x0aerror-code\x03\0\x04\x02\x03\x02\x01\
-'\x04\0\x11ip-socket-address\x03\0\x06\x02\x03\x02\x01(\x04\0\x11ip-address-fami\
-ly\x03\0\x08\x01p}\x01r\x02\x04data\x0a\x0eremote-address\x07\x04\0\x11incoming-\
-datagram\x03\0\x0b\x01k\x07\x01r\x02\x04data\x0a\x0eremote-address\x0d\x04\0\x11\
-outgoing-datagram\x03\0\x0e\x04\0\x0audp-socket\x03\x01\x04\0\x18incoming-datagr\
-am-stream\x03\x01\x04\0\x18outgoing-datagram-stream\x03\x01\x01h\x10\x01h\x03\x01\
-j\0\x01\x05\x01@\x03\x04self\x13\x07network\x14\x0dlocal-address\x07\0\x15\x04\0\
-\x1d[method]udp-socket.start-bind\x01\x16\x01@\x01\x04self\x13\0\x15\x04\0\x1e[m\
-ethod]udp-socket.finish-bind\x01\x17\x01i\x11\x01i\x12\x01o\x02\x18\x19\x01j\x01\
+rminal-stdout\x01\x04\x03\0\x1fwasi:cli/terminal-stdout@0.2.12\x05\x1a\x01B\x06\x02\
+\x03\x02\x01\x19\x04\0\x0fterminal-output\x03\0\0\x01i\x01\x01k\x02\x01@\0\0\x03\
+\x04\0\x13get-terminal-stderr\x01\x04\x03\0\x1fwasi:cli/terminal-stderr@0.2.12\x05\
+\x1b\x01B\x05\x01r\x02\x07secondsw\x0bnanosecondsy\x04\0\x08datetime\x03\0\0\x01\
+@\0\0\x01\x04\0\x03now\x01\x02\x04\0\x0aresolution\x01\x02\x03\0\x1dwasi:clocks/\
+wall-clock@0.2.12\x05\x1c\x02\x03\0\x11\x08datetime\x01B\x08\x02\x03\x02\x01\x1d\
+\x04\0\x08datetime\x03\0\0\x01r\x03\x0autc-offsetz\x04names\x17in-daylight-savin\
+g-time\x7f\x04\0\x10timezone-display\x03\0\x02\x01@\x01\x04when\x01\0\x03\x04\0\x07\
+display\x01\x04\x01@\x01\x04when\x01\0z\x04\0\x0autc-offset\x01\x05\x03\0\x1bwas\
+i:clocks/timezone@0.2.12\x05\x1e\x02\x03\0\x04\x05error\x01Br\x02\x03\x02\x01\x08\
+\x04\0\x0cinput-stream\x03\0\0\x02\x03\x02\x01\x09\x04\0\x0doutput-stream\x03\0\x02\
+\x02\x03\x02\x01\x1f\x04\0\x05error\x03\0\x04\x02\x03\x02\x01\x1d\x04\0\x08datet\
+ime\x03\0\x06\x01w\x04\0\x08filesize\x03\0\x08\x01m\x08\x07unknown\x0cblock-devi\
+ce\x10character-device\x09directory\x04fifo\x0dsymbolic-link\x0cregular-file\x06\
+socket\x04\0\x0fdescriptor-type\x03\0\x0a\x01n\x06\x04read\x05write\x13file-inte\
+grity-sync\x13data-integrity-sync\x14requested-write-sync\x10mutate-directory\x04\
+\0\x10descriptor-flags\x03\0\x0c\x01n\x01\x0esymlink-follow\x04\0\x0apath-flags\x03\
+\0\x0e\x01n\x04\x06create\x09directory\x09exclusive\x08truncate\x04\0\x0aopen-fl\
+ags\x03\0\x10\x01w\x04\0\x0alink-count\x03\0\x12\x01k\x07\x01r\x06\x04type\x0b\x0a\
+link-count\x13\x04size\x09\x15data-access-timestamp\x14\x1bdata-modification-tim\
+estamp\x14\x17status-change-timestamp\x14\x04\0\x0fdescriptor-stat\x03\0\x15\x01\
+q\x03\x09no-change\0\0\x03now\0\0\x09timestamp\x01\x07\0\x04\0\x0dnew-timestamp\x03\
+\0\x17\x01r\x02\x04type\x0b\x04names\x04\0\x0fdirectory-entry\x03\0\x19\x01m%\x06\
+access\x0bwould-block\x07already\x0ebad-descriptor\x04busy\x08deadlock\x05quota\x05\
+exist\x0efile-too-large\x15illegal-byte-sequence\x0bin-progress\x0binterrupted\x07\
+invalid\x02io\x0cis-directory\x04loop\x0etoo-many-links\x0cmessage-size\x0dname-\
+too-long\x09no-device\x08no-entry\x07no-lock\x13insufficient-memory\x12insuffici\
+ent-space\x0dnot-directory\x09not-empty\x0fnot-recoverable\x0bunsupported\x06no-\
+tty\x0eno-such-device\x08overflow\x0dnot-permitted\x04pipe\x09read-only\x0cinval\
+id-seek\x0etext-file-busy\x0ccross-device\x04\0\x0aerror-code\x03\0\x1b\x01m\x06\
+\x06normal\x0asequential\x06random\x09will-need\x09dont-need\x08no-reuse\x04\0\x06\
+advice\x03\0\x1d\x01r\x02\x05lowerw\x05upperw\x04\0\x13metadata-hash-value\x03\0\
+\x1f\x04\0\x0adescriptor\x03\x01\x04\0\x16directory-entry-stream\x03\x01\x01h!\x01\
+i\x01\x01j\x01$\x01\x1c\x01@\x02\x04self#\x06offset\x09\0%\x04\0\"[method]descri\
+ptor.read-via-stream\x01&\x01i\x03\x01j\x01'\x01\x1c\x01@\x02\x04self#\x06offset\
+\x09\0(\x04\0#[method]descriptor.write-via-stream\x01)\x01@\x01\x04self#\0(\x04\0\
+$[method]descriptor.append-via-stream\x01*\x01j\0\x01\x1c\x01@\x04\x04self#\x06o\
+ffset\x09\x06length\x09\x06advice\x1e\0+\x04\0\x19[method]descriptor.advise\x01,\
+\x01@\x01\x04self#\0+\x04\0\x1c[method]descriptor.sync-data\x01-\x01j\x01\x0d\x01\
+\x1c\x01@\x01\x04self#\0.\x04\0\x1c[method]descriptor.get-flags\x01/\x01j\x01\x0b\
+\x01\x1c\x01@\x01\x04self#\00\x04\0\x1b[method]descriptor.get-type\x011\x01@\x02\
+\x04self#\x04size\x09\0+\x04\0\x1b[method]descriptor.set-size\x012\x01@\x03\x04s\
+elf#\x15data-access-timestamp\x18\x1bdata-modification-timestamp\x18\0+\x04\0\x1c\
+[method]descriptor.set-times\x013\x01p}\x01o\x024\x7f\x01j\x015\x01\x1c\x01@\x03\
+\x04self#\x06length\x09\x06offset\x09\06\x04\0\x17[method]descriptor.read\x017\x01\
+j\x01\x09\x01\x1c\x01@\x03\x04self#\x06buffer4\x06offset\x09\08\x04\0\x18[method\
+]descriptor.write\x019\x01i\"\x01j\x01:\x01\x1c\x01@\x01\x04self#\0;\x04\0![meth\
+od]descriptor.read-directory\x01<\x04\0\x17[method]descriptor.sync\x01-\x01@\x02\
+\x04self#\x04paths\0+\x04\0&[method]descriptor.create-directory-at\x01=\x01j\x01\
+\x16\x01\x1c\x01@\x01\x04self#\0>\x04\0\x17[method]descriptor.stat\x01?\x01@\x03\
+\x04self#\x0apath-flags\x0f\x04paths\0>\x04\0\x1a[method]descriptor.stat-at\x01@\
+\x01@\x05\x04self#\x0apath-flags\x0f\x04paths\x15data-access-timestamp\x18\x1bda\
+ta-modification-timestamp\x18\0+\x04\0\x1f[method]descriptor.set-times-at\x01A\x01\
+@\x05\x04self#\x0eold-path-flags\x0f\x08old-paths\x0enew-descriptor#\x08new-path\
+s\0+\x04\0\x1a[method]descriptor.link-at\x01B\x01i!\x01j\x01\xc3\0\x01\x1c\x01@\x05\
+\x04self#\x0apath-flags\x0f\x04paths\x0aopen-flags\x11\x05flags\x0d\0\xc4\0\x04\0\
+\x1a[method]descriptor.open-at\x01E\x01j\x01s\x01\x1c\x01@\x02\x04self#\x04paths\
+\0\xc6\0\x04\0\x1e[method]descriptor.readlink-at\x01G\x04\0&[method]descriptor.r\
+emove-directory-at\x01=\x01@\x04\x04self#\x08old-paths\x0enew-descriptor#\x08new\
+-paths\0+\x04\0\x1c[method]descriptor.rename-at\x01H\x01@\x03\x04self#\x08old-pa\
+ths\x08new-paths\0+\x04\0\x1d[method]descriptor.symlink-at\x01I\x04\0![method]de\
+scriptor.unlink-file-at\x01=\x01@\x02\x04self#\x05other#\0\x7f\x04\0![method]des\
+criptor.is-same-object\x01J\x01j\x01\x20\x01\x1c\x01@\x01\x04self#\0\xcb\0\x04\0\
+\x20[method]descriptor.metadata-hash\x01L\x01@\x03\x04self#\x0apath-flags\x0f\x04\
+paths\0\xcb\0\x04\0#[method]descriptor.metadata-hash-at\x01M\x01h\"\x01k\x1a\x01\
+j\x01\xcf\0\x01\x1c\x01@\x01\x04self\xce\0\0\xd0\0\x04\03[method]directory-entry\
+-stream.read-directory-entry\x01Q\x01h\x05\x01k\x1c\x01@\x01\x03err\xd2\0\0\xd3\0\
+\x04\0\x15filesystem-error-code\x01T\x03\0\x1cwasi:filesystem/types@0.2.12\x05\x20\
+\x02\x03\0\x13\x0adescriptor\x01B\x07\x02\x03\x02\x01!\x04\0\x0adescriptor\x03\0\
+\0\x01i\x01\x01o\x02\x02s\x01p\x03\x01@\0\0\x04\x04\0\x0fget-directories\x01\x05\
+\x03\0\x1fwasi:filesystem/preopens@0.2.12\x05\"\x01B\x17\x02\x03\x02\x01\x05\x04\
+\0\x05error\x03\0\0\x04\0\x07network\x03\x01\x01m\x15\x07unknown\x0daccess-denie\
+d\x0dnot-supported\x10invalid-argument\x0dout-of-memory\x07timeout\x14concurrenc\
+y-conflict\x0fnot-in-progress\x0bwould-block\x0dinvalid-state\x10new-socket-limi\
+t\x14address-not-bindable\x0eaddress-in-use\x12remote-unreachable\x12connection-\
+refused\x10connection-reset\x12connection-aborted\x12datagram-too-large\x11name-\
+unresolvable\x1atemporary-resolver-failure\x1apermanent-resolver-failure\x04\0\x0a\
+error-code\x03\0\x03\x01m\x02\x04ipv4\x04ipv6\x04\0\x11ip-address-family\x03\0\x05\
+\x01o\x04}}}}\x04\0\x0cipv4-address\x03\0\x07\x01o\x08{{{{{{{{\x04\0\x0cipv6-add\
+ress\x03\0\x09\x01q\x02\x04ipv4\x01\x08\0\x04ipv6\x01\x0a\0\x04\0\x0aip-address\x03\
+\0\x0b\x01r\x02\x04port{\x07address\x08\x04\0\x13ipv4-socket-address\x03\0\x0d\x01\
+r\x04\x04port{\x09flow-infoy\x07address\x0a\x08scope-idy\x04\0\x13ipv6-socket-ad\
+dress\x03\0\x0f\x01q\x02\x04ipv4\x01\x0e\0\x04ipv6\x01\x10\0\x04\0\x11ip-socket-\
+address\x03\0\x11\x01h\x01\x01k\x04\x01@\x01\x03err\x13\0\x14\x04\0\x12network-e\
+rror-code\x01\x15\x03\0\x1bwasi:sockets/network@0.2.12\x05#\x02\x03\0\x15\x07net\
+work\x01B\x05\x02\x03\x02\x01$\x04\0\x07network\x03\0\0\x01i\x01\x01@\0\0\x02\x04\
+\0\x10instance-network\x01\x03\x03\0$wasi:sockets/instance-network@0.2.12\x05%\x02\
+\x03\0\x15\x0aerror-code\x02\x03\0\x15\x11ip-socket-address\x02\x03\0\x15\x11ip-\
+address-family\x01BD\x02\x03\x02\x01\x02\x04\0\x08pollable\x03\0\0\x02\x03\x02\x01\
+$\x04\0\x07network\x03\0\x02\x02\x03\x02\x01&\x04\0\x0aerror-code\x03\0\x04\x02\x03\
+\x02\x01'\x04\0\x11ip-socket-address\x03\0\x06\x02\x03\x02\x01(\x04\0\x11ip-addr\
+ess-family\x03\0\x08\x01p}\x01r\x02\x04data\x0a\x0eremote-address\x07\x04\0\x11i\
+ncoming-datagram\x03\0\x0b\x01k\x07\x01r\x02\x04data\x0a\x0eremote-address\x0d\x04\
+\0\x11outgoing-datagram\x03\0\x0e\x04\0\x0audp-socket\x03\x01\x04\0\x18incoming-\
+datagram-stream\x03\x01\x04\0\x18outgoing-datagram-stream\x03\x01\x01h\x10\x01h\x03\
+\x01j\0\x01\x05\x01@\x03\x04self\x13\x07network\x14\x0dlocal-address\x07\0\x15\x04\
+\0\x1d[method]udp-socket.start-bind\x01\x16\x01@\x01\x04self\x13\0\x15\x04\0\x1e\
+[method]udp-socket.finish-bind\x01\x17\x01i\x11\x01i\x12\x01o\x02\x18\x19\x01j\x01\
 \x1a\x01\x05\x01@\x02\x04self\x13\x0eremote-address\x0d\0\x1b\x04\0\x19[method]u\
 dp-socket.stream\x01\x1c\x01j\x01\x07\x01\x05\x01@\x01\x04self\x13\0\x1d\x04\0\x20\
 [method]udp-socket.local-address\x01\x1e\x04\0![method]udp-socket.remote-address\
@@ -16154,12 +16262,12 @@ ram-stream.receive\x01+\x01@\x01\x04self(\0&\x04\0*[method]incoming-datagram-str
 eam.subscribe\x01,\x01h\x12\x01@\x01\x04self-\0#\x04\0+[method]outgoing-datagram\
 -stream.check-send\x01.\x01p\x0f\x01@\x02\x04self-\x09datagrams/\0#\x04\0%[metho\
 d]outgoing-datagram-stream.send\x010\x01@\x01\x04self-\0&\x04\0*[method]outgoing\
--datagram-stream.subscribe\x011\x03\0\x17wasi:sockets/udp@0.2.11\x05)\x02\x03\0\x17\
+-datagram-stream.subscribe\x011\x03\0\x17wasi:sockets/udp@0.2.12\x05)\x02\x03\0\x17\
 \x0audp-socket\x01B\x0c\x02\x03\x02\x01$\x04\0\x07network\x03\0\0\x02\x03\x02\x01\
 &\x04\0\x0aerror-code\x03\0\x02\x02\x03\x02\x01(\x04\0\x11ip-address-family\x03\0\
 \x04\x02\x03\x02\x01*\x04\0\x0audp-socket\x03\0\x06\x01i\x07\x01j\x01\x08\x01\x03\
 \x01@\x01\x0eaddress-family\x05\0\x09\x04\0\x11create-udp-socket\x01\x0a\x03\0%w\
-asi:sockets/udp-create-socket@0.2.11\x05+\x01BT\x02\x03\x02\x01\x08\x04\0\x0cinp\
+asi:sockets/udp-create-socket@0.2.12\x05+\x01BT\x02\x03\x02\x01\x08\x04\0\x0cinp\
 ut-stream\x03\0\0\x02\x03\x02\x01\x09\x04\0\x0doutput-stream\x03\0\x02\x02\x03\x02\
 \x01\x02\x04\0\x08pollable\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x08duration\x03\0\
 \x06\x02\x03\x02\x01$\x04\0\x07network\x03\0\x08\x02\x03\x02\x01&\x04\0\x0aerror\
@@ -16194,12 +16302,12 @@ ze\x014\x04\0*[method]tcp-socket.set-receive-buffer-size\x01&\x04\0#[method]tcp-
 socket.send-buffer-size\x014\x04\0'[method]tcp-socket.set-send-buffer-size\x01&\x01\
 i\x05\x01@\x01\x04self\x13\05\x04\0\x1c[method]tcp-socket.subscribe\x016\x01@\x02\
 \x04self\x13\x0dshutdown-type\x11\0\x15\x04\0\x1b[method]tcp-socket.shutdown\x01\
-7\x03\0\x17wasi:sockets/tcp@0.2.11\x05,\x02\x03\0\x19\x0atcp-socket\x01B\x0c\x02\
+7\x03\0\x17wasi:sockets/tcp@0.2.12\x05,\x02\x03\0\x19\x0atcp-socket\x01B\x0c\x02\
 \x03\x02\x01$\x04\0\x07network\x03\0\0\x02\x03\x02\x01&\x04\0\x0aerror-code\x03\0\
 \x02\x02\x03\x02\x01(\x04\0\x11ip-address-family\x03\0\x04\x02\x03\x02\x01-\x04\0\
 \x0atcp-socket\x03\0\x06\x01i\x07\x01j\x01\x08\x01\x03\x01@\x01\x0eaddress-famil\
 y\x05\0\x09\x04\0\x11create-tcp-socket\x01\x0a\x03\0%wasi:sockets/tcp-create-soc\
-ket@0.2.11\x05.\x02\x03\0\x15\x0aip-address\x01B\x16\x02\x03\x02\x01\x02\x04\0\x08\
+ket@0.2.12\x05.\x02\x03\0\x15\x0aip-address\x01B\x16\x02\x03\x02\x01\x02\x04\0\x08\
 pollable\x03\0\0\x02\x03\x02\x01$\x04\0\x07network\x03\0\x02\x02\x03\x02\x01&\x04\
 \0\x0aerror-code\x03\0\x04\x02\x03\x02\x01/\x04\0\x0aip-address\x03\0\x06\x04\0\x16\
 resolve-address-stream\x03\x01\x01h\x08\x01k\x07\x01j\x01\x0a\x01\x05\x01@\x01\x04\
@@ -16207,13 +16315,13 @@ self\x09\0\x0b\x04\03[method]resolve-address-stream.resolve-next-address\x01\x0c
 \x01i\x01\x01@\x01\x04self\x09\0\x0d\x04\0([method]resolve-address-stream.subscr\
 ibe\x01\x0e\x01h\x03\x01i\x08\x01j\x01\x10\x01\x05\x01@\x02\x07network\x0f\x04na\
 mes\0\x11\x04\0\x11resolve-addresses\x01\x12\x03\0\"wasi:sockets/ip-name-lookup@\
-0.2.11\x050\x01B\x05\x01p}\x01@\x01\x03lenw\0\0\x04\0\x10get-random-bytes\x01\x01\
-\x01@\0\0w\x04\0\x0eget-random-u64\x01\x02\x03\0\x19wasi:random/random@0.2.11\x05\
+0.2.12\x050\x01B\x05\x01p}\x01@\x01\x03lenw\0\0\x04\0\x10get-random-bytes\x01\x01\
+\x01@\0\0w\x04\0\x0eget-random-u64\x01\x02\x03\0\x19wasi:random/random@0.2.12\x05\
 1\x01B\x05\x01p}\x01@\x01\x03lenw\0\0\x04\0\x19get-insecure-random-bytes\x01\x01\
 \x01@\0\0w\x04\0\x17get-insecure-random-u64\x01\x02\x03\0\x1bwasi:random/insecur\
-e@0.2.11\x052\x01B\x03\x01o\x02ww\x01@\0\0\0\x04\0\x0dinsecure-seed\x01\x01\x03\0\
-\x20wasi:random/insecure-seed@0.2.11\x053\x01B\x03\x01j\0\0\x01@\0\0\0\x04\0\x03\
-run\x01\x01\x04\0\x13wasi:cli/run@0.2.11\x054\x04\0\x15component:aws-cli/cli\x04\
+e@0.2.12\x052\x01B\x03\x01o\x02ww\x01@\0\0\0\x04\0\x0dinsecure-seed\x01\x01\x03\0\
+\x20wasi:random/insecure-seed@0.2.12\x053\x01B\x03\x01j\0\0\x01@\0\0\0\x04\0\x03\
+run\x01\x01\x04\0\x13wasi:cli/run@0.2.12\x054\x04\0\x15component:aws-cli/cli\x04\
 \0\x0b\x09\x01\0\x03cli\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-c\
 omponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]

@@ -1,4 +1,4 @@
-/** @module Interface wasi:http/types@0.2.11 **/
+/** @module Interface wasi:http/types@0.2.12 **/
 export type Duration = import('./wasi-clocks-monotonic-clock.js').Duration;
 export type FieldKey = string;
 export type FieldName = FieldKey;

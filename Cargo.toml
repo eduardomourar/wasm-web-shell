@@ -1,11 +1,12 @@
 [workspace]
 members = [
     "packages/aws-cli",
-    "packages/credentials-adapter",
+    "packages/providers-adapter",
     "packages/simple-http-proxy",
     "packages/wasi-engine",
 ]
-resolver = "2"
+exclude = ["tools/generate-ops"]
+resolver = "3"
 
 [workspace.package]
 version = "0.0.1"
@@ -13,25 +14,6 @@ authors = [
     "Eduardo Rodrigues <16357187+eduardomourar@users.noreply.github.com>",
 ]
 edition = "2024"
-
-[profile.release]
-lto = true
-panic = "abort"
-
-[profile.release.package.aws-cli]
-codegen-units = 1
-opt-level = "s"
-strip = true
-
-[profile.release.package.simple-http-proxy]
-codegen-units = 1
-opt-level = "s"
-strip = "debuginfo"
-
-[profile.release.package.credentials-adapter]
-codegen-units = 1
-opt-level = "s"
-strip = true
 
 [workspace.dependencies]
 anyhow = { version = "1.0" }

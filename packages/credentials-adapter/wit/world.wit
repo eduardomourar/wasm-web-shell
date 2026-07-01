@@ -1,9 +1,0 @@
-package component:credentials-adapter;
-
-world adapter {
-    // Import WASI CLI environment interface to read env vars
-    import wasi:cli/environment@0.2.11;
-
-    // Export the credentials provider interface
-    export component:aws-cli/credentials-provider;
-}

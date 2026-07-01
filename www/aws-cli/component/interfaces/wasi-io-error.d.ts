@@ -1,4 +1,4 @@
-/** @module Interface wasi:io/error@0.2.11 **/
+/** @module Interface wasi:io/error@0.2.12 **/
 
 export class Error {
   /**
