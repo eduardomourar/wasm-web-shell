@@ -76,6 +76,7 @@ npm run build
 - **Main entry**: `src/index.tsx` - React application with xterm.js integration
 - **Terminal UI**: `src/web-shell.ts` - integrates wasm-terminal with WASM execution
 - **AWS Commands**: `src/aws-command.ts` - bridges terminal to WASM component
+- **Filesystem**: `src/wasi-filesystem.ts` - WASI filesystem implementation using native-file-system-adapter
 - **Terminal Package**: `wasm-terminal/` - Local TypeScript terminal addon
   - `src/index.ts` - Main WasmTerminal class (WASI Preview2 focus)
   - `src/LineBuffer.ts` - Line buffering for stdout/stderr
@@ -308,9 +309,19 @@ wasmTerminal.registerJsCommand("aws", async (argv) => {
 
 **File System:**
 
-- File system backed by IndexedDB via `native-file-system-adapter`
+- WASI filesystem interface implemented via `src/wasi-filesystem.ts`
+- Backed by native browser File System API (no polyfills required)
+- Storage persists using origin-private filesystem (`navigator.storage.getDirectory()`)
 - Pre-opened directories available at `/sandbox`
-- WASI filesystem interface compatible
+- Requires Chromium-based browsers (Chrome, Edge) for full File System API support
+- Full WASI Preview2 filesystem interface support:
+  - `wasi:filesystem/preopens#get-directories` - Lists preopened directories
+  - `wasi:filesystem/types#read-directory` - Directory listing
+  - `wasi:filesystem/types#open-at` - Open files/directories
+  - `wasi:filesystem/types#read-via-stream` - Stream reading
+  - `wasi:filesystem/types#write-via-stream` - Stream writing
+  - `wasi:filesystem/types#stat` - File metadata
+  - Directory operations (create, remove, unlink)
 
 ### Migration from wasm-webterm
 
@@ -329,6 +340,121 @@ The project migrated from `wasm-webterm` (Wasmer + Emscripten) to `wasm-terminal
 - Better type safety (full TypeScript)
 - Standard WASI Preview2 interface
 - No stack overflow bugs
+
+## WASI Filesystem Implementation
+
+The project implements a custom WASI filesystem interface that bridges WASI Preview2 components with the browser's File System Access API.
+
+### Architecture
+
+```
+WASI Component (AWS CLI)
+    ↓
+wasi-filesystem.ts (WASI interface implementation)
+    ↓
+File System API (navigator.storage.getDirectory())
+    ↓
+Origin-Private Filesystem (Browser native storage)
+```
+
+### Implementation (`src/wasi-filesystem.ts`)
+
+**Key function:** `createFilesystemPreopens(preopens: Map<string, FileSystemDirectoryHandle>)`
+
+Converts browser FileSystemDirectoryHandles to the in-memory fileData structure expected by `@bytecodealliance/preview2-shim` and registers them as preopens using the shim's built-in resource management.
+
+**Architecture:**
+
+The implementation uses a hybrid approach combining lazy loading with in-memory caching:
+
+1. **Descriptor Wrapping**: Each `FileSystemDirectoryHandle` / `FileSystemFileHandle` is wrapped in a `FileSystemDescriptor` instance
+2. **Lazy Loading**: Files loaded from storage only when first accessed via `getFile()` + `arrayBuffer()`
+3. **Memory Caching**: File contents cached in memory for synchronous read access (required by WASI)
+4. **Direct Writes**: All writes flushed directly to storage via `FileSystemWritableFileStream`
+
+**Why This Approach:**
+
+WASI requires synchronous file operations, but the browser's File System API is inherently asynchronous. The hybrid approach bridges this gap:
+- Files lazy-loaded on first access (not upfront)
+- Cached in memory for subsequent synchronous reads
+- Writes immediately persisted to storage
+- Cache invalidated via `lastModified` timestamp checks
+
+**Implementation Details:**
+
+- `FileSystemDescriptor` class implements full WASI filesystem interface
+- `ensureFileLoaded()` - Loads file into cache on first access
+- `readViaStream` - Returns input stream using cached data (synchronous `blockingRead`)
+- `writeViaStream` / `appendViaStream` - Buffers writes, flushes to storage, updates cache
+- `openAt` - Pre-loads files into cache for immediate synchronous access
+
+**Tradeoffs:**
+
+- **✓ Pro**: Lazy loading - no upfront cost to load all files
+- **✓ Pro**: Immediate persistence - all writes go directly to browser storage
+- **✓ Pro**: WASI compliant - supports synchronous reads via caching
+- **✗ Con**: Accessed files consume memory (cached for session)
+- **✗ Con**: First access has async overhead (subsequent reads fast)
+- **✗ Con**: Cache coherency - external file changes not auto-detected
+
+**Persistence:** All writes are immediately flushed to browser's origin-private filesystem and cached. No manual sync required.
+
+### Usage Example
+
+**Setup (web-shell.ts):**
+```typescript
+// Use native File System API (Chromium-based browsers)
+const preOpened = new Map<string, FileSystemDirectoryHandle>();
+preOpened.set(
+  "/sandbox",
+  await navigator.storage.getDirectory()
+);
+```
+
+**Integration (aws-command.ts):**
+```typescript
+import { filesystem } from "@bytecodealliance/preview2-shim";
+import { createFilesystemPreopens } from "./wasi-filesystem";
+
+// Convert browser FileSystemHandles to preview2-shim fileData structure
+const filesystemPreopens = await createFilesystemPreopens(preopens);
+
+// Extend default filesystem with browser-backed preopens
+const customFilesystem = {
+  ...filesystem,
+  preopens: {
+    getDirectories: () => filesystemPreopens.getDirectories(),
+  },
+};
+
+await initialize(credentialsProvider, {
+  filesystem: customFilesystem,
+  // ...
+});
+```
+
+**From AWS CLI:**
+```bash
+# Save S3 object to browser filesystem
+aws s3 get-object --bucket my-bucket --key file.txt --output /sandbox/file.txt
+
+# File is written to origin-private filesystem and persists across sessions
+```
+
+### Features
+
+- **Persistent storage** - Files saved to origin-private filesystem persist across browser sessions
+- **Native browser API** - Uses standard File System API, no polyfills required
+- **Standard WASI** - Works with any WASI Preview2 component
+- **Type-safe** - Full TypeScript implementation
+
+### Limitations
+
+- **Browser compatibility** - Requires Chromium-based browsers (Chrome, Edge, Opera, Brave)
+  - Safari and Firefox have limited/no support for File System API
+- **Storage quotas** - Subject to browser storage limits (typically 10-50% of free disk space)
+- **Security restrictions** - Subject to same-origin policy and browser permissions
+- **In-memory sync** - Files loaded into memory on initialization, changes don't auto-persist back to storage
 
 ## CI/CD
 

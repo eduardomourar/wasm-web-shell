@@ -224,10 +224,10 @@ export default class WasmTerminal implements ITerminalAddon {
     commands.push(cmd);
 
     if (usesEnvironmentVars) {
-      this._stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Environment variables are not supported!\n");
+      this.stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Environment variables are not supported!\n");
     }
     if (usesBashFeatures) {
-      this._stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Advanced bash features are not supported! Only the pipe '|' works.\n");
+      this.stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Advanced bash features are not supported! Only the pipe '|' works.\n");
     }
 
     return commands;
@@ -269,33 +269,33 @@ export default class WasmTerminal implements ITerminalAddon {
 
           // If is last command in pipe -> print output to xterm
           if (index === commandsInLine.length - 1) {
-            this._stdout(output);
+            this.stdout(output);
           } else {
             stdinPreset = output || null;
           }
         }
         // Command not found
         else {
-          this._stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m Command not found: ${commandName}\n`);
+          this.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m Command not found: ${commandName}\n`);
         }
       }
     } catch (e) {
       // Catch errors
-      if (this._outputBuffer.slice(-1) !== "\n") this._stderr("\n");
-      this._stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m ${e}\n`);
+      if (this._outputBuffer.slice(-1) !== "\n") this.stderr("\n");
+      this.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m ${e}\n`);
       console.error("Error running line:", e);
     }
   }
 
   /* Output handling */
 
-  private _stdout(data: string): void {
+  stdout(data: string): void {
     if (this._suppressOutputs) return;
     // Write to buffer which handles line buffering and outputs to xterm
     this._stdoutBuffer?.write(data);
   }
 
-  private _stderr(data: string): void {
+  stderr(data: string): void {
     if (this._suppressOutputs) return;
     // Write to buffer which handles line buffering and outputs to xterm
     this._stderrBuffer?.write(data);

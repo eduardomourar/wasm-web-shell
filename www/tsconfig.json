@@ -4,7 +4,7 @@
     "module": "ESNext",
     "declaration": true,
     "lib": ["dom", "dom.iterable", "esnext"],
-    "types": ["node"],
+    "types": ["node", "chrome"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -20,8 +20,10 @@
     "noPropertyAccessFromIndexSignature": true,
     "incremental": true,
     "sourceMap": true,
+    "preserveSymlinks": true,
     "paths": {
-      "aws-cli-wasm": ["./aws-cli/src/index-browser.ts"]
+      "aws-cli-wasm": ["./aws-cli/src/index-browser.ts"],
+      "coreutils-wasm": ["./coreutils/src/index-browser.ts"]
     }
   },
   "include": [
@@ -29,9 +31,8 @@
     "src/**/*.tsx",
     "src/**/*.js",
     "aws-cli/src/**/*.ts",
-    "aws-cli/types.d.ts",
-    "wasm-terminal/src/**/*.ts",
-    "wasm-terminal/src/**/*.d.ts"
+    "coreutils/src/**/*.ts",
+    "wasm-terminal/src/**/*.ts"
   ],
   "exclude": ["node_modules"]
 }

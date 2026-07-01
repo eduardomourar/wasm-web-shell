@@ -8,7 +8,34 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sdk-apigatewayv2 = { version = "1", default-features = false }
+aws-sdk-athena = { version = "1", default-features = false }
+aws-sdk-cloudfront = { version = "1", default-features = false }
+aws-sdk-cloudtrail = { version = "1", default-features = false }
+aws-sdk-cloudwatch = { version = "1", default-features = false }
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
+aws-sdk-cognitoidentityprovider = { version = "1", default-features = false }
+aws-sdk-config = { version = "1", default-features = false }
+aws-sdk-dynamodb = { version = "1", default-features = false }
+aws-sdk-ebs = { version = "1", default-features = false }
+aws-sdk-ec2 = { version = "1", default-features = false }
+aws-sdk-ecs = { version = "1", default-features = false }
+aws-sdk-efs = { version = "1", default-features = false }
+aws-sdk-eks = { version = "1", default-features = false }
+aws-sdk-elasticache = { version = "1", default-features = false }
+aws-sdk-elasticloadbalancingv2 = { version = "1", default-features = false }
+aws-sdk-eventbridge = { version = "1", default-features = false }
+aws-sdk-glacier = { version = "1", default-features = false }
+aws-sdk-iam = { version = "1", default-features = false }
+aws-sdk-kms = { version = "1", default-features = false }
+aws-sdk-lambda = { version = "1", default-features = false }
+aws-sdk-rds = { version = "1", default-features = false }
+aws-sdk-redshift = { version = "1", default-features = false }
+aws-sdk-route53 = { version = "1", default-features = false }
 aws-sdk-s3 = { version = "1", default-features = false }
+aws-sdk-secretsmanager = { version = "1", default-features = false }
+aws-sdk-sns = { version = "1", default-features = false }
+aws-sdk-sqs = { version = "1", default-features = false }
 aws-sdk-ssm = { version = "1", default-features = false }
 aws-sdk-sts = { version = "1", default-features = false }
 aws-config = { version = "1", default-features = false, features = [
@@ -31,7 +58,9 @@ aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-runtime = { version = "1", features = ["client"] }
 aws-smithy-runtime-api = { version = "1", features = ["client"] }
 aws-smithy-types = "1"
+fs2 = "0.4"
 http = "1"
+tracing-subscriber = "0.3"
 
 [lib]
 crate-type = ["cdylib"]
@@ -48,5 +77,5 @@ package = "component:aws-cli"
 path = "wit/world.wit"
 
 [package.metadata.component.target.dependencies]
-"wasi:cli" = "=0.2.11"
-"wasi:http" = "=0.2.11"
+"wasi:cli" = "=0.2.12"
+"wasi:http" = "=0.2.12"

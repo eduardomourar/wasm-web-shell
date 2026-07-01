@@ -1,4 +1,14 @@
-.PHONY: help test test-unit test-native test-integration
+.PHONY: help test test-unit test-native test-integration build-extension
+
+CARGO_PROFILE ?= dev
+
+ifeq ($(CARGO_PROFILE),release)
+    # Production: Full LTO
+    OPTIMIZATION_FLAGS := CARGO_PROFILE_RELEASE_LTO=true
+else
+    # Default (dev): Thin LTO
+    OPTIMIZATION_FLAGS := CARGO_PROFILE_DEV_LTO=thin
+endif
 
 # Default target
 help:
@@ -9,28 +19,29 @@ help:
 	@echo "  make test-integration   - Run integration tests with composed WASM"
 	@echo "  make build-wasi-engine  - Build components for wasip2"
 	@echo "  make build-components   - Build all WASM components"
+	@echo "  make build-extension    - Build the Chrome extension with embedded web shell"
 
 # Build components for wasip2 (default target)
 build-components:
-	@echo "Building credentials-adapter for wasip2..."
-	@cargo component build -p credentials-adapter --target wasm32-wasip2
+	@echo "Building providers-adapter for wasip2..."
+	@${OPTIMIZATION_FLAGS} cargo component build -p providers-adapter --target wasm32-wasip2 --profile "$(CARGO_PROFILE)"
 	@echo "Building aws-cli for wasip2..."
-	@cargo component build -p aws-cli --target wasm32-wasip2
+	@${OPTIMIZATION_FLAGS} cargo component build -p aws-cli --target wasm32-wasip2 --profile "$(CARGO_PROFILE)"
 
 # Run unit tests on native target
 test-native:
 	@echo "Running unit tests on native target..."
-	@cargo test -p aws-cli --lib
+	@cargo test -p aws-cli --lib --profile "$(CARGO_PROFILE)"
 
 # Run unit tests on all targets
 test-unit: test-native
 	@echo "Running unit tests on wasip2 target..."
-	@cargo test -p simple-http-proxy --target wasm32-wasip2
+	@cargo test -p simple-http-proxy --target wasm32-wasip2 --profile "$(CARGO_PROFILE)"
 
 # Build for wasi-engine to validate compilation
 build-wasi-engine: build-components
 	@echo "Building wasi-engine..."
-	@cargo build -p wasi-engine
+	@cargo build -p wasi-engine --profile "$(CARGO_PROFILE)"
 
 # Run integration tests with composed WASM component
 test-integration: build-wasi-engine
@@ -44,3 +55,15 @@ test: test-unit test-integration
 clean-composed:
 	@rm -rf target/composed
 	@echo "Cleaned composed artifacts"
+
+# Generate operation code from aws-cli-operations.csv
+generate-ops:
+	@echo "Generating operation code..."
+	@cargo run --manifest-path tools/generate-ops/Cargo.toml
+	@echo "Done. Review generated files and run: cargo check -p aws-cli --lib"
+
+# Build the Chrome extension (web shell + extension files)
+build-extension:
+	@echo "Building extension..."
+	@cd www && npm run build:extension
+	@echo "Extension ready at extension/"

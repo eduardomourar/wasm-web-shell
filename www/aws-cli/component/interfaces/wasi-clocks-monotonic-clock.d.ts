@@ -1,4 +1,4 @@
-/** @module Interface wasi:clocks/monotonic-clock@0.2.11 **/
+/** @module Interface wasi:clocks/monotonic-clock@0.2.12 **/
 export function now(): Instant;
 export function subscribeInstant(when: Instant): Pollable;
 export function subscribeDuration(when: Duration): Pollable;

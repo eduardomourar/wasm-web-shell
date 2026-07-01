@@ -1,82 +1,166 @@
 import WasmTerminal from "wasm-terminal";
 import type { WasmFile } from "wasm-terminal";
-import {
-  getOriginPrivateDirectory,
-  FileSystemDirectoryHandle,
-} from "native-file-system-adapter";
-import { provideCredentials, setCredentials } from "./credentials";
+import { providers, setCredentials } from "./aws-providers";
 import { main as awsCommand } from "./aws-command";
+import { executeCoreutilsCommand } from "./coreutils-command";
 
 export const webShell = (wasmBinaryPath: string) => {
-  let preOpened = new Map<string, FileSystemDirectoryHandle>();
-  let wasmTerminal = new WasmTerminal(wasmBinaryPath);
-  const wasmFiles: WasmFile[] = wasmTerminal._wasmFsFiles;
+  const preOpened: Record<string, string> = {
+    "/": "/"
+  };
+  const wasmTerminal = new WasmTerminal(wasmBinaryPath);
 
   wasmTerminal.onActivated = async () => {
-    preOpened.set(
-      "/sandbox",
-      await getOriginPrivateDirectory(
-        // @ts-ignore
-        import("native-file-system-adapter/src/adapters/indexeddb.js")
-      )
-    );
-    upsertFile(wasmFiles, {
-      name: "/sandbox/.",
-      timestamp: Date.now(),
-      bytes: new Uint8Array(),
-    });
 
     wasmTerminal.registerJsCommand("help", async (argsv: string[]) => {
       return `
 Currently available commands:
 
-    aws
+    aws        - AWS CLI (S3, SSM, STS, etc)
+    coreutils  - Unix utilities (cat, ls, echo, etc.)
+    help       - Show this help message
 
 Example usage:
-    aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request
+    # AWS S3 operations
+    aws s3api list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request
+
+    # Save file to filesystem
+    aws s3api get-object --region us-east-1 --no-sign-request --bucket pan-ukb-us-east-1 --key sumstats_release/results_full.mt/README.txt readme.txt
+
+    # List files
+    ls
+
+    # Read a file
+    cat readme.txt
+
+A complete list of public S3 Buckets can be found at:
+    https://registry.opendata.aws/
       `;
     });
+
+    // await setCredentials();
 
     wasmTerminal.registerJsCommand(
       "aws",
       async (argsv: string[], stdinPreset: string | null) => {
-        // await setCredentials();
         const envVars = {};
-        let output = "";
-        await awsCommand(
-          argsv,
-          envVars,
-          (_message: any) => {},
-          (message: any) => (output += message),
-          (message: any) => (output += message),
-          Array.from(preOpened.keys()).reduce((acc, v) => {
-            acc[v] = v;
-            return acc;
-          }, {} as Record<string, string>),
-          {
-            provideCredentials,
+
+        try {
+          await awsCommand(
+            ["aws", ...argsv],
+            envVars,
+            stdinPreset,
+            (msg: string) => wasmTerminal.stdout(msg),
+            (msg: string) => wasmTerminal.stderr(msg),
+            preOpened,
+            providers,
+          )
+        } catch (error: any) {
+          if ("code" in error && error.code !== 0) {
+            console.debug(error);
           }
-        ).catch(console.warn);
+        }
         await wasmTerminal._waitForOutputPause();
 
-        return output;
+        return "";
       }
     );
-  };
 
-  wasmTerminal.onFileSystemUpdate = async (files: WasmFile[]) => {
-    await Promise.all(
-      files
-        .filter((file) => {
-          return !file.name.endsWith("/.") && file.name.indexOf("/", 1) > 0;
-        })
-        .map((file) =>
-          writeToFileSystem(file, preOpened).catch((err) => {
-            console.error(err);
-            return Promise.resolve(null);
-          })
-        )
-    );
+    // Register coreutils commands
+    const createCoreutilsCommand = (commandName: string) => {
+      return async (argsv: string[], stdinPreset: string | null) => {
+        try {
+          await executeCoreutilsCommand(
+            [commandName, ...argsv],
+            {},
+            stdinPreset,
+            (msg: string) => wasmTerminal.stdout(msg),
+            (msg: string) => wasmTerminal.stderr(msg),
+            preOpened,
+          );
+        } catch (error: any) {
+          if ("code" in error && error.code !== 0) {
+            console.debug(error);
+          }
+        }
+        await wasmTerminal._waitForOutputPause();
+
+        return "";
+      };
+    };
+
+    // Register common coreutils commands
+    const coreutilsCommands = [
+      "arch",
+      "base32",
+      "base64",
+      "basename",
+      "basenc",
+      "cat",
+      "comm",
+      "cp",
+      "csplit",
+      "cut",
+      "date",
+      "dd",
+      "dir",
+      "dircolors",
+      "dirname",
+      "echo",
+      "expand",
+      "factor",
+      "false",
+      "fmt",
+      "fold",
+      "head",
+      "join",
+      "link",
+      "ln",
+      "ls",
+      "mkdir",
+      "mv",
+      "nl",
+      "nproc",
+      "numfmt",
+      "od",
+      "paste",
+      "pathchk",
+      "pr",
+      "printenv",
+      "printf",
+      "ptx",
+      "pwd",
+      "readlink",
+      "realpath",
+      "rm",
+      "rmdir",
+      "seq",
+      "shred",
+      "shuf",
+      "sleep",
+      "sort",
+      "split",
+      "sum",
+      "tail",
+      "tee",
+      "touch",
+      "tr",
+      "true",
+      "truncate",
+      "tsort",
+      "tty",
+      "uname",
+      "unexpand",
+      "uniq",
+      "unlink",
+      "vdir",
+      "wc",
+      "yes",
+    ];
+
+    for (const cmd of coreutilsCommands) {
+      wasmTerminal.registerJsCommand(cmd, createCoreutilsCommand(cmd));
+    }
   };
 
   wasmTerminal.printWelcomeMessage = () => {
@@ -110,47 +194,14 @@ Example usage:
       ".\r\n\r\n" +
       `Example usage:\r
 \r
-    # To list object from Amazon S3 Bucket\r
-    aws s3 list-objects --region us-east-2 --bucket nara-national-archives-catalog --delimiter / --prefix authority-records/organization/ --max-keys 2 --no-sign-request\r
-
-    # To save object from Amazon S3 Bucket to in-browser temporary file system (IndexDB)\r
-    aws s3 get-object --region us-east-1 --no-sign-request --bucket pan-ukb-us-east-1 --key sumstats_release/results_full.mt/README.txt | tee /sandbox/readme.txt\r
+    # List objects from Amazon S3 Bucket\r
+    aws s3 ls --region us-east-2 --no-sign-request s3://nara-national-archives-catalog/authority-records/organization/\r
 \r
-A complete list of public S3 Buckets can be found at:\r
-    https://registry.opendata.aws/\r
+    # Save object from S3 to in-browser filesystem\r
+    aws s3 cp --region us-east-1 --no-sign-request s3://pan-ukb-us-east-1/sumstats_release/results_full.mt/README.txt readme.txt\r
       `;
     return Promise.resolve(intro);
   };
 
   return wasmTerminal;
-};
-
-const upsertFile = (files: WasmFile[], file: WasmFile) => {
-  const index = files.findIndex((value) => value.name === file.name);
-  if (index >= 0) {
-    files[index] = file;
-  } else {
-    files.push(file);
-  }
-};
-
-const writeToFileSystem = async (
-  { name, bytes }: WasmFile,
-  preOpened: Map<string, FileSystemDirectoryHandle>
-) => {
-  let position = name.indexOf("/", 1);
-  let driveName = name.substring(0, position);
-  let drive = preOpened.get(driveName);
-  if (!drive) {
-    throw new Error(`Unable to find drive ("${driveName}") for file "${name}"`);
-  }
-  let fileName = name.substring(position + 1);
-  const fileHandle = await drive.getFileHandle(fileName, { create: true });
-  const writer = await fileHandle.createWritable();
-  try {
-    await writer.truncate(0);
-    await writer.write(bytes);
-  } finally {
-    await writer.close();
-  }
 };

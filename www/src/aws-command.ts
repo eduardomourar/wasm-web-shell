@@ -1,49 +1,33 @@
-import { initialize, io, cli } from "aws-cli-wasm";
-
-const textDecoder = new TextDecoder();
-// Create custom I/O shim with stdout/stderr handlers
-const { OutputStream } = io.streams;
+import { initialize } from "aws-cli-wasm";
+import { createWasiCli } from "./wasi-cli";
+import { _setPreopens, preopens, types,  } from "./wasi-filesystem";
 
 export const main = async (
   args: string[],
   envVars: Record<string, string> | undefined,
-  _stdIn: any,
+  stdIn: string | null,
   stdOut: (message: string) => void,
   stdErr: (message: string) => void,
-  preopens: Record<string, string>,
-  credentialsProvider: any,
+  preOpened: Record<string, string>,
+  providers: Parameters<typeof initialize>[0],
 ) => {
-  // Create a complete OutputStream handler that won't block
-  const createStreamHandler = (outputFn: (message: string) => void) => ({
-    write(contents: Uint8Array) {
-      outputFn(textDecoder.decode(contents));
-    },
-    // Return a large number to indicate the stream can accept data
-    checkWrite(_len?: bigint) {
-      return BigInt(1_000_000);
-    },
-  });
-
-  // Create custom CLI shim by merging with defaults
-  const customCli = {
-    ...cli,
-    stdout: {
-      OutputStream,
-      getStdout: () => new OutputStream(createStreamHandler(stdOut)),
-    },
-    stderr: {
-      OutputStream,
-      getStderr: () => new OutputStream(createStreamHandler(stdErr)),
-    },
+  // Create custom WASI FileSystem
+  await _setPreopens(preOpened);
+  const filesystem = {
+    preopens,
+    types,
   };
 
-  // Create WASIShim with custom CLI and sandbox config
-  const command = await initialize(credentialsProvider, {
-    cli: customCli,
+  // Create custom WASI CLI
+  const cli = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
+
+  // Create WASIShim with custom CLI, filesystem, and sandbox config
+  const command = await initialize(providers, {
+    cli,
+    filesystem,
     sandbox: {
-      preopens,
       env: envVars,
-      args: ["aws"].concat(args),
+      args,
       enableNetwork: true,
     },
   });

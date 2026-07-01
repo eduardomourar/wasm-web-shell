@@ -8,4 +8,4 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 futures-util = "0.3"
-wstd = { version = "0.6" }
+wstd = "0.6"

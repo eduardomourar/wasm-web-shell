@@ -1,6 +1,6 @@
 package component:aws-cli;
 
-interface credentials-provider {
+interface providers {
 
     record credentials {
         access-key-id: string,
@@ -26,12 +26,15 @@ interface credentials-provider {
         unhandled,
     }
 
-    provide-credentials: func() -> result<credentials, credentials-error>;
+    provide-credentials: func(service-id: option<string>) -> result<credentials, credentials-error>;
+
+    type region = string;
+    provide-region: func(region: option<region>) -> option<region>;
 }
 
 world cli {
-    include wasi:cli/command@0.2.11;
+    include wasi:cli/command@0.2.12;
 
-    import credentials-provider;
-    import wasi:http/outgoing-handler@0.2.11;
+    import providers;
+    import wasi:http/outgoing-handler@0.2.12;
 }
