@@ -1,6 +1,18 @@
 import { cli, io } from "@bytecodealliance/preview2-shim";
 import { Result } from "@bytecodealliance/preview2-shim/interfaces/wasi-cli-exit";
 
+/**
+ * Thrown by the `wasi:cli/exit#exit` shim below to unwind out of the guest
+ * module, since exit is specified as never returning to the caller.
+ */
+export class ComponentExit extends Error {
+  code: number;
+  constructor(code: number) {
+    super(`Component exited with code ${code}`);
+    this.code = code;
+  }
+}
+
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 
@@ -38,6 +50,23 @@ const createInputStreamHandler = (stdinData: string | null) => {
   };
 };
 
+export interface WasiCliResult {
+  cli: typeof cli;
+  /**
+   * Resolves with the exit code once the guest calls `wasi:cli/exit#exit`.
+   * Never resolves otherwise.
+   *
+   * The generated component bindings (js-component-bindgen) leave the
+   * top-level `run()` completion promise unsettled whenever a host import
+   * throws mid-call (its "manually async"/JSPI task path never rejects or
+   * resolves the completion promise on error). Since `exit.exit()` must
+   * throw to unwind out of the guest, `await command.run.run()` hangs
+   * forever after an explicit exit call. Callers should race this promise
+   * against `command.run.run()` to detect completion.
+   */
+  exitPromise: Promise<number>;
+}
+
 /**
  * Create WASI CLI implementation.
  * Returns interface backed by xterm standard io.
@@ -47,7 +76,7 @@ export const createWasiCli = async (
   stdOut: (message: string) => void,
   stdErr: (message: string) => void,
   preopens: Record<string, string>,
-): Promise<typeof cli> => {
+): Promise<WasiCliResult> => {
   // Set current working directory to first preopen path
   const keys = Object.keys(preopens);
   if (keys.length > 0) {
@@ -58,15 +87,19 @@ export const createWasiCli = async (
     }
   }
 
+  let resolveExit: (code: number) => void;
+  const exitPromise = new Promise<number>((resolve) => {
+    resolveExit = resolve;
+  });
+
   // Create custom CLI shim by merging with defaults
   const customCli = {
     ...cli,
     exit: {
       exit(status: Result<void, void>) {
-        // console.debug(`[wasi:cli exit] exit with ${status}`);
-        if (status.tag === "err") {
-          console.error(status);
-        }
+        const code = status.tag === "err" ? 1 : 0;
+        resolveExit(code);
+        throw new ComponentExit(code);
       },
     },
     stdin: {
@@ -83,5 +116,5 @@ export const createWasiCli = async (
     },
   };
 
-  return customCli;
+  return { cli: customCli, exitPromise };
 };
