@@ -1,5 +1,5 @@
 import { initialize } from "coreutils-wasm";
-import { createWasiCli } from "./wasi-cli";
+import { ComponentExit, createWasiCli } from "./wasi-cli";
 import { _setPreopens, preopens, types} from "./wasi-filesystem";
 
 /**
@@ -21,7 +21,7 @@ export const executeCoreutilsCommand = async (
   };
 
   // Create custom WASI CLI
-  const cli = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
+  const { cli, exitPromise } = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
 
   // Initialize the coreutils component
   const command = await initialize({
@@ -34,6 +34,13 @@ export const executeCoreutilsCommand = async (
     },
   });
 
-  // Run the command
-  await command.run.run();
+  // Run the command. If the guest calls `exit()`, the generated bindings
+  // never settle `run.run()`'s promise, so race against `exitPromise` too.
+  try {
+    await Promise.race([command.run.run(), exitPromise]);
+  } catch (err) {
+    if (!(err instanceof ComponentExit)) {
+      throw err;
+    }
+  }
 };

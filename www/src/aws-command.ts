@@ -1,5 +1,5 @@
 import { initialize } from "aws-cli-wasm";
-import { createWasiCli } from "./wasi-cli";
+import { ComponentExit, createWasiCli } from "./wasi-cli";
 import { _setPreopens, preopens, types,  } from "./wasi-filesystem";
 
 export const main = async (
@@ -19,7 +19,7 @@ export const main = async (
   };
 
   // Create custom WASI CLI
-  const cli = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
+  const { cli, exitPromise } = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
 
   // Create WASIShim with custom CLI, filesystem, and sandbox config
   const command = await initialize(providers, {
@@ -31,5 +31,14 @@ export const main = async (
       enableNetwork: true,
     },
   });
-  await command.run.run();
+
+  // Run the command. If the guest calls `exit()`, the generated bindings
+  // never settle `run.run()`'s promise, so race against `exitPromise` too.
+  try {
+    await Promise.race([command.run.run(), exitPromise]);
+  } catch (err) {
+    if (!(err instanceof ComponentExit)) {
+      throw err;
+    }
+  }
 };
