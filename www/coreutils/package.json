@@ -16,7 +16,7 @@
         "component/"
     ],
     "dependencies": {
-        "@bytecodealliance/preview2-shim": "^0.19.0"
+        "@bytecodealliance/preview2-shim": "^0.23.0"
     },
     "devDependencies": {
         "@types/node": "^24.13.2"

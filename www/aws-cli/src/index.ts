@@ -1,9 +1,11 @@
 import { STSClient, GetSessionTokenCommand } from "@aws-sdk/client-sts";
-import { WASIShim, type WASIShimConfig } from "@bytecodealliance/preview2-shim/instantiation";
+import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { instantiate, type ImportObject, type Root } from "../component/aws.js";
+
+type WASIShimConfig = NonNullable<ConstructorParameters<typeof WASIShim>[0]>;
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 

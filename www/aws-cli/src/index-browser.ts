@@ -1,5 +1,7 @@
-import { WASIShim, type WASIShimConfig } from "@bytecodealliance/preview2-shim/instantiation";
+import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import { instantiate, type ImportObject, type Root } from "../component/aws.js";
+
+type WASIShimConfig = NonNullable<ConstructorParameters<typeof WASIShim>[0]>;
 
 const compileCore: Parameters<typeof instantiate>[0] = async (url) => {
   return fetch(url).then(WebAssembly.compileStreaming);

@@ -18,28 +18,28 @@
     "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
-    "@xterm/xterm": "^6.0.0",
+    "@xterm/xterm": "^6",
     "aws-cli-wasm": "file://./aws-cli",
     "cookie-store": "^4.0.0-next.4",
     "coreutils-wasm": "file://./coreutils",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react": "^19",
+    "react-dom": "^19",
     "wasm-terminal": "file://./wasm-terminal"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1",
     "@types/chrome": "^0.2.0",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "copy-webpack-plugin": "^14.0.0",
-    "css-loader": "^7.1.4",
-    "html-webpack-plugin": "^5.6.7",
-    "linkedom": "^0.18.12",
-    "style-loader": "^4.0.0",
-    "ts-loader": "^9.6.2",
-    "typescript": "^6.0.3",
-    "webpack": "^5.108.2",
-    "webpack-cli": "^7.1.0",
-    "webpack-dev-server": "^5.2.5"
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "copy-webpack-plugin": "^14",
+    "css-loader": "^7",
+    "html-webpack-plugin": "^5",
+    "linkedom": "^0.18.0",
+    "style-loader": "^4",
+    "ts-loader": "^9",
+    "typescript": "^6",
+    "webpack": "^5",
+    "webpack-cli": "^7",
+    "webpack-dev-server": "^6"
   }
 }
