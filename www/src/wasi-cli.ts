@@ -1,4 +1,4 @@
-import { cli, io } from "@bytecodealliance/preview2-shim";
+import { cli } from "@bytecodealliance/preview2-shim";
 import { Result } from "@bytecodealliance/preview2-shim/interfaces/wasi-cli-exit";
 
 /**
@@ -15,40 +15,6 @@ export class ComponentExit extends Error {
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
-
-// Create custom I/O shim with stdout/stderr handlers
-const { InputStream, OutputStream } = io.streams;
-
-// Create a complete OutputStream handler that won't block
-const createStreamHandler = (outputFn: (message: string) => void) => ({
-  write(contents: Uint8Array) {
-    // console.debug(`[wasi:cli createStreamHandler write] Writing content with ${contents.length} bytes`);
-    outputFn(textDecoder.decode(contents));
-  },
-});
-
-// Create an InputStream handler for stdin
-const createInputStreamHandler = (stdinData: string | null) => {
-  const data = stdinData ? textEncoder.encode(stdinData) : new Uint8Array(0);
-  let offset = 0;
-
-  return {
-    blockingRead(len: bigint): Uint8Array {
-      // console.debug(`[wasi:cli createInputStreamHandler blockingRead] Reading ${len} bytes at offset ${offset}`);
-      const bytesToRead = Math.min(Number(len), data.length - offset);
-      if (bytesToRead <= 0) {
-        throw { tag: "closed" };
-      }
-      const chunk = data.slice(offset, offset + bytesToRead);
-      offset += bytesToRead;
-      return chunk;
-    },
-    read(len: bigint): Uint8Array {
-      // console.debug(`[wasi:cli createInputStreamHandler read] Reading ${len} bytes at offset ${offset}`);
-      return this.blockingRead(len);
-    },
-  };
-};
 
 export interface WasiCliResult {
   cli: typeof cli;
@@ -92,7 +58,25 @@ export const createWasiCli = async (
     resolveExit = resolve;
   });
 
-  // Create custom CLI shim by merging with defaults
+  // Wire the default cli shim's stdio streams to the terminal
+  const stdinData = stdIn ? textEncoder.encode(stdIn) : new Uint8Array(0);
+  let stdinOffset = 0;
+  cli._setStdin({
+    blockingRead(len: bigint): Uint8Array {
+      const bytesToRead = Math.min(Number(len), stdinData.length - stdinOffset);
+      if (bytesToRead <= 0) {
+        throw { tag: "closed" };
+      }
+      const chunk = stdinData.slice(stdinOffset, stdinOffset + bytesToRead);
+      stdinOffset += bytesToRead;
+      return chunk;
+    },
+  });
+  cli._setStdout({ write: (contents) => stdOut(textDecoder.decode(contents)) });
+  cli._setStderr({ write: (contents) => stdErr(textDecoder.decode(contents)) });
+
+  // Create custom CLI shim by merging with defaults, overriding `exit` so we
+  // can observe the exit code (see `exitPromise` above).
   const customCli = {
     ...cli,
     exit: {
@@ -101,18 +85,6 @@ export const createWasiCli = async (
         resolveExit(code);
         throw new ComponentExit(code);
       },
-    },
-    stdin: {
-      InputStream,
-      getStdin: () => io.inputStreamCreate(createInputStreamHandler(stdIn)),
-    },
-    stdout: {
-      OutputStream,
-      getStdout: () => io.outputStreamCreate(createStreamHandler(stdOut)),
-    },
-    stderr: {
-      OutputStream,
-      getStderr: () => io.outputStreamCreate(createStreamHandler(stdErr)),
     },
   };
 

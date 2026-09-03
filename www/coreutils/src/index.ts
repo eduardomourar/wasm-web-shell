@@ -1,8 +1,10 @@
-import { WASIShim, type WASIShimConfig } from "@bytecodealliance/preview2-shim/instantiation";
+import { WASIShim } from "@bytecodealliance/preview2-shim/instantiation";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { instantiate, type Root } from "../component/coreutils.js";
+
+type WASIShimConfig = NonNullable<ConstructorParameters<typeof WASIShim>[0]>;
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
