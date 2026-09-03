@@ -26,6 +26,11 @@ interface JsCommand {
   autocomplete?: () => string[];
 }
 
+interface ParsedCommand {
+  argv: string[];
+  redirect?: { path: string; append: boolean };
+}
+
 export default class WasmTerminal implements ITerminalAddon {
   public wasmBinaryPath: string;
   public isRunningCommand: boolean = false;
@@ -36,6 +41,8 @@ export default class WasmTerminal implements ITerminalAddon {
   public onFileSystemUpdate: (files: WasmFile[]) => void | Promise<void> = () => {};
   public onBeforeCommandRun: () => void | Promise<void> = () => {};
   public onCommandRunFinish: () => void | Promise<void> = () => {};
+  /** Called after a command whose stdout was redirected (`>`/`>>`) finishes running. */
+  public onRedirectOutput: (path: string, data: string, append: boolean) => void | Promise<void> = () => {};
 
   // Internal state
   public _xterm?: Terminal;
@@ -52,6 +59,11 @@ export default class WasmTerminal implements ITerminalAddon {
   private _outputBuffer: string = "";
   private _lastOutputTime: number = 0;
   private _suppressOutputs: boolean = false;
+
+  // Redirection (`>`/`>>`) state - when set, stdout is buffered instead of written to xterm
+  private _redirectTarget: string | null = null;
+  private _redirectAppend: boolean = false;
+  private _redirectBuffer: string = "";
 
   constructor(wasmBinaryPath: string) {
     this.wasmBinaryPath = wasmBinaryPath;
@@ -185,7 +197,7 @@ export default class WasmTerminal implements ITerminalAddon {
 
   /* Parse line as commands and handle them */
 
-  private _parseCommands(line: string): string[][] {
+  private _parseCommands(line: string): ParsedCommand[] {
     let usesEnvironmentVars = false;
     let usesBashFeatures = false;
 
@@ -195,24 +207,38 @@ export default class WasmTerminal implements ITerminalAddon {
       return undefined;
     });
 
-    const commands: string[][] = [];
+    const commands: ParsedCommand[] = [];
     let cmd: string[] = [];
+    let redirect: ParsedCommand["redirect"];
+
+    const pushCommand = () => {
+      commands.push(redirect ? { argv: cmd, redirect } : { argv: cmd });
+      cmd = [];
+      redirect = undefined;
+    };
 
     for (let idx = 0; idx < commandLine.length; ++idx) {
       const item = commandLine[idx];
 
       if (typeof item === "string") {
-        if (cmd.length === 0 && item.match(/^\w+=.*$/)) {
+        if (cmd.length === 0 && !redirect && item.match(/^\w+=.*$/)) {
           usesEnvironmentVars = true;
           continue;
+        } else if (redirect && !redirect.path) {
+          redirect.path = item;
         } else {
           cmd.push(item);
         }
       } else if (typeof item === "object" && "op" in item) {
         switch (item.op) {
           case "|":
-            commands.push(cmd);
-            cmd = [];
+            pushCommand();
+            break;
+          case ">":
+            redirect = { path: "", append: false };
+            break;
+          case ">>":
+            redirect = { path: "", append: true };
             break;
           default:
             usesBashFeatures = true;
@@ -221,13 +247,13 @@ export default class WasmTerminal implements ITerminalAddon {
         }
       }
     }
-    commands.push(cmd);
+    pushCommand();
 
     if (usesEnvironmentVars) {
       this.stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Environment variables are not supported!\n");
     }
     if (usesBashFeatures) {
-      this.stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Advanced bash features are not supported! Only the pipe '|' works.\n");
+      this.stderr("\x1b[1m[\x1b[33mWARN\x1b[39m]\x1b[0m Advanced bash features are not supported! Only the pipe '|' and redirects '>'/'>>' work.\n");
     }
 
     return commands;
@@ -239,7 +265,8 @@ export default class WasmTerminal implements ITerminalAddon {
       this._suppressOutputs = false;
 
       const commandsInLine = this._parseCommands(line);
-      for (const [index, argv] of commandsInLine.entries()) {
+      for (const [index, parsedCommand] of commandsInLine.entries()) {
+        const { argv, redirect } = parsedCommand;
         const commandName = argv.shift();
         if (!commandName) continue;
 
@@ -247,29 +274,49 @@ export default class WasmTerminal implements ITerminalAddon {
 
         // Try user registered JS commands first
         if (command?.callback) {
+          if (redirect && !redirect.path) {
+            this.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m Missing redirect target after '${redirect.append ? ">>" : ">"}'\n`);
+            continue;
+          }
+
+          // Buffer stdout instead of writing to xterm while a redirect is active
+          if (redirect) {
+            this._redirectTarget = redirect.path;
+            this._redirectAppend = redirect.append;
+            this._redirectBuffer = "";
+          }
+
           const result = command.callback(argv, stdinPreset);
           let output: string;
 
-          // Await promises
-          if (result && typeof result === "object" && "then" in result) {
-            output = ((await result) || "").toString();
-          }
-          // Await yielding generator functions
-          else if (result && typeof result === "object" && "next" in result) {
-            let tempOutput = "";
-            for await (const data of result as AsyncGenerator<string>) {
-              tempOutput += data;
+          try {
+            // Await promises
+            if (result && typeof result === "object" && "then" in result) {
+              output = ((await result) || "").toString();
             }
-            output = tempOutput;
-          }
-          // Default: when functions return normally
-          else {
-            output = result.toString();
+            // Await yielding generator functions
+            else if (result && typeof result === "object" && "next" in result) {
+              let tempOutput = "";
+              for await (const data of result as AsyncGenerator<string>) {
+                tempOutput += data;
+              }
+              output = tempOutput;
+            }
+            // Default: when functions return normally
+            else {
+              output = result.toString();
+            }
+          } finally {
+            if (redirect) {
+              await this.onRedirectOutput(redirect.path, this._redirectBuffer, redirect.append);
+              this._redirectTarget = null;
+              this._redirectBuffer = "";
+            }
           }
 
-          // If is last command in pipe -> print output to xterm
+          // If is last command in pipe -> print output to xterm (unless redirected to a file)
           if (index === commandsInLine.length - 1) {
-            this.stdout(output);
+            if (!redirect) this.stdout(output);
           } else {
             stdinPreset = output || null;
           }
@@ -291,6 +338,11 @@ export default class WasmTerminal implements ITerminalAddon {
 
   stdout(data: string): void {
     if (this._suppressOutputs) return;
+    // While a redirect ('>'/'>>') is active, capture stdout instead of writing to xterm
+    if (this._redirectTarget !== null) {
+      this._redirectBuffer += data;
+      return;
+    }
     // Write to buffer which handles line buffering and outputs to xterm
     this._stdoutBuffer?.write(data);
   }
