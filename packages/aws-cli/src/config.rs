@@ -1,8 +1,7 @@
 use anyhow::{Error, Result};
 use aws_config::{BehaviorVersion, Region, SdkConfig, meta::region::RegionProviderChain};
 use aws_credential_types::{attributes::AccountId, provider::ProvideCredentials};
-use aws_smithy_async::rt::sleep::TokioSleep;
-use aws_smithy_wasm::wasi::WasiHttpClientBuilder;
+use aws_smithy_wasm::wasi::{WasiHttpClientBuilder, WasiSleep};
 use clap::{ArgAction, Args};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -111,7 +110,7 @@ pub(crate) async fn build_config(
 
     let mut base_config = aws_config::defaults(BehaviorVersion::latest())
         .http_client(http_client)
-        .sleep_impl(TokioSleep::new())
+        .sleep_impl(WasiSleep)
         .timeout_config(
             aws_config::timeout::TimeoutConfig::builder()
                 .connect_timeout(Duration::from_secs(30))

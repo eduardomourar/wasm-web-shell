@@ -83,16 +83,14 @@ async fn delete_recursive(
         for object in resp.contents() {
             let key = object.key().unwrap_or_default();
 
-            if let Some(exclude) = &args.exclude {
-                if key.contains(exclude.as_str()) {
+            if let Some(exclude) = &args.exclude
+                && key.contains(exclude.as_str()) {
                     continue;
                 }
-            }
-            if let Some(include) = &args.include {
-                if !key.contains(include.as_str()) {
+            if let Some(include) = &args.include
+                && !key.contains(include.as_str()) {
                     continue;
                 }
-            }
 
             if args.dryrun {
                 println!("(dryrun) delete: s3://{}/{}", bucket, key);
