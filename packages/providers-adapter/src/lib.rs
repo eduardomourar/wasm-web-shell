@@ -1,4 +1,5 @@
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
 
 use bindings::exports::component::aws_cli::providers::{

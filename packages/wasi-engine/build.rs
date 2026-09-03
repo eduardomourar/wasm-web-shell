@@ -28,7 +28,7 @@ const BASE_WASI_IMPORTS: [&str; 22] = [
 ];
 
 fn is_running_in_github_actions() -> bool {
-    std::env::var("GITHUB_ACTIONS").map_or(false, |val| val == "true")
+    std::env::var("GITHUB_ACTIONS").is_ok_and(|val| val == "true")
 }
 
 fn main() {

@@ -7,6 +7,8 @@
 //! - Helper functions for building test configurations
 //!
 //! Tests run on native target for fast iteration with mocked HTTP.
+//! `wstd`/WASI primitives (used by production code) cannot run outside a
+//! real WASI host, so these tests use tokio instead.
 
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_credential_types::{

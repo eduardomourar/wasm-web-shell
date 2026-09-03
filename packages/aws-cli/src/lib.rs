@@ -1,4 +1,5 @@
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
 mod commands;
 mod config;
@@ -50,11 +51,7 @@ impl Guest for Component {
             eprintln!("Internal unhandled panic:\n{:?}!", panic_info);
             std::process::exit(1);
         }));
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("Failed to generate runtime");
-        match rt.block_on(commands::run()) {
+        match wstd::runtime::block_on(commands::run()) {
             Ok(_) => {
                 tracing::debug!("Success");
             }

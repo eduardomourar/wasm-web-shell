@@ -5,9 +5,9 @@ use wasmtime::{
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{
-    DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2::bindings::Command,
+    FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2::bindings::Command,
 };
-use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 pub struct Host {
     table: ResourceTable,
@@ -25,9 +25,9 @@ impl WasiView for Host {
     }
 }
 
-impl wasmtime_wasi_http::p2::WasiHttpView for Host {
-    fn http(&mut self) -> wasmtime_wasi_http::p2::WasiHttpCtxView<'_> {
-        wasmtime_wasi_http::p2::WasiHttpCtxView {
+impl WasiHttpView for Host {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
             hooks: Default::default(),
@@ -57,7 +57,7 @@ async fn run() -> anyhow::Result<()> {
         .env("AWS_ACCESS_KEY_ID", "access_key_id")
         .env("AWS_SECRET_ACCESS_KEY", "secret_access_key")
         .args(&wasi_args)
-        .preopened_dir("/tmp", "/tmp", DirPerms::all(), FilePerms::all())?
+        .preopened_dir("/tmp", "/tmp", FsPerms::ReadWrite)?
         .build();
     let host = Host { table, ctx, http };
     let mut config = Config::new();
@@ -75,8 +75,12 @@ async fn run() -> anyhow::Result<()> {
     } else {
         "release"
     };
-    let component_path = std::env::current_dir()?
-        .join("../../target")
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    let component_path = target_dir
         .join("composed")
         .join("wasm32-wasip2")
         .join(profile)
