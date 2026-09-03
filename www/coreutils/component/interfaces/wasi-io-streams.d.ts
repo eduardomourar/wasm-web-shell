@@ -1,4 +1,4 @@
-/** @module Interface wasi:io/streams@0.2.9 **/
+/** @module Interface wasi:io/streams@0.2.3 **/
 export type Error = import('./wasi-io-error.js').Error;
 export type StreamError = StreamErrorLastOperationFailed | StreamErrorClosed;
 export interface StreamErrorLastOperationFailed {
@@ -15,6 +15,7 @@ export class InputStream {
    * This type does not have a public constructor.
    */
   private constructor();
+  read(len: bigint): Uint8Array;
   blockingRead(len: bigint): Uint8Array;
   subscribe(): Pollable;
 }

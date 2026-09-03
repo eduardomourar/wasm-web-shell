@@ -1,4 +1,4 @@
-/** @module Interface wasi:cli/terminal-output@0.2.9 **/
+/** @module Interface wasi:cli/terminal-output@0.2.3 **/
 
 export class TerminalOutput {
   /**
