@@ -1,5 +1,4 @@
 /** @module Interface wasi:http/types@0.2.12 **/
-export type Duration = import('./wasi-clocks-monotonic-clock.js').Duration;
 export type FieldKey = string;
 export type FieldName = FieldKey;
 export type FieldValue = Uint8Array;
@@ -206,6 +205,7 @@ export interface ErrorCodeInternalError {
 }
 export type StatusCode = number;
 export type InputStream = import('./wasi-io-streams.js').InputStream;
+export type Duration = import('./wasi-clocks-monotonic-clock.js').Duration;
 export type Trailers = Fields;
 export type Result<T, E> = { tag: 'ok', val: T } | { tag: 'err', val: E };
 

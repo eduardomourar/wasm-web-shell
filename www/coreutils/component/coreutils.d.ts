@@ -1,47 +1,49 @@
 // world root:component/root
-import type * as WasiCliEnvironment from './interfaces/wasi-cli-environment.js'; // wasi:cli/environment@0.2.9
-import type * as WasiCliExit from './interfaces/wasi-cli-exit.js'; // wasi:cli/exit@0.2.9
-import type * as WasiCliStderr from './interfaces/wasi-cli-stderr.js'; // wasi:cli/stderr@0.2.9
-import type * as WasiCliStdin from './interfaces/wasi-cli-stdin.js'; // wasi:cli/stdin@0.2.9
-import type * as WasiCliStdout from './interfaces/wasi-cli-stdout.js'; // wasi:cli/stdout@0.2.9
-import type * as WasiCliTerminalInput from './interfaces/wasi-cli-terminal-input.js'; // wasi:cli/terminal-input@0.2.9
-import type * as WasiCliTerminalOutput from './interfaces/wasi-cli-terminal-output.js'; // wasi:cli/terminal-output@0.2.9
-import type * as WasiCliTerminalStderr from './interfaces/wasi-cli-terminal-stderr.js'; // wasi:cli/terminal-stderr@0.2.9
-import type * as WasiCliTerminalStdin from './interfaces/wasi-cli-terminal-stdin.js'; // wasi:cli/terminal-stdin@0.2.9
-import type * as WasiCliTerminalStdout from './interfaces/wasi-cli-terminal-stdout.js'; // wasi:cli/terminal-stdout@0.2.9
-import type * as WasiClocksMonotonicClock from './interfaces/wasi-clocks-monotonic-clock.js'; // wasi:clocks/monotonic-clock@0.2.9
-import type * as WasiClocksWallClock from './interfaces/wasi-clocks-wall-clock.js'; // wasi:clocks/wall-clock@0.2.9
-import type * as WasiFilesystemPreopens from './interfaces/wasi-filesystem-preopens.js'; // wasi:filesystem/preopens@0.2.9
-import type * as WasiFilesystemTypes from './interfaces/wasi-filesystem-types.js'; // wasi:filesystem/types@0.2.9
-import type * as WasiIoError from './interfaces/wasi-io-error.js'; // wasi:io/error@0.2.9
-import type * as WasiIoPoll from './interfaces/wasi-io-poll.js'; // wasi:io/poll@0.2.9
-import type * as WasiIoStreams from './interfaces/wasi-io-streams.js'; // wasi:io/streams@0.2.9
-import type * as WasiRandomInsecureSeed from './interfaces/wasi-random-insecure-seed.js'; // wasi:random/insecure-seed@0.2.9
-import type * as WasiRandomRandom from './interfaces/wasi-random-random.js'; // wasi:random/random@0.2.9
-import type * as WasiCliRun from './interfaces/wasi-cli-run.js'; // wasi:cli/run@0.2.0
+import type * as WasiCliEnvironment from './interfaces/wasi-cli-environment.js'; // wasi:cli/environment@0.2.3
+import type * as WasiCliExit from './interfaces/wasi-cli-exit.js'; // wasi:cli/exit@0.2.3
+import type * as WasiCliStderr from './interfaces/wasi-cli-stderr.js'; // wasi:cli/stderr@0.2.3
+import type * as WasiCliStdin from './interfaces/wasi-cli-stdin.js'; // wasi:cli/stdin@0.2.3
+import type * as WasiCliStdout from './interfaces/wasi-cli-stdout.js'; // wasi:cli/stdout@0.2.3
+import type * as WasiCliTerminalInput from './interfaces/wasi-cli-terminal-input.js'; // wasi:cli/terminal-input@0.2.3
+import type * as WasiCliTerminalOutput from './interfaces/wasi-cli-terminal-output.js'; // wasi:cli/terminal-output@0.2.3
+import type * as WasiCliTerminalStderr from './interfaces/wasi-cli-terminal-stderr.js'; // wasi:cli/terminal-stderr@0.2.3
+import type * as WasiCliTerminalStdin from './interfaces/wasi-cli-terminal-stdin.js'; // wasi:cli/terminal-stdin@0.2.3
+import type * as WasiCliTerminalStdout from './interfaces/wasi-cli-terminal-stdout.js'; // wasi:cli/terminal-stdout@0.2.3
+import type * as WasiClocksMonotonicClock from './interfaces/wasi-clocks-monotonic-clock.js'; // wasi:clocks/monotonic-clock@0.2.3
+import type * as WasiClocksWallClock from './interfaces/wasi-clocks-wall-clock.js'; // wasi:clocks/wall-clock@0.2.3
+import type * as WasiFilesystemPreopens from './interfaces/wasi-filesystem-preopens.js'; // wasi:filesystem/preopens@0.2.3
+import type * as WasiFilesystemTypes from './interfaces/wasi-filesystem-types.js'; // wasi:filesystem/types@0.2.3
+import type * as WasiIoError from './interfaces/wasi-io-error.js'; // wasi:io/error@0.2.3
+import type * as WasiIoPoll from './interfaces/wasi-io-poll.js'; // wasi:io/poll@0.2.3
+import type * as WasiIoStreams from './interfaces/wasi-io-streams.js'; // wasi:io/streams@0.2.3
+import type * as WasiRandomRandom from './interfaces/wasi-random-random.js'; // wasi:random/random@0.2.3
+import type * as WasiSocketsTcp from './interfaces/wasi-sockets-tcp.js'; // wasi:sockets/tcp@0.2.3
+import type * as WasiSocketsUdp from './interfaces/wasi-sockets-udp.js'; // wasi:sockets/udp@0.2.3
+import type * as WasiCliRun from './interfaces/wasi-cli-run.js'; // wasi:cli/run@0.2.3
 export interface ImportObject {
-  'wasi:cli/environment@0.2.9': typeof WasiCliEnvironment,
-  'wasi:cli/exit@0.2.9': typeof WasiCliExit,
-  'wasi:cli/stderr@0.2.9': typeof WasiCliStderr,
-  'wasi:cli/stdin@0.2.9': typeof WasiCliStdin,
-  'wasi:cli/stdout@0.2.9': typeof WasiCliStdout,
-  'wasi:cli/terminal-input@0.2.9': typeof WasiCliTerminalInput,
-  'wasi:cli/terminal-output@0.2.9': typeof WasiCliTerminalOutput,
-  'wasi:cli/terminal-stderr@0.2.9': typeof WasiCliTerminalStderr,
-  'wasi:cli/terminal-stdin@0.2.9': typeof WasiCliTerminalStdin,
-  'wasi:cli/terminal-stdout@0.2.9': typeof WasiCliTerminalStdout,
-  'wasi:clocks/monotonic-clock@0.2.9': typeof WasiClocksMonotonicClock,
-  'wasi:clocks/wall-clock@0.2.9': typeof WasiClocksWallClock,
-  'wasi:filesystem/preopens@0.2.9': typeof WasiFilesystemPreopens,
-  'wasi:filesystem/types@0.2.9': typeof WasiFilesystemTypes,
-  'wasi:io/error@0.2.9': typeof WasiIoError,
-  'wasi:io/poll@0.2.9': typeof WasiIoPoll,
-  'wasi:io/streams@0.2.9': typeof WasiIoStreams,
-  'wasi:random/insecure-seed@0.2.9': typeof WasiRandomInsecureSeed,
-  'wasi:random/random@0.2.9': typeof WasiRandomRandom,
+  'wasi:cli/environment@0.2.3': typeof WasiCliEnvironment,
+  'wasi:cli/exit@0.2.3': typeof WasiCliExit,
+  'wasi:cli/stderr@0.2.3': typeof WasiCliStderr,
+  'wasi:cli/stdin@0.2.3': typeof WasiCliStdin,
+  'wasi:cli/stdout@0.2.3': typeof WasiCliStdout,
+  'wasi:cli/terminal-input@0.2.3': typeof WasiCliTerminalInput,
+  'wasi:cli/terminal-output@0.2.3': typeof WasiCliTerminalOutput,
+  'wasi:cli/terminal-stderr@0.2.3': typeof WasiCliTerminalStderr,
+  'wasi:cli/terminal-stdin@0.2.3': typeof WasiCliTerminalStdin,
+  'wasi:cli/terminal-stdout@0.2.3': typeof WasiCliTerminalStdout,
+  'wasi:clocks/monotonic-clock@0.2.3': typeof WasiClocksMonotonicClock,
+  'wasi:clocks/wall-clock@0.2.3': typeof WasiClocksWallClock,
+  'wasi:filesystem/preopens@0.2.3': typeof WasiFilesystemPreopens,
+  'wasi:filesystem/types@0.2.3': typeof WasiFilesystemTypes,
+  'wasi:io/error@0.2.3': typeof WasiIoError,
+  'wasi:io/poll@0.2.3': typeof WasiIoPoll,
+  'wasi:io/streams@0.2.3': typeof WasiIoStreams,
+  'wasi:random/random@0.2.3': typeof WasiRandomRandom,
+  'wasi:sockets/tcp@0.2.3': typeof WasiSocketsTcp,
+  'wasi:sockets/udp@0.2.3': typeof WasiSocketsUdp,
 }
 export interface Root {
-  'wasi:cli/run@0.2.0': typeof WasiCliRun,
+  'wasi:cli/run@0.2.3': typeof WasiCliRun,
   run: typeof WasiCliRun,
 }
 
