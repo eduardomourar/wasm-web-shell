@@ -1516,3 +1516,51 @@ export const isFileLocked = (path: string) => {
 export const getFileMetadata = (path: string) => fileMetadata.get(path);
 export const getAllFileMetadata = () => Array.from(fileMetadata.entries()).map(([path, meta]) => ({ path, ...meta }));
 export const clearFileMetadata = () => fileMetadata.clear();
+
+/**
+ * Write data directly to a file in the origin-private filesystem, bypassing
+ * the WASI guest entirely. Used to implement shell redirection (`>`, `>>`)
+ * for output that is captured on the JS side rather than written by a guest
+ * through a WASI file descriptor.
+ *
+ * @param hostPreopen - The host filesystem root the path is relative to (matches the value used in `_setPreopens`)
+ * @param path - Path relative to `hostPreopen`
+ * @param data - Bytes to write
+ * @param append - When true, append to the end of the file instead of truncating it
+ */
+export const writeFile = async (
+  hostPreopen: string,
+  path: string,
+  data: Uint8Array,
+  append: boolean,
+): Promise<void> => {
+  const root = await navigator.storage.getDirectory();
+  let dir = root;
+  if (hostPreopen !== "/") {
+    dir = await root.getDirectoryHandle(hostPreopen.replace("/", ""), { create: true });
+  }
+
+  const parts = path.split("/").filter((p) => p && p !== ".");
+  const fileName = parts.pop();
+  if (!fileName || parts.some((p) => p === "..")) {
+    throw new Error(`Invalid redirect path: "${path}"`);
+  }
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
+  }
+
+  const fileHandle = await dir.getFileHandle(fileName, { create: true });
+
+  let position = 0;
+  if (append) {
+    const file = await fileHandle.getFile();
+    position = file.size;
+  }
+
+  const writable = await fileHandle.createWritable({ keepExistingData: append });
+  await writable.write({ type: "write", position, data: new Uint8Array(data) });
+  await writable.close();
+
+  // Invalidate any cached read of this path so subsequent reads see the new content
+  fileCache.delete(`${hostPreopen}/${path}`);
+};

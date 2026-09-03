@@ -3,12 +3,21 @@ import type { WasmFile } from "wasm-terminal";
 import { providers, setCredentials } from "./aws-providers";
 import { main as awsCommand } from "./aws-command";
 import { executeCoreutilsCommand } from "./coreutils-command";
+import { writeFile } from "./wasi-filesystem";
 
 export const webShell = (wasmBinaryPath: string) => {
   const preOpened: Record<string, string> = {
     "/": "/"
   };
   const wasmTerminal = new WasmTerminal(wasmBinaryPath);
+
+  wasmTerminal.onRedirectOutput = async (path: string, data: string, append: boolean) => {
+    try {
+      await writeFile(preOpened["/"] ?? "/", path, new TextEncoder().encode(data), append);
+    } catch (error) {
+      wasmTerminal.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m Unable to write to "${path}": ${error}\n`);
+    }
+  };
 
   wasmTerminal.onActivated = async () => {
 
