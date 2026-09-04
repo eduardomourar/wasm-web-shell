@@ -233,10 +233,54 @@ const fileCache = new FileCache();
 const activeWriteStreams = new Set<string>();
 
 /**
- * Symbolic link storage (in-memory emulation)
+ * Symbolic link storage (in-memory emulation, persisted to OPFS)
  * Maps symlink path -> target path
+ *
+ * The File System Access API has no native symlink concept, so symlinks are
+ * tracked in this map and mirrored to a hidden JSON file at the root of the
+ * origin-private filesystem so they survive page reloads.
  */
 const symlinks = new Map<string, string>();
+const SYMLINKS_METADATA_FILE = ".__wasi_symlinks__.json";
+let symlinksLoaded = false;
+
+/**
+ * Load persisted symlinks from OPFS into the in-memory map (once per session).
+ */
+async function loadSymlinksFromStorage(): Promise<void> {
+  if (symlinksLoaded) {
+    return;
+  }
+  symlinksLoaded = true;
+
+  try {
+    const root = await navigator.storage.getDirectory();
+    const fileHandle = await root.getFileHandle(SYMLINKS_METADATA_FILE);
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const entries: [string, string][] = JSON.parse(text);
+    for (const [path, target] of entries) {
+      symlinks.set(path, target);
+    }
+  } catch {
+    // No persisted symlinks yet (or failed to read) - start with an empty map
+  }
+}
+
+/**
+ * Persist the current in-memory symlink map to OPFS.
+ */
+async function persistSymlinksToStorage(): Promise<void> {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const fileHandle = await root.getFileHandle(SYMLINKS_METADATA_FILE, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(Array.from(symlinks.entries())));
+    await writable.close();
+  } catch (err: any) {
+    console.error(`[wasi:filesystem] Failed to persist symlinks:`, err);
+  }
+}
 
 /**
  * File locking system using Web Locks API (navigator.locks)
@@ -859,10 +903,28 @@ class Descriptor implements IDescriptor {
     const entries: DirectoryEntry[] = [];
 
     for await (const [name, handle] of dirHandle.entries()) {
+      if (name === SYMLINKS_METADATA_FILE) {
+        continue;
+      }
       entries.push({
         name,
         type: handle.kind === "directory" ? "directory" : "regular-file",
       });
+    }
+
+    // Merge in synthetic entries for symlinks that are direct children of this directory
+    const dirPrefix = this.#path + "/";
+    for (const fullPath of symlinks.keys()) {
+      if (!fullPath.startsWith(dirPrefix)) {
+        continue;
+      }
+      const name = fullPath.slice(dirPrefix.length);
+      if (!name || name.includes("/")) {
+        continue;
+      }
+      if (!entries.some((entry) => entry.name === name)) {
+        entries.push({ name, type: "symbolic-link" });
+      }
     }
 
     // Sort entries alphabetically
@@ -874,6 +936,15 @@ class Descriptor implements IDescriptor {
   async removeDirectoryAt(path: string): Promise<void> {
     if (this.#kind !== "directory") {
       throw new FsError("not-directory");
+    }
+
+    // If this is a symlink, remove it from the symlink map rather than the
+    // real filesystem (there is no real entry backing it).
+    const symlinkFullPath = this.#path + "/" + path;
+    if (symlinks.has(symlinkFullPath)) {
+      symlinks.delete(symlinkFullPath);
+      await persistSymlinksToStorage();
+      return;
     }
 
     const dirHandle = this.#handle as FileSystemDirectoryHandle;
@@ -917,6 +988,15 @@ class Descriptor implements IDescriptor {
       throw new FsError("not-directory");
     }
 
+    // If this is a symlink, remove it from the symlink map rather than the
+    // real filesystem (there is no real entry backing it).
+    const fullPath = this.#path + "/" + path;
+    if (symlinks.has(fullPath)) {
+      symlinks.delete(fullPath);
+      await persistSymlinksToStorage();
+      return;
+    }
+
     const dirHandle = this.#handle as FileSystemDirectoryHandle;
     const parts = path.split("/").filter((p) => p && p !== ".");
 
@@ -943,7 +1023,6 @@ class Descriptor implements IDescriptor {
       await currentHandle.removeEntry(fileName);
 
       // Clear from cache
-      const fullPath = this.#path + "/" + path;
       fileCache.delete(fullPath);
     } catch (err: any) {
       if (err.name === "NotFoundError") {
@@ -1220,7 +1299,22 @@ class Descriptor implements IDescriptor {
     const descriptorPath = this.#path;
 
     // console.debug(`[wasi:filesystem renameAt] Renaming "${oldPath}" to "${newPath}"`);
-    
+
+    // If the source is itself a symlink (not a real filesystem entry), just
+    // move its entry in the symlink map instead of touching the real handle.
+    const oldSymlinkFullPath = descriptorPath + "/" + oldPath;
+    const oldSymlinkTarget = symlinks.get(oldSymlinkFullPath);
+    if (oldSymlinkTarget !== undefined) {
+      if (!(newDescriptor instanceof Descriptor)) {
+        throw new FsError("invalid");
+      }
+      const newSymlinkFullPath = (newDescriptor as Descriptor).#path + "/" + newPath;
+      symlinks.delete(oldSymlinkFullPath);
+      symlinks.set(newSymlinkFullPath, oldSymlinkTarget);
+      await persistSymlinksToStorage();
+      return;
+    }
+
     try {
       const oldParts = oldPath.split("/").filter((p) => p && p !== ".");
 
@@ -1329,6 +1423,7 @@ class Descriptor implements IDescriptor {
       if (symlinkTarget) {
         symlinks.delete(oldFullPath);
         symlinks.set(newFullPath, symlinkTarget);
+        await persistSymlinksToStorage();
       }
 
       // console.debug(`[wasi:filesystem renameAt] Renamed "${oldPath}" to "${newPath}"`);
@@ -1366,13 +1461,15 @@ class Descriptor implements IDescriptor {
   /**
    * Create symbolic link
    */
-  symlinkAt(oldPath: string, newPath: string): void {
+  async symlinkAt(oldPath: string, newPath: string): Promise<void> {
     const fullNewPath = this.#path + "/" + newPath;
 
     // console.debug(`[wasi:filesystem symlinkAt] Creating symlink "${fullNewPath}" -> "${oldPath}"`);
 
     // Store symlink in memory (FileSystem API doesn't support symlinks natively)
+    // and persist it so it survives page reloads and shows up in directory listings.
     symlinks.set(fullNewPath, oldPath);
+    await persistSymlinksToStorage();
 
     // console.debug(`[wasi:filesystem symlinkAt] Created symlink "${fullNewPath}" -> "${oldPath}"`);
   }
@@ -1424,6 +1521,8 @@ export const _setPreopens = async (preopens: Record<string, string>) => {
  */
 export const _addPreopen = async(virtualPath: string, hostPreopen: string): Promise<void> => {
   // console.debug(`[wasi:filesystem _addPreopen] virtualPath="${virtualPath}"`);
+
+  await loadSymlinksFromStorage();
 
   // Get the origin-private filesystem root
   const root = await navigator.storage.getDirectory();
