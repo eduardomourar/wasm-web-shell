@@ -1,2 +1,39 @@
 [alias]
 component = ["bin", "cargo-component"]
+
+[target.'cfg(all(target_arch = "wasm32", not(debug_assertions)))']
+rustflags = [
+    "-C",
+    "opt-level=z",     # Maximize size optimization for production
+    "-C",
+    "strip=true",      # Remove symbols to shrink the WASM component
+    "-C",
+    "codegen-units=1", # No parallel compilation that will produce faster code
+]
+
+[target.'cfg(all(target_arch = "wasm32", debug_assertions))']
+rustflags = [
+    "-C",
+    "opt-level=3",     # Keep compilation fast during development
+    "-C",
+    "debuginfo=1",     # Ensure debug symbols are generated
+    "-C",
+    "codegen-units=8", # No parallel compilation that will produce faster code 
+]
+
+[target.wasm32-wasip2]
+runner = [
+    "cargo",
+    "bin",
+    "wasmtime",
+    "--dir",
+    "/tmp",
+    "-C",
+    "cache=no",
+    "-D",
+    "debug-info",
+    "-S",
+    "cli",
+    "-S",
+    "http",
+]

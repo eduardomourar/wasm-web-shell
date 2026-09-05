@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "WASM AWS CLI Extension",
+  "version": "0.0.1",
+  "description": "Run AWS CLI commands directly in the AWS Console via WebAssembly",
+  "host_permissions": [
+    "https://amazon.com/",
+    "https://aws.amazon.com/",
+    "https://*.console.aws.amazon.com/",
+    "https://*.signin.aws.amazon.com/"
+  ],
+  "permissions": [
+    "cookies"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "images/icon-16.png",
+      "48": "images/icon-48.png",
+      "128": "images/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "images/icon-16.png",
+    "48": "images/icon-48.png",
+    "128": "images/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.console.aws.amazon.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "shell/*"
+      ],
+      "matches": [
+        "https://*.console.aws.amazon.com/*"
+      ]
+    }
+  ]
+}

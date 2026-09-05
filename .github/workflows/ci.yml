@@ -9,73 +9,175 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: "${{ github.workspace }}/target"
     permissions:
       checks: write
       contents: read
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
+
+      - name: Increase swap space
+        # A cold cache forces a full rebuild of ~28 aws-sdk-* crates with thin LTO,
+        # which can exceed the runner's RAM and get the runner itself killed (exit 143).
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
 
       - name: Cache cargo
         id: cache
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-            .bin/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+            ${CARGO_TARGET_DIR}/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
       - name: Cache cargo run bin
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
       - name: Install cargo binstall
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: cargo-bins/cargo-binstall@v1.3.1
+        uses: cargo-bins/cargo-binstall@v1.20.1
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-run-bin --locked --git https://github.com/dustinblackman/cargo-run-bin --rev 7151499b4b47861f84c63b958af8cd36aa8648a9
-      - name: Build WASI project
-        working-directory: packages/aws-cli
-        run: cargo component build --release
+        run: |
+          cargo binstall cargo-run-bin -y --locked
+          cargo bin --install
       - name: Build
         run: |
-          cargo build
-          cargo bin --install
+          CARGO_PROFILE_DEV_LTO=thin cargo component build --target wasm32-wasip2 --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
+          cargo build -p wasi-engine
       - name: Check formatting
         run: cargo fmt --all
       - name: Run clippy action to produce annotations
-        uses: actions-rs/clippy-check@v1
+        uses: actions-rs-plus/clippy-check@v2
         with:
           args: --all-targets --all-features --no-deps
           token: ${{ secrets.GITHUB_TOKEN }}
           use-cross: false
 
-      - name: Test WASI project
-        working-directory: packages/aws-cli
+      - name: Test the composed WASM component
+        # aws-cli-integration-tests only depends on fs2 and shells out to the wasi-engine
+        # binary + composed component just produced above - it never compiles aws-cli or
+        # its aws-sdk-* dependency tree for the host, so this job stays wasm32-wasip2-only.
         run: |
-          cargo check
-          export CARGO_TARGET_WASM32_WASI_RUNNER="cargo bin wasmtime --dir /tmp -C cache=no -D debug-info -D log-to-files -W component-model -S preview2 -S common -S http"
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
+          cargo test -p aws-cli-integration-tests -- --test-threads=2
+
+  # Runs in parallel with `build` (no `needs:`, so both start together). aws-cli's unit
+  # tests use tokio's real (non-wasm) runtime via #[tokio::test], so they must compile the
+  # full aws-sdk-* dependency tree for the host target - a separate Cargo target-dir/cache
+  # bucket from `build`'s wasm32-wasip2 compile. Running it as its own job overlaps that
+  # host compile with `build`'s wasm compile instead of paying for both back-to-back.
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: "${{ github.workspace }}/target"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Increase swap space
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Cache cargo
+        id: cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${CARGO_TARGET_DIR}/
+          key: ${{ runner.os }}-cargo-unit-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-unit-
+      - name: Cache cargo run bin
+        uses: actions/cache@v5
+        with:
+          path: |
+            .bin/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+
+      - name: Install cargo binstall
+        uses: cargo-bins/cargo-binstall@v1.20.1
+      - name: Install cargo-run-bin
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo binstall cargo-run-bin -y --locked
+          cargo bin --install
+
+      - name: Run unit tests
+        run: |
           export RUST_TEST_NOCAPTURE=1
-          RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 cargo component test
-          cat wasmtime.dbg.main
+          cargo test -p aws-cli --lib
+          cargo test -p simple-http-proxy --target wasm32-wasip2
+
+  # Runs in parallel with the `build`/`unit-tests` jobs (no `needs:`, so all start
+  # together). The transpiled JS bindings under
+  # www/aws-cli/component and www/coreutils/component (including the release-profile
+  # target/wasm32-wasip2/release/coreutils.wasm they're generated from) are committed
+  # to the repo, so this job just checks them out as-is and exercises them end-to-end
+  # in a real browser via Playwright - no Rust toolchain/build needed.
+  frontend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: www
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: "www/package.json"
+          cache: "npm"
+          cache-dependency-path: "www/package-lock.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright e2e tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: www/playwright-report/
+          retention-days: 14
 
   pr-success:
     needs:
       - build
+      - unit-tests
+      - frontend-tests
     # if pr-success is skipped, GH branch protection will not consider it a failure, we need to check the result of each dependency ourself
     # see: https://brunoscheufler.com/blog/2022-04-09-the-required-github-status-check-that-wasnt
     if: always()
     steps:
-      - if: needs.build.result == 'failure'
-        run: echo "build job failed, setting the failure() bit" && exit 1
+      - if: needs.build.result == 'failure' || needs.unit-tests.result == 'failure' || needs.frontend-tests.result == 'failure'
+        run: echo "a required job failed, setting the failure() bit" && exit 1
       - if: success()
         run: echo "all dependencies succeeded"
     runs-on: ubuntu-latest

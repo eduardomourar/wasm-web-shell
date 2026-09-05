@@ -1,36 +1,34 @@
 [workspace]
-members = ["packages/aws-cli", "packages/wasi-engine"]
-resolver = "2"
+members = [
+    "packages/aws-cli",
+    "packages/aws-cli-integration-tests",
+    "packages/providers-adapter",
+    "packages/simple-http-proxy",
+    "packages/wasi-engine",
+]
+exclude = ["tools/generate-ops"]
+resolver = "3"
 
 [workspace.package]
 version = "0.0.1"
 authors = [
     "Eduardo Rodrigues <16357187+eduardomourar@users.noreply.github.com>",
 ]
-edition = "2021"
-
-[profile.release]
-lto = true
-panic = "abort"
-
-[profile.release.package.aws-cli]
-# Optimize for small code size
-opt-level = "s"
-strip = "debuginfo"
+edition = "2024"
 
 [workspace.dependencies]
-cargo-component-bindings = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62" }
-tokio = { version = "1.32.0", default-features = false }
-wasmtime = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068", features = [
-    'component-model',
-] }
-wasmtime-wasi = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068" }
-wasmtime-wasi-http = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068" }
+anyhow = { version = "1.0" }
+bytes = { version = "1.5" }
+tokio = { version = "1.52", default-features = false }
+wasmtime = { version = "48" }
+wasmtime-wasi = { version = "48" }
+wasmtime-wasi-http = { version = "48" }
 
 [workspace.metadata.bin]
-wasmtime-cli = { version = "14.0.0", git = "https://github.com/bytecodealliance/wasmtime", rev = "2ad057d735edc43f8ba89428d483f2b2430c1068", locked = true, bins = [
+cargo-component = { version = "^0.21", locked = true }
+wasmtime-cli = { version = "^48", bins = [
     "wasmtime",
-], features = [
+], locked = true, features = [
     "component-model",
 ] }
-cargo-component = { version = "0.1.0", git = "https://github.com/bytecodealliance/cargo-component", rev = "075e5a99448403a0e9f3ef5e848102aa096e8f62", locked = true }
+wkg = { version = "^0.15", locked = true }

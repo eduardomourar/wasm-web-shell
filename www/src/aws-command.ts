@@ -1,59 +1,48 @@
-import { initialize, wasiImport } from "aws-cli-wasm";
-import { ImportObject } from "aws-cli/component/aws";
+import { initialize } from "aws-cli-wasm";
+import { ComponentExit, createWasiCli } from "./wasi-cli";
+import { _setPreopens, preopens, types,  } from "./wasi-filesystem";
 
-export const main = async (args: string[], envVars: [string, string][], stdIn: any, stdOut: any, stdErr: any, getDirectories: any) => {
-  const wasi = wasiImport as any;
-  const ioWrite = (s: number, buf: Uint8Array) => {
-    switch (s) {
-      case 1: {
-        const decoder = new TextDecoder();
-        const output = decoder.decode(buf);
-        stdOut(output);
-        break;
-      }
-      case 2: {
-        const decoder = new TextDecoder();
-        const output = decoder.decode(buf);
-        stdErr(output);
-        break;
-      }
-      default:
-        return wasi["io"]["streams"]["write"](s, buf);
-    }
-  };
-  const command = await initialize({
-    "filesystem": {
-      ...wasi["filesystem"],
-      "preopens": {
-        getDirectories,
-      },
+export const main = async (
+  args: string[],
+  envVars: Record<string, string> | undefined,
+  stdIn: string | null,
+  stdOut: (message: string) => void,
+  stdErr: (message: string) => void,
+  preOpened: Record<string, string>,
+  providers: Parameters<typeof initialize>[0],
+) => {
+  // Create custom WASI FileSystem
+  await _setPreopens(preOpened);
+  // TEMPORARY: cast around overly strict types shipped in the WIP
+  // preview2-shim build pinned in package.json for the would-block fix
+  // (https://github.com/bytecodealliance/jco/issues/2042). Remove once a
+  // stable, published fix lands and this pin is removed.
+  const filesystem = {
+    preopens,
+    types,
+  } as any;
+
+  // Create custom WASI CLI
+  const { cli, exitPromise } = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
+
+  // Create WASIShim with custom CLI, filesystem, and sandbox config
+  const command = await initialize(providers, {
+    cli,
+    filesystem,
+    sandbox: {
+      env: envVars,
+      args,
+      enableNetwork: true,
     },
-    "io": {
-      "streams": {
-        ...wasi["io"]["streams"],
-        blockingRead: (s: number, len: bigint) => {
-          switch (s) {
-            case 0: {
-              const bytes = stdIn();
-              return [bytes, 'ended']
-            }
-            default:
-              return wasi["io"]["streams"]["blockingRead"](s, len);
-          }
-        },
-        // TODO: investigate further issue on dropOutputStream
-        dropOutputStream: (s: number) => {},
-        write: ioWrite,
-        blockingWriteAndFlush: ioWrite,
-      },
-    },
-    "cli": {
-      ...wasi["cli"],
-      "environment": {
-        getEnvironment: () => envVars,
-        getArguments: () => args,
-      },
+  });
+
+  // Run the command. If the guest calls `exit()`, the generated bindings
+  // never settle `run.run()`'s promise, so race against `exitPromise` too.
+  try {
+    await Promise.race([command.run.run(), exitPromise]);
+  } catch (err) {
+    if (!(err instanceof ComponentExit)) {
+      throw err;
     }
-  } as Partial<ImportObject>);
-  command["wasi:cli/run"].run();
+  }
 };

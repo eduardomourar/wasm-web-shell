@@ -1,42 +1,45 @@
 {
   "name": "wasm-web-shell",
   "version": "0.0.1",
+  "private": true,
   "type": "module",
-  "main": "dist/main.js",
-  "engines" : { 
-    "node" : "18"
-  },
-  "volta" : { 
-    "node" : "18.17.1",
-    "npm": "9.6.7"
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
   },
   "scripts": {
-    "build": "webpack --mode production --no-devtool && rm -rf ./dist/*.LICENSE.*",
-    "dev": "webpack --mode development",
-    "start": "ASSET_PATH='/' webpack serve"
+    "build": "webpack --mode production --no-devtool && rm -rf ../extension/shell/*.LICENSE.*",
+    "build:extension": "npm run build && webpack --config webpack.extension.js --mode production --no-devtool",
+    "dev": "webpack --mode development --watch",
+    "dev:extension": "npm run dev & webpack --config webpack.extension.js --watch",
+    "start": "ASSET_PATH='/' webpack serve",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
+    "@xterm/xterm": "^6",
     "aws-cli-wasm": "file://./aws-cli",
-    "comlink": "^4.4.1",
-    "local-echo": "github:wavesoft/local-echo",
-    "native-file-system-adapter": "github:jimmywarting/native-file-system-adapter",
-    "react": "^17.0.2",
-    "react-dom": "^17.0.2",
-    "wasm-webterm": "github:cryptool-org/wasm-webterm",
-    "xterm": "^4.19.0",
-    "xterm-addon-fit": "^0.5.0"
+    "cookie-store": "^4.0.0-next.4",
+    "coreutils-wasm": "file://./coreutils",
+    "react": "^19",
+    "react-dom": "^19",
+    "wasm-terminal": "file://./wasm-terminal"
   },
   "devDependencies": {
-    "@types/react": "^18.0.28",
-    "@types/react-dom": "^18.0.11",
-    "copy-webpack-plugin": "^11.0.0",
-    "css-loader": "^6.8.1",
-    "html-webpack-plugin": "^5.5.3",
-    "style-loader": "^3.3.3",
-    "ts-loader": "^9.4.4",
-    "typescript": "^5.2.2",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1"
+    "@playwright/test": "^1",
+    "@types/chrome": "^0.2.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "copy-webpack-plugin": "^14",
+    "css-loader": "^7",
+    "html-webpack-plugin": "^5",
+    "linkedom": "^0.18.0",
+    "style-loader": "^4",
+    "ts-loader": "^9",
+    "typescript": "^6",
+    "webpack": "^5",
+    "webpack-cli": "^7",
+    "webpack-dev-server": "^6"
   }
 }

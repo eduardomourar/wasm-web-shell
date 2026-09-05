@@ -1,0 +1,11 @@
+[package]
+name = "simple-http-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+futures-util = "0.3"
+wstd = "0.6"
