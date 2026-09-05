@@ -23,10 +23,10 @@ This is a WebAssembly-based web shell that runs AWS CLI commands directly in the
 cargo build
 
 # Build only WASM components (excluding wasi-engine)
-cargo component build --workspace --exclude wasi-engine
+cargo component build --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
 
 # Run tests for WASM components
-cargo component test --workspace --exclude wasi-engine
+cargo component test --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
 
 # Run the wasi-engine locally (native wasmtime execution)
 cd packages/wasi-engine
@@ -106,11 +106,11 @@ Tests use `#[wstd::test]` attribute (not standard `#[tokio::test]`) for WASI com
 
 ```bash
 # Run all component tests
-cargo component test --workspace --exclude wasi-engine
+cargo component test --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
 
 # Run with verbose logging
 RUST_LOG=trace RUST_BACKTRACE=1 WASMTIME_BACKTRACE_DETAILS=1 \
-  cargo component test --workspace --exclude wasi-engine
+  cargo component test --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
 
 # Run a specific test
 cargo component test -p aws-cli -- default_config

@@ -38,9 +38,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             ${CARGO_TARGET_DIR}/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-build-
       - name: Cache cargo run bin
         uses: actions/cache@v5
         with:
@@ -57,7 +57,7 @@ jobs:
           cargo bin --install
       - name: Build
         run: |
-          CARGO_PROFILE_DEV_LTO=thin cargo component build --target wasm32-wasip2 --workspace --exclude wasi-engine
+          CARGO_PROFILE_DEV_LTO=thin cargo component build --target wasm32-wasip2 --workspace --exclude wasi-engine --exclude aws-cli-integration-tests
           cargo build -p wasi-engine
       - name: Check formatting
         run: cargo fmt --all
@@ -68,18 +68,70 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           use-cross: false
 
-      - name: Test WebAssembly components
+      - name: Test the composed WASM component
+        # aws-cli-integration-tests only depends on fs2 and shells out to the wasi-engine
+        # binary + composed component just produced above - it never compiles aws-cli or
+        # its aws-sdk-* dependency tree for the host, so this job stays wasm32-wasip2-only.
         run: |
-          CARGO_PROFILE_DEV_LTO=thin cargo component check --target wasm32-wasip2 --workspace --exclude wasi-engine
-          cargo check -p wasi-engine
+          export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
+          cargo test -p aws-cli-integration-tests -- --test-threads=2
+
+  # Runs in parallel with `build` (no `needs:`, so both start together). aws-cli's unit
+  # tests use tokio's real (non-wasm) runtime via #[tokio::test], so they must compile the
+  # full aws-sdk-* dependency tree for the host target - a separate Cargo target-dir/cache
+  # bucket from `build`'s wasm32-wasip2 compile. Running it as its own job overlaps that
+  # host compile with `build`'s wasm compile instead of paying for both back-to-back.
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: "${{ github.workspace }}/target"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Increase swap space
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Cache cargo
+        id: cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${CARGO_TARGET_DIR}/
+          key: ${{ runner.os }}-cargo-unit-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-unit-
+      - name: Cache cargo run bin
+        uses: actions/cache@v5
+        with:
+          path: |
+            .bin/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+
+      - name: Install cargo binstall
+        uses: cargo-bins/cargo-binstall@v1.20.1
+      - name: Install cargo-run-bin
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo binstall cargo-run-bin -y --locked
+          cargo bin --install
+
+      - name: Run unit tests
+        run: |
           export RUST_TEST_NOCAPTURE=1
           cargo test -p aws-cli --lib
           cargo test -p simple-http-proxy --target wasm32-wasip2
-          export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
-          cargo test -p aws-cli --test integration_test -- --test-threads=2
 
-  # Runs in parallel with the `build` job's "Test WebAssembly components" step
-  # (no `needs:`, so both jobs start together). The transpiled JS bindings under
+  # Runs in parallel with the `build`/`unit-tests` jobs (no `needs:`, so all start
+  # together). The transpiled JS bindings under
   # www/aws-cli/component and www/coreutils/component (including the release-profile
   # target/wasm32-wasip2/release/coreutils.wasm they're generated from) are committed
   # to the repo, so this job just checks them out as-is and exercises them end-to-end
@@ -118,12 +170,13 @@ jobs:
   pr-success:
     needs:
       - build
+      - unit-tests
       - frontend-tests
     # if pr-success is skipped, GH branch protection will not consider it a failure, we need to check the result of each dependency ourself
     # see: https://brunoscheufler.com/blog/2022-04-09-the-required-github-status-check-that-wasnt
     if: always()
     steps:
-      - if: needs.build.result == 'failure' || needs.frontend-tests.result == 'failure'
+      - if: needs.build.result == 'failure' || needs.unit-tests.result == 'failure' || needs.frontend-tests.result == 'failure'
         run: echo "a required job failed, setting the failure() bit" && exit 1
       - if: success()
         run: echo "all dependencies succeeded"
