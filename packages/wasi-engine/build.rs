@@ -32,6 +32,8 @@ fn is_running_in_github_actions() -> bool {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_PROFILE");
+
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
