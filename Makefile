@@ -41,7 +41,7 @@ test-unit: test-native
 # Build for wasi-engine to validate compilation
 build-wasi-engine: build-components
 	@echo "Building wasi-engine..."
-	@cargo build -p wasi-engine --profile "$(CARGO_PROFILE)"
+	@CARGO_PROFILE="$(CARGO_PROFILE)" cargo build -p wasi-engine
 
 # Run integration tests with composed WASM component
 test-integration: build-wasi-engine
