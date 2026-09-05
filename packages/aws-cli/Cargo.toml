@@ -58,18 +58,12 @@ aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-runtime = { version = "1", features = ["client"] }
 aws-smithy-runtime-api = { version = "1", features = ["client"] }
 aws-smithy-types = "1"
-fs2 = "0.4"
 http = "1"
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing-subscriber = "0.3"
 
 [lib]
 crate-type = ["cdylib"]
-
-[[test]]
-name = "integration_test"
-path = "tests/integration_test.rs"
-test = false
 
 [package.metadata.component]
 package = "component:aws-cli"
