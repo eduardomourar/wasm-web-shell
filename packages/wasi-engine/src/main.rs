@@ -70,7 +70,7 @@ async fn run() -> anyhow::Result<()> {
 
     let mut store = Store::new(&engine, host);
 
-    let profile = if cfg!(debug_assertions) {
+    let profile = if option_env!("CARGO_PROFILE").is_none() {
         "debug"
     } else {
         "release"

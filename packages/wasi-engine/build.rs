@@ -37,7 +37,7 @@ fn main() {
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
         });
-    let profile = if cfg!(debug_assertions) {
+    let profile = if option_env!("CARGO_PROFILE").is_none() {
         "debug"
     } else {
         "release"
