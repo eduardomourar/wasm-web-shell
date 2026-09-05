@@ -2,7 +2,7 @@ use js_component_bindgen::{AsyncMode, InstantiationMode, TranspileOpts, transpil
 use std::{fs, io::Write, path::PathBuf};
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
 
-const BASE_WASI_IMPORTS: [&str; 22] = [
+const BASE_WASI_IMPORTS: [&str; 23] = [
     "wasi:clocks/monotonic-clock#subscribe-duration",
     "wasi:clocks/monotonic-clock#subscribe-instant",
     "wasi:filesystem/types#[method]descriptor.advise",
@@ -16,6 +16,7 @@ const BASE_WASI_IMPORTS: [&str; 22] = [
     "wasi:filesystem/types#[method]descriptor.set-size",
     "wasi:filesystem/types#[method]descriptor.stat",
     "wasi:filesystem/types#[method]descriptor.stat-at",
+    "wasi:filesystem/types#[method]descriptor.symlink-at",
     "wasi:filesystem/types#[method]descriptor.unlink-file-at",
     "wasi:io/poll#poll",
     "wasi:io/poll#[method]pollable.block",

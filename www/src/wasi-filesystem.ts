@@ -306,6 +306,16 @@ interface FileMetadata {
 }
 const fileMetadata = new Map<string, FileMetadata>();
 
+/**
+ * Join a descriptor's base path with a relative path, stripping "." segments,
+ * so lookups against fullPath-keyed maps (symlinks, fileMetadata, fileCache)
+ * are consistent regardless of whether callers pass "name" or "./name".
+ */
+function joinPath(basePath: string, relativePath: string): string {
+  const parts = relativePath.split("/").filter((p) => p && p !== ".");
+  return parts.length ? basePath + "/" + parts.join("/") : basePath;
+}
+
 type FileSystemHandleType = FileSystemDirectoryHandle | FileSystemFileHandle;
 
 /**
@@ -703,7 +713,7 @@ class Descriptor implements IDescriptor {
     }
 
     // Check if this is a symlink
-    const fullPath = this.#path + "/" + path;
+    const fullPath = joinPath(this.#path, path);
     const symlinkTarget = symlinks.get(fullPath);
 
     if (symlinkTarget) {
@@ -796,7 +806,7 @@ class Descriptor implements IDescriptor {
     }
 
     // Check if this is a symlink and should be followed
-    const fullPath = this.#path + "/" + path;
+    const fullPath = joinPath(this.#path, path);
     const symlinkTarget = symlinks.get(fullPath);
     if (symlinkTarget && (!pathFlags || pathFlags.symlinkFollow !== false)) {
       // console.debug(`[wasi:filesystem Descriptor.openAt] Following symlink "${path}" -> "${symlinkTarget}"`);
@@ -838,7 +848,7 @@ class Descriptor implements IDescriptor {
         const subDirHandle = await currentHandle.getDirectoryHandle(fileName, {
           create: false, // Never create directories via openAt, use createDirectoryAt
         });
-        const newPath = this.#path + "/" + path;
+        const newPath = joinPath(this.#path, path);
         // console.debug(`[wasi:filesystem Descriptor.openAt] opened as directory: "${path}"`);
         return descriptorCreate(subDirHandle, newPath);
       } catch (err: any) {
@@ -866,11 +876,11 @@ class Descriptor implements IDescriptor {
         await writable.close();
 
         // Update cache
-        const newPath = this.#path + "/" + path;
+        const newPath = joinPath(this.#path, path);
         fileCache.set(newPath, new Uint8Array(0), Date.now());
       }
 
-      const newPath = this.#path + "/" + path;
+      const newPath = joinPath(this.#path, path);
       const descriptor = descriptorCreate(fileHandle, newPath);
 
       // Optionally pre-warm cache for better first-read performance
@@ -883,7 +893,7 @@ class Descriptor implements IDescriptor {
         // If file doesn't exist and we're not creating, check if it's a directory
         try {
           const subDirHandle = await currentHandle.getDirectoryHandle(fileName, { create: false });
-          const newPath = this.#path + "/" + path;
+          const newPath = joinPath(this.#path, path);
           return descriptorCreate(subDirHandle, newPath);
         } catch {
           throw new FsError("no-entry");
@@ -940,7 +950,7 @@ class Descriptor implements IDescriptor {
 
     // If this is a symlink, remove it from the symlink map rather than the
     // real filesystem (there is no real entry backing it).
-    const symlinkFullPath = this.#path + "/" + path;
+    const symlinkFullPath = joinPath(this.#path, path);
     if (symlinks.has(symlinkFullPath)) {
       symlinks.delete(symlinkFullPath);
       await persistSymlinksToStorage();
@@ -973,7 +983,7 @@ class Descriptor implements IDescriptor {
       await currentHandle.removeEntry(dirName, { recursive: false });
 
       // Clear from cache
-      const fullPath = this.#path + "/" + path;
+      const fullPath = joinPath(this.#path, path);
       fileCache.delete(fullPath);
     } catch (err: any) {
       if (err.name === "NotFoundError") {
@@ -990,7 +1000,7 @@ class Descriptor implements IDescriptor {
 
     // If this is a symlink, remove it from the symlink map rather than the
     // real filesystem (there is no real entry backing it).
-    const fullPath = this.#path + "/" + path;
+    const fullPath = joinPath(this.#path, path);
     if (symlinks.has(fullPath)) {
       symlinks.delete(fullPath);
       await persistSymlinksToStorage();
@@ -1223,7 +1233,7 @@ class Descriptor implements IDescriptor {
    * Set timestamps for a path
    */
   setTimesAt(pathFlags: PathFlags, path: string, dataAccessTimestamp: any, dataModificationTimestamp: any): void {
-    const fullPath = this.#path + "/" + path;
+    const fullPath = joinPath(this.#path, path);
 
     // Check if it's a symlink and should be followed
     const symlinkTarget = symlinks.get(fullPath);
@@ -1275,7 +1285,7 @@ class Descriptor implements IDescriptor {
    * Read symbolic link target
    */
   readlinkAt(path: string): string {
-    const fullPath = this.#path + "/" + path;
+    const fullPath = joinPath(this.#path, path);
     const target = symlinks.get(fullPath);
 
     if (!target) {
@@ -1302,13 +1312,13 @@ class Descriptor implements IDescriptor {
 
     // If the source is itself a symlink (not a real filesystem entry), just
     // move its entry in the symlink map instead of touching the real handle.
-    const oldSymlinkFullPath = descriptorPath + "/" + oldPath;
+    const oldSymlinkFullPath = joinPath(descriptorPath, oldPath);
     const oldSymlinkTarget = symlinks.get(oldSymlinkFullPath);
     if (oldSymlinkTarget !== undefined) {
       if (!(newDescriptor instanceof Descriptor)) {
         throw new FsError("invalid");
       }
-      const newSymlinkFullPath = (newDescriptor as Descriptor).#path + "/" + newPath;
+      const newSymlinkFullPath = joinPath((newDescriptor as Descriptor).#path, newPath);
       symlinks.delete(oldSymlinkFullPath);
       symlinks.set(newSymlinkFullPath, oldSymlinkTarget);
       await persistSymlinksToStorage();
@@ -1409,8 +1419,8 @@ class Descriptor implements IDescriptor {
       }
 
       // Update cache
-      const oldFullPath = descriptorPath + "/" + oldPath;
-      const newFullPath = (newDescriptor as Descriptor).#path + "/" + newPath;
+      const oldFullPath = joinPath(descriptorPath, oldPath);
+      const newFullPath = joinPath((newDescriptor as Descriptor).#path, newPath);
 
       const cachedData = fileCache.get(oldFullPath);
       if (cachedData) {
@@ -1462,7 +1472,7 @@ class Descriptor implements IDescriptor {
    * Create symbolic link
    */
   async symlinkAt(oldPath: string, newPath: string): Promise<void> {
-    const fullNewPath = this.#path + "/" + newPath;
+    const fullNewPath = joinPath(this.#path, newPath);
 
     // console.debug(`[wasi:filesystem symlinkAt] Creating symlink "${fullNewPath}" -> "${oldPath}"`);
 

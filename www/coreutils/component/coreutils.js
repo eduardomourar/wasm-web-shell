@@ -9211,7 +9211,7 @@ let gen = (function* _initGenerator () {
   _trampoline38.fnName = 'wasi:filesystem/types@0.2.3#renameAt';
   _trampoline38.manuallyAsync = true;
   
-  const _trampoline39 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
+  const _trampoline39 = async function(arg0, arg1, arg2, arg3, arg4, arg5) {
     var handle1 = arg0;
     
     var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9271,11 +9271,20 @@ let gen = (function* _initGenerator () {
       }
     }
     
-    const started = task.enterSync();
+    
+    const started = await task.enter({ isHost: hostProvided });
+    if (!started) {
+      _debugLog('[Instruction::CallInterface] failed to enter task', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+      });
+      throw new Error("failed to enter task");
+    }
+    
     
     let ret;
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
         fn: () => rsc0.symlinkAt(result3, result4),
@@ -9488,6 +9497,7 @@ let gen = (function* _initGenerator () {
     task.exit();
   }
   _trampoline39.fnName = 'wasi:filesystem/types@0.2.3#symlinkAt';
+  _trampoline39.manuallyAsync = true;
   
   const _trampoline40 = async function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
