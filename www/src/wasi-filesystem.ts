@@ -1055,6 +1055,42 @@ class Descriptor implements IDescriptor {
   }
 
   /**
+   * Positional read (pread-like), delegating to the same cache/streaming
+   * logic as readViaStream.
+   */
+  // @ts-expect-error Needs to be asynchronous
+  async read(length: Filesize, offset: Filesize): Promise<[Uint8Array, boolean]> {
+    const stream = this.readViaStream(offset);
+    try {
+      const bytes: Uint8Array = await stream.blockingRead(length);
+      return [bytes, bytes.byteLength < Number(length)];
+    } catch (err: any) {
+      if (err?.tag === "closed") {
+        return [new Uint8Array(0), true];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Positional write (pwrite-like), delegating to the same buffering/flush
+   * logic as writeViaStream.
+   */
+  // @ts-expect-error Needs to be asynchronous
+  async write(buffer: Uint8Array, offset: Filesize): Promise<Filesize> {
+    const stream = this.writeViaStream(offset);
+    await stream.blockingWriteAndFlush(buffer);
+    return BigInt(buffer.byteLength);
+  }
+
+  /**
+   * Writes are flushed directly to storage as they happen, so there's
+   * nothing extra to synchronize here.
+   */
+  syncData(): void {}
+  sync(): void {}
+
+  /**
    * Advisory file locking using Web Locks API (navigator.locks)
    */
   async advise(offset: Filesize, length: Filesize, advice: string): Promise<void> {

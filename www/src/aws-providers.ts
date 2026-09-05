@@ -14,9 +14,17 @@
  * - Response: { action: "get-credentials-response", accessKeyId, ..., _requestId }
  * - Request:  { action: "get-region", _requestId }
  * - Response: { action: "get-region-response", region, _requestId }
+ * - Request:  { action: "fetch-http", url, method, headers, body, _requestId }
+ * - Response: { action: "fetch-http-response", status, statusText, headers, body, _requestId }
  *
  * The _requestId field correlates responses to requests when multiple
  * concurrent requests are in flight.
+ *
+ * This module also patches `globalThis.fetch` (when running inside the
+ * extension iframe) so that cross-origin AWS API calls made by the wasi:http
+ * shim are relayed through the background service worker, which is not
+ * subject to CORS. This lets `aws s3 ls` etc. work against buckets that
+ * don't have a CORS policy for the extension's origin.
  */
 
 const REQUEST_TIMEOUT_MS = 15000;
@@ -188,3 +196,81 @@ export const providers = {
   provideCredentials,
   provideRegion,
 };
+
+const bytesToBase64 = (bytes: Uint8Array): string => {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+};
+
+const base64ToBytes = (base64: string): Uint8Array => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const headersToRecord = (headers?: HeadersInit): Record<string, string> => {
+  const record: Record<string, string> = {};
+  new Headers(headers).forEach((value, key) => {
+    record[key] = value;
+  });
+  return record;
+};
+
+const readBodyBytes = async (body: BodyInit | null | undefined): Promise<Uint8Array | undefined> => {
+  if (body == null) return undefined;
+  if (body instanceof Uint8Array) return body;
+  if (typeof body === "string") return new TextEncoder().encode(body);
+  return new Uint8Array(await new Response(body).arrayBuffer());
+};
+
+// Only proxy cross-origin http(s) requests (e.g. AWS API calls) — same-origin
+// requests (loading local wasm binaries, etc.) go through native fetch.
+const shouldProxyUrl = (url: string): boolean => {
+  try {
+    const parsed = new URL(url, location.href);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.origin !== location.origin;
+  } catch {
+    return false;
+  }
+};
+
+const proxyFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const url = input instanceof Request ? input.url : String(input);
+  const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
+  const headers = headersToRecord(input instanceof Request ? input.headers : init?.headers);
+  const bodyBytes = await readBodyBytes(input instanceof Request ? undefined : init?.body);
+
+  const response = await sendToContentScript<{
+    status: number;
+    statusText: string;
+    headers: [string, string][];
+    body: string | null;
+  }>({
+    action: "fetch-http",
+    url,
+    method,
+    headers,
+    body: bodyBytes ? bytesToBase64(bodyBytes) : null,
+  });
+
+  return new Response(response.body ? (base64ToBytes(response.body) as BodyInit) : undefined, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
+
+if (window.parent !== window) {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    return shouldProxyUrl(url) ? proxyFetch(input, init) : nativeFetch(input, init);
+  }) as typeof fetch;
+}
