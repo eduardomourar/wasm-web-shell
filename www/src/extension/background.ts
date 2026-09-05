@@ -9,9 +9,11 @@
  * Communication flow:
  *   iframe (shell app) → postMessage → content script → chrome.runtime.sendMessage → HERE
  *
- * Handles two message types:
+ * Handles three message types:
  * - "fetch-credentials": Fetches temporary AWS credentials from TangerineBox
  * - "fetch-region": Reads the noflush_Region cookie to determine the active region
+ * - "fetch-http": Generic HTTP proxy for cross-origin AWS API calls (e.g. S3)
+ *   that would otherwise be blocked by CORS in the shell iframe
  */
 
 import { DOMParser } from "linkedom";
@@ -216,6 +218,54 @@ const fetchCredentials = async (
   }
 };
 
+const bytesToBase64 = (bytes: Uint8Array): string => {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+};
+
+const base64ToBytes = (base64: string): Uint8Array => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+/**
+ * Generic HTTP proxy. The background service worker's fetch() is not
+ * subject to CORS, so this lets AWS API calls (e.g. S3 ListObjectsV2)
+ * succeed even when the target bucket has no CORS policy for our origin.
+ */
+const fetchHttp = async (
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: string | null,
+): Promise<object> => {
+  try {
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: body ? (base64ToBytes(body) as BodyInit) : undefined,
+    });
+    const responseBody = new Uint8Array(await response.arrayBuffer());
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: [...response.headers.entries()],
+      body: bytesToBase64(responseBody),
+    };
+  } catch (err: any) {
+    console.error("[background:fetchHttp] Fetch failed:", err);
+    return { error: err.message || String(err) };
+  }
+};
+
 const getCookie = async (url: string, name: string) => {
   console.debug(`[background:getCookie] url ${url}, name ${name}`);
   const output = await chrome.cookies.get({ url, name });
@@ -242,6 +292,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   } else if (message.action === "fetch-region") {
     const { origin } = message;
     getCookie(origin, COOKIE_REGION)
+      .then(sendResponse)
+      .catch(sendResponse);
+    return true; // async response
+  } else if (message.action === "fetch-http") {
+    const { url, method, headers, body } = message;
+    fetchHttp(url, method, headers, body)
       .then(sendResponse)
       .catch(sendResponse);
     return true; // async response

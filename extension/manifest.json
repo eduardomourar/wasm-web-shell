@@ -7,7 +7,8 @@
     "https://amazon.com/",
     "https://aws.amazon.com/",
     "https://*.console.aws.amazon.com/",
-    "https://*.signin.aws.amazon.com/"
+    "https://*.signin.aws.amazon.com/",
+    "https://*.amazonaws.com/*"
   ],
   "permissions": [
     "cookies"

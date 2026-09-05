@@ -18,6 +18,10 @@
  *   iframe → postMessage("get-credentials") → content script
  *     → chrome.runtime.sendMessage("fetch-credentials") → background worker
  *     → response → content script → postMessage("get-credentials-response") → iframe
+ *
+ * Also relays generic HTTP requests ("fetch-http") the same way, so the
+ * background worker's CORS-exempt fetch can be used for cross-origin AWS
+ * API calls (e.g. S3) that a bucket's CORS policy would otherwise block.
  */
 
 import { extractCsrfToken } from "./utils";
@@ -42,6 +46,39 @@ const handleGetCredentials = async (
       region,
       csrfToken,
       sourceUrl: window.location.href,
+    });
+
+    if (response?.error) {
+      return { ...base, error: response.error };
+    }
+    return { ...base, ...response };
+  } catch (err: any) {
+    return { ...base, error: err.message || String(err) };
+  }
+};
+
+const handleFetchHttp = async (
+  data: {
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | null,
+    _requestId: string,
+  },
+) => {
+  const base = {
+    action: "fetch-http-response",
+    _requestId: data._requestId,
+  };
+
+  // Relay to background service worker (not subject to CORS)
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: "fetch-http",
+      url: data.url,
+      method: data.method,
+      headers: data.headers,
+      body: data.body,
     });
 
     if (response?.error) {
@@ -121,8 +158,8 @@ const init = (csrfToken: string) => {
   // Divider bar
   const divider = document.createElement("div");
   Object.assign(divider.style, {
-    height: "1px",
-    minHeight: "1px",
+    height: "6px",
+    minHeight: "6px",
     background: "#333",
     cursor: "pointer",
     display: "flex",
@@ -141,11 +178,11 @@ const init = (csrfToken: string) => {
     fontSize: "16px",
     lineHeight: "1.2",
     background: "rgba(208,208,208,0.8)",
-    padding: "0px 6px",
+    padding: "2px 8px",
     borderRadius: "6px",
     position: "relative",
     left: "12px",
-    top: "-8px",
+    top: "-10px",
     transition: "transform 0.2s ease",
   });
   divider.appendChild(chevron);
@@ -169,10 +206,10 @@ const init = (csrfToken: string) => {
   divider.addEventListener("click", () => {
     collapsed = !collapsed;
     if (collapsed) {
-      container.style.height = "6px";
+      container.style.height = "20px";
       iframe.style.display = "none";
       chevron.textContent = "\u25B2";
-      document.body.style.paddingBottom = "6px";
+      document.body.style.paddingBottom = "20px";
     } else {
       container.style.height = "33.33vh";
       iframe.style.display = "block";
@@ -229,6 +266,12 @@ const init = (csrfToken: string) => {
 
       case "get-region":
         handleGetRegion(data, defaultRegion)
+          .then(reply)
+          .catch(reply);
+        break;
+
+      case "fetch-http":
+        handleFetchHttp(data)
           .then(reply)
           .catch(reply);
         break;

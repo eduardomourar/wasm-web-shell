@@ -1,6 +1,6 @@
 import { initialize } from "coreutils-wasm";
 import { ComponentExit, createWasiCli } from "./wasi-cli";
-import { _setPreopens, preopens, types} from "./wasi-filesystem";
+import { _setPreopens, preopens, types } from "./wasi-filesystem";
 
 /**
  * Execute a coreutils command (ls, cat, echo, etc.)
@@ -15,10 +15,12 @@ export const executeCoreutilsCommand = async (
 ) => {
   // Create custom WASI FileSystem
   await _setPreopens(preOpened);
+  // preview2-shim types Descriptor methods as synchronous, but our
+  // OPFS-backed adapter is necessarily async.
   const filesystem = {
     preopens,
     types,
-  };
+  } as any;
 
   // Create custom WASI CLI
   const { cli, exitPromise } = await createWasiCli(stdIn, stdOut, stdErr, preOpened);
