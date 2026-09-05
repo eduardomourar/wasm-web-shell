@@ -1,0 +1,11 @@
+[package]
+name = "aws-cli-integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+fs2 = "0.4"

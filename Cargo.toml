@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "packages/aws-cli",
+    "packages/aws-cli-integration-tests",
     "packages/providers-adapter",
     "packages/simple-http-proxy",
     "packages/wasi-engine",
