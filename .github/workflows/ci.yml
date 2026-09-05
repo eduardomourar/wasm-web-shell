@@ -78,15 +78,53 @@ jobs:
           export RUST_LOG="trace,cranelift_codegen=off,cranelift_wasm=off,wasmtime_cranelift=off"
           cargo test -p aws-cli --test integration_test -- --test-threads=2
 
+  # Runs in parallel with the `build` job's "Test WebAssembly components" step
+  # (no `needs:`, so both jobs start together). The transpiled JS bindings under
+  # www/aws-cli/component and www/coreutils/component (including the release-profile
+  # target/wasm32-wasip2/release/coreutils.wasm they're generated from) are committed
+  # to the repo, so this job just checks them out as-is and exercises them end-to-end
+  # in a real browser via Playwright - no Rust toolchain/build needed.
+  frontend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: www
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: "www/package.json"
+          cache: "npm"
+          cache-dependency-path: "www/package-lock.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright e2e tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: www/playwright-report/
+          retention-days: 14
+
   pr-success:
     needs:
       - build
+      - frontend-tests
     # if pr-success is skipped, GH branch protection will not consider it a failure, we need to check the result of each dependency ourself
     # see: https://brunoscheufler.com/blog/2022-04-09-the-required-github-status-check-that-wasnt
     if: always()
     steps:
-      - if: needs.build.result == 'failure'
-        run: echo "build job failed, setting the failure() bit" && exit 1
+      - if: needs.build.result == 'failure' || needs.frontend-tests.result == 'failure'
+        run: echo "a required job failed, setting the failure() bit" && exit 1
       - if: success()
         run: echo "all dependencies succeeded"
     runs-on: ubuntu-latest
