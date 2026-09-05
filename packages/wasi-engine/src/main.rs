@@ -1,7 +1,7 @@
 use std::env;
 
 use wasmtime::{
-    Config, Engine, Store,
+    Cache, Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{
@@ -62,6 +62,10 @@ async fn run() -> anyhow::Result<()> {
     let host = Host { table, ctx, http };
     let mut config = Config::new();
     config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+    // Each CLI invocation is a fresh process, and the composed component (28 AWS SDK
+    // services) is expensive to compile with Cranelift. Without an on-disk compilation
+    // cache, every single invocation recompiles it from scratch.
+    config.cache(Some(Cache::from_file(None)?));
 
     let engine = Engine::new(&config)?;
     let mut linker = Linker::<Host>::new(&engine);
