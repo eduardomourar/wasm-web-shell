@@ -16,7 +16,6 @@ export class InputStream {
    */
   private constructor();
   read(len: bigint): Uint8Array;
-  blockingRead(len: bigint): Uint8Array;
   subscribe(): Pollable;
 }
 
@@ -27,7 +26,7 @@ export class OutputStream {
   private constructor();
   checkWrite(): bigint;
   write(contents: Uint8Array): void;
-  blockingWriteAndFlush(contents: Uint8Array): void;
   blockingFlush(): void;
   subscribe(): Pollable;
+  splice(src: InputStream, len: bigint): bigint;
 }
