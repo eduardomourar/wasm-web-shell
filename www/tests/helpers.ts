@@ -13,6 +13,16 @@ export function getTerminalText(page: Page) {
   });
 }
 
+/**
+ * Returns the last non-empty rendered line, i.e. the current prompt/input
+ * line while the user is still typing (before pressing Enter).
+ */
+export async function getCurrentPromptLine(page: Page): Promise<string> {
+  const text = await getTerminalText(page);
+  const lines = text.split('\n').map((line) => line.trim());
+  return [...lines].reverse().find((line) => line.length > 0) || '';
+}
+
 export async function gotoShell(page: Page) {
   await page.goto('/');
   await page.waitForSelector('.xterm-screen', { timeout: 10000 });

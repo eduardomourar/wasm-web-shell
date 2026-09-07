@@ -460,23 +460,36 @@ export default class LocalEcho {
           this.setCursor(0);
           break;
 
-        case "b": // ALT + LEFT
+        case "b": // ALT + LEFT (meta-key terminals)
+        case "[1;3D": // OPTION + LEFT (xterm.js/macOS)
+        case "[1;5D": // CTRL + LEFT
           ofs = closestLeftBoundary(this._input, this._cursor);
           if (ofs !== null) this.setCursor(ofs);
           break;
 
-        case "f": // ALT + RIGHT
+        case "f": // ALT + RIGHT (meta-key terminals)
+        case "[1;3C": // OPTION + RIGHT (xterm.js/macOS)
+        case "[1;5C": // CTRL + RIGHT
           ofs = closestRightBoundary(this._input, this._cursor);
           if (ofs !== null) this.setCursor(ofs);
           break;
 
-        case "\x7F": // CTRL + BACKSPACE
+        case "\x7F": // CTRL + BACKSPACE (delete word backward)
           ofs = closestLeftBoundary(this._input, this._cursor);
           if (ofs !== null) {
             this.setInput(
               this._input.substring(0, ofs) + this._input.substring(this._cursor)
             );
             this.setCursor(ofs);
+          }
+          break;
+
+        case "[3;3~": // OPTION + DELETE (delete word forward)
+          ofs = closestRightBoundary(this._input, this._cursor);
+          if (ofs !== null) {
+            this.setInput(
+              this._input.substring(0, this._cursor) + this._input.substring(ofs)
+            );
           }
           break;
       }
@@ -498,6 +511,42 @@ export default class LocalEcho {
 
         case "\t": // TAB - just insert spaces, no autocomplete
           this.handleCursorInsert("    ");
+          break;
+
+        case "\x01": // CTRL+A - move to start of line
+          this.setCursor(0);
+          break;
+
+        case "\x05": // CTRL+E - move to end of line
+          this.setCursor(this._input.length);
+          break;
+
+        case "\x0B": // CTRL+K - kill to end of line
+          this.setInput(this._input.substring(0, this._cursor));
+          break;
+
+        case "\x15": // CTRL+U - kill to start of line
+          this.setInput(this._input.substring(this._cursor));
+          this.setCursor(0);
+          break;
+
+        case "\x17": // CTRL+W - delete word backward
+          ofs = closestLeftBoundary(this._input, this._cursor);
+          if (ofs !== null) {
+            this.setInput(
+              this._input.substring(0, ofs) + this._input.substring(this._cursor)
+            );
+            this.setCursor(ofs);
+          }
+          break;
+
+        case "\x0C": // CTRL+L - clear screen, keep current input
+          this.term?.write("\x1B[2J\x1B[3J\x1B[H");
+          this.setInput(this._input, false);
+          break;
+
+        case "\x04": // CTRL+D - delete char forward (no-op on empty input)
+          if (this._input.length > 0) this.handleCursorErase(false);
           break;
 
         case "\x03": // CTRL+C

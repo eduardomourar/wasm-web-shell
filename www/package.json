@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "webpack --mode production --no-devtool && rm -rf ../extension/shell/*.LICENSE.*",
-    "build:extension": "npm run build && webpack --config webpack.extension.js --mode production --no-devtool",
+    "build:extension": "webpack --config webpack.extension.js --mode production --no-devtool",
     "dev": "webpack --mode development --watch",
     "dev:extension": "npm run dev & webpack --config webpack.extension.js --watch",
     "start": "ASSET_PATH='/' webpack serve",

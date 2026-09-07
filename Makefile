@@ -62,8 +62,13 @@ generate-ops:
 	@cargo run --manifest-path tools/generate-ops/Cargo.toml
 	@echo "Done. Review generated files and run: cargo check -p aws-cli --lib"
 
-# Build the Chrome extension (web shell + extension files)
-build-extension:
+# Build the Web Shell
+build-shell:
+	@echo "Building extension..."
+	@cd www && npm run build
+
+# Build the Chrome extension (extension files)
+build-extension: build-shell
 	@echo "Building extension..."
 	@cd www && npm run build:extension
 	@echo "Extension ready at extension/"

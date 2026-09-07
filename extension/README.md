@@ -103,15 +103,9 @@ make build-extension
 ### Build commands
 
 ```bash
-# Full extension build (shell app + content script + background)
-make build-extension
-
-# Or from www/ directory:
-npm run build:extension
-
-# Individual builds:
+# From www/ directory:
 npm run build           # Shell app → extension/shell/
-npm run build:content   # Content script + background → extension/
+npm run build:extension   # Content script + background → extension/
 ```
 
 ## Development
