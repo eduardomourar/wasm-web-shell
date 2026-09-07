@@ -13,7 +13,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
       pages: write
     steps:
@@ -39,3 +39,24 @@ jobs:
           path: extension/shell/
       - name: Deploy Web Page
         uses: actions/deploy-pages@v5
+
+      - name: Prepare Extension
+        working-directory: www
+        run: |
+          npm run build:extension
+      - name: Package Extension
+        id: package_extension
+        run: |
+          sha_short=$(git rev-parse --short HEAD)
+          echo "sha_short=${sha_short}" >> "$GITHUB_OUTPUT"
+          zip -r "extension-${sha_short}.zip" extension/
+      - name: Upload Extension Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: extension-${{ steps.package_extension.outputs.sha_short }}
+        run: |
+          gh release delete "$TAG" --yes || true
+          gh release create "$TAG" \
+            "extension-${{ steps.package_extension.outputs.sha_short }}.zip" \
+            --title "Extension build ${{ steps.package_extension.outputs.sha_short }}" \
+            --notes "Automated extension build for commit ${{ github.sha }}."
