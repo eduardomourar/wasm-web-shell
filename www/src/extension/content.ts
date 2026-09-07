@@ -26,6 +26,8 @@
 
 import { extractCsrfToken } from "./utils";
 
+const DEFAULT_FOOTER_HEIGHT = 34;
+
 let csrfToken: string | null = extractCsrfToken(document);
 
 const handleGetCredentials = async (
@@ -152,7 +154,7 @@ const init = (csrfToken: string) => {
     zIndex: "999999",
     display: "flex",
     flexDirection: "column",
-    transition: "height 0.2s ease",
+    transition: "height 0.2s ease, bottom 0.2s ease",
   });
 
   // Divider bar
@@ -202,20 +204,29 @@ const init = (csrfToken: string) => {
   container.appendChild(iframe);
 
   // Collapse / expand
-  let collapsed = false;
-  divider.addEventListener("click", () => {
-    collapsed = !collapsed;
+  let collapsed = true;
+  const applyState = () => {
     if (collapsed) {
-      container.style.height = "20px";
+      const awsNavFooter = document.getElementById("awsc-nav-footer-content");
+      const footerHeight = Number(awsNavFooter?.clientHeight ?? DEFAULT_FOOTER_HEIGHT);
+      const dividerHeight = 6;
+      container.style.bottom = `${footerHeight}px`;
+      container.style.height = `${dividerHeight}px`;
       iframe.style.display = "none";
       chevron.textContent = "\u25B2";
-      document.body.style.paddingBottom = "20px";
+      document.body.style.paddingBottom = `${footerHeight + dividerHeight}px`;
     } else {
+      container.style.bottom = "0";
       container.style.height = "33.33vh";
       iframe.style.display = "block";
       chevron.textContent = "\u25BC";
       document.body.style.paddingBottom = "33.33vh";
     }
+  };
+
+  divider.addEventListener("click", () => {
+    collapsed = !collapsed;
+    applyState();
   });
 
   divider.addEventListener("mouseenter", () => {
@@ -225,8 +236,11 @@ const init = (csrfToken: string) => {
     divider.style.background = "#333";
   });
 
-  // Inject into page
-  document.body.style.paddingBottom = "33.33vh";
+  // Re-sync collapsed height/position with the AWS footer on viewport resize
+  window.addEventListener("resize", applyState);
+
+  // Inject into page, starting collapsed
+  applyState();
   document.documentElement.appendChild(container);
 
   // --- Message relay: iframe <-> content script ---
