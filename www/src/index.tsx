@@ -58,4 +58,8 @@ const container = (window as any).__wasmShellMountPoint || document.getElementBy
 if (container) {
   const root = createRoot(container);
   root.render(<App />)
+
+  // The terminal itself renders synchronously; hide the static loading
+  // placeholder shown in index.html while the JS bundle was downloading.
+  document.getElementById("web-shell-loading")?.remove();
 }
