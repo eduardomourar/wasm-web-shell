@@ -159,10 +159,14 @@ const init = (csrfToken: string) => {
 
   // Divider bar
   const divider = document.createElement("div");
+  divider.title = "AWS CLI Web Shell (click to expand)";
+  divider.tabIndex = 0;
+  divider.setAttribute("role", "button");
+  divider.setAttribute("aria-expanded", "false");
   Object.assign(divider.style, {
     height: "6px",
     minHeight: "6px",
-    background: "#333",
+    background: "#ec7211",
     cursor: "pointer",
     display: "flex",
     alignItems: "flex-start",
@@ -170,7 +174,7 @@ const init = (csrfToken: string) => {
     paddingLeft: "6px",
     overflow: "visible",
     userSelect: "none",
-    borderTop: "1px solid #555",
+    borderTop: "1px solid #ec7211",
   });
 
   const chevron = document.createElement("span");
@@ -214,26 +218,38 @@ const init = (csrfToken: string) => {
       container.style.height = `${dividerHeight}px`;
       iframe.style.display = "none";
       chevron.textContent = "\u25B2";
+      divider.title = "AWS CLI Web Shell (click to expand)";
+      divider.setAttribute("aria-expanded", "false");
       document.body.style.paddingBottom = `${footerHeight + dividerHeight}px`;
     } else {
       container.style.bottom = "0";
       container.style.height = "33.33vh";
       iframe.style.display = "block";
       chevron.textContent = "\u25BC";
+      divider.title = "AWS CLI Web Shell (click to collapse)";
+      divider.setAttribute("aria-expanded", "true");
       document.body.style.paddingBottom = "33.33vh";
     }
   };
 
-  divider.addEventListener("click", () => {
+  const toggle = () => {
     collapsed = !collapsed;
     applyState();
+  };
+
+  divider.addEventListener("click", toggle);
+  divider.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
   });
 
   divider.addEventListener("mouseenter", () => {
-    divider.style.background = "#555";
+    divider.style.background = "#ff9900";
   });
   divider.addEventListener("mouseleave", () => {
-    divider.style.background = "#333";
+    divider.style.background = "#ec7211";
   });
 
   // Re-sync collapsed height/position with the AWS footer on viewport resize
