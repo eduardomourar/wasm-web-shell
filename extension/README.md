@@ -132,6 +132,7 @@ npm run start
 | Permission | Reason |
 |-----------|--------|
 | `cookies` | Read Console session cookies for TangerineBox authentication |
+| `storage` | Persist the shell panel's collapsed/expanded state across page reloads |
 | Host: `https://*.console.aws.amazon.com/` | Content script injection, cookie access, fetch credentials |
 | Host: `https://amazon.com/`, `https://aws.amazon.com/` | Read `aws-userInfo` and `aws-userInfo-signed` cookies |
 | Host: `https://*.signin.aws.amazon.com/` | Redirected when cookies not present for region or service |

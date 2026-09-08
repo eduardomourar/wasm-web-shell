@@ -26,11 +26,15 @@
  * Also listens for a "toggle-shell" message from the background worker,
  * sent when the user clicks the extension's toolbar icon, and toggles the
  * panel the same way the divider click/keydown handlers do.
+ *
+ * The collapsed/expanded state is persisted in chrome.storage.local so it
+ * survives page reloads and navigations instead of always starting collapsed.
  */
 
 import { extractCsrfToken } from "./utils";
 
 const DEFAULT_FOOTER_HEIGHT = 34;
+const STORAGE_KEY_COLLAPSED = "wasmShellCollapsed";
 
 let csrfToken: string | null = extractCsrfToken(document);
 
@@ -136,7 +140,7 @@ const handleGetRegion = async (
  *   that includes 'wasm-unsafe-eval', allowing WASM compilation
  * - The iframe also provides full CSS isolation for xterm.js
  */
-const init = (csrfToken: string) => {
+const init = async (csrfToken: string) => {
   // Region from hostname: us-east-1.console.aws.amazon.com
   const regionMatch = window.location.hostname.match(
     /^([a-z0-9-]+)\.console\.aws\.amazon\.com$/
@@ -239,6 +243,7 @@ const init = (csrfToken: string) => {
   const toggle = () => {
     collapsed = !collapsed;
     applyState();
+    chrome.storage.local.set({ [STORAGE_KEY_COLLAPSED]: collapsed });
   };
 
   divider.addEventListener("click", toggle);
@@ -266,7 +271,12 @@ const init = (csrfToken: string) => {
   // Re-sync collapsed height/position with the AWS footer on viewport resize
   window.addEventListener("resize", applyState);
 
-  // Inject into page, starting collapsed
+  // Restore the user's last collapsed/expanded state (persisted across reloads)
+  const stored = await chrome.storage.local.get(STORAGE_KEY_COLLAPSED);
+  if (typeof stored[STORAGE_KEY_COLLAPSED] === "boolean") {
+    collapsed = stored[STORAGE_KEY_COLLAPSED];
+  }
+
   applyState();
   document.documentElement.appendChild(container);
 
