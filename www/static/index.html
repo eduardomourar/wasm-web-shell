@@ -4,9 +4,27 @@
 <head>
   <meta charset="utf-8">
   <title>Wasm Web Shell</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+    }
+    #web-shell-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      width: 100vw;
+      background: #000;
+      color: #aaa;
+      font-family: monospace;
+      font-size: 14px;
+    }
+  </style>
 </head>
 
 <body>
+  <div id="web-shell-loading">Loading AWS CLI Web Shell&hellip;</div>
   <div id="web-shell"></div>
 
   <noscript>This page contains webassembly and javascript content, please enable javascript in your browser.</noscript>

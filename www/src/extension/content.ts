@@ -320,10 +320,40 @@ const init = (csrfToken: string) => {
   });
 };
 
-if (!csrfToken) {
-  console.debug("[content] No CSRF token found — skipping injection.");
-} else if (document.getElementById("wasm-shell-container")) {
+/**
+ * Render a disabled divider-only indicator when the shell can't be started
+ * on this page (no CSRF token found), instead of injecting nothing and
+ * leaving the user with no signal that the extension is even active here.
+ */
+const initUnavailable = () => {
+  const awsNavFooter = document.getElementById("awsc-nav-footer-content");
+  const footerHeight = Number(awsNavFooter?.clientHeight ?? DEFAULT_FOOTER_HEIGHT);
+
+  const bar = document.createElement("div");
+  bar.id = "wasm-shell-container";
+  bar.title = "AWS CLI Web Shell unavailable on this page";
+  Object.assign(bar.style, {
+    position: "fixed",
+    bottom: `${footerHeight}px`,
+    left: "0",
+    width: "100%",
+    height: "6px",
+    minHeight: "6px",
+    background: "#888",
+    cursor: "not-allowed",
+    zIndex: "999999",
+    borderTop: "1px solid #888",
+  });
+
+  document.body.style.paddingBottom = `${footerHeight + 6}px`;
+  document.documentElement.appendChild(bar);
+};
+
+if (document.getElementById("wasm-shell-container")) {
   console.debug("[content] Already injected.");
+} else if (!csrfToken) {
+  console.debug("[content] No CSRF token found — showing unavailable indicator.");
+  initUnavailable();
 } else {
   init(csrfToken);
 }
