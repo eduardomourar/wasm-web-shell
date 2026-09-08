@@ -11,7 +11,8 @@
     "https://*.amazonaws.com/*"
   ],
   "permissions": [
-    "cookies"
+    "cookies",
+    "storage"
   ],
   "action": {
     "default_icon": {
