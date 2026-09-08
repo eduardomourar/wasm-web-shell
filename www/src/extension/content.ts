@@ -22,6 +22,10 @@
  * Also relays generic HTTP requests ("fetch-http") the same way, so the
  * background worker's CORS-exempt fetch can be used for cross-origin AWS
  * API calls (e.g. S3) that a bucket's CORS policy would otherwise block.
+ *
+ * Also listens for a "toggle-shell" message from the background worker,
+ * sent when the user clicks the extension's toolbar icon, and toggles the
+ * panel the same way the divider click/keydown handlers do.
  */
 
 import { extractCsrfToken } from "./utils";
@@ -241,6 +245,13 @@ const init = (csrfToken: string) => {
   divider.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      toggle();
+    }
+  });
+
+  // Toolbar icon click (relayed from background.ts) also toggles the panel.
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.action === "toggle-shell") {
       toggle();
     }
   });
