@@ -282,6 +282,13 @@ const getCookie = async (url: string, name: string) => {
  * Returns `true` to indicate an async response (sendResponse will be called later).
  * Returns `false` for unrecognized messages (Chrome will close the channel).
  */
+// Toolbar icon click — toggle the shell panel on the active tab.
+chrome.action.onClicked.addListener((tab) => {
+  if (tab.id !== undefined) {
+    chrome.tabs.sendMessage(tab.id, { action: "toggle-shell" });
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "fetch-credentials") {
     const { serviceId, region, csrfToken, sourceUrl } = message;
