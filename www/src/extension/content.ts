@@ -27,14 +27,26 @@
  * sent when the user clicks the extension's toolbar icon, and toggles the
  * panel the same way the divider click/keydown handlers do.
  *
- * The collapsed/expanded state is persisted in chrome.storage.local so it
- * survives page reloads and navigations instead of always starting collapsed.
+ * The collapsed/expanded state and panel height are persisted in
+ * chrome.storage.local so they survive page reloads and navigations instead
+ * of always starting collapsed at a fixed height. The divider bar doubles
+ * as a drag handle to resize the panel while expanded.
  */
 
 import { extractCsrfToken } from "./utils";
 
 const DEFAULT_FOOTER_HEIGHT = 34;
+// AWS's own reservation for its footer is consistently ~2px larger than what
+// getBoundingClientRect() reports for #awsc-nav-footer-content (likely a
+// border/margin on an ancestor not included in that element's own rect).
+// Subtracting this from our own EXTRA reserved padding closes the leftover
+// hairline gap. Empirically determined — adjust if AWS changes that markup.
+const FOOTER_RESERVE_CORRECTION = 2;
 const STORAGE_KEY_COLLAPSED = "wasmShellCollapsed";
+const STORAGE_KEY_HEIGHT = "wasmShellHeightPx";
+const MIN_EXPANDED_HEIGHT = 120;
+const MAX_EXPANDED_HEIGHT_RATIO = 0.9;
+const DRAG_THRESHOLD_PX = 3;
 
 let csrfToken: string | null = extractCsrfToken(document);
 
@@ -127,6 +139,19 @@ const handleGetRegion = async (
   }
 };
 
+// AWS's Console already reserves body space for its own fixed footer bar
+// — roughly the distance from the viewport bottom to the footer's top.
+// Our fixed panel sits above/over that footer, so we only need to reserve
+// whatever EXTRA space it needs beyond what AWS already reserves; adding
+// the full footer height again on top of that leaves a blank strip once
+// scrolled to the very bottom (in both collapsed and expanded states).
+const getFooterOffset = () => {
+  const awsNavFooter = document.getElementById("awsc-nav-footer-content");
+  return awsNavFooter
+    ? window.innerHeight - awsNavFooter.getBoundingClientRect().top
+    : DEFAULT_FOOTER_HEIGHT;
+};
+
 /**
  * Initialize the extension UI and message relay.
  *
@@ -175,7 +200,7 @@ const init = async (csrfToken: string) => {
     height: "6px",
     minHeight: "6px",
     background: "#ec7211",
-    cursor: "pointer",
+    cursor: "row-resize",
     display: "flex",
     alignItems: "flex-start",
     justifyContent: "flex-start",
@@ -217,26 +242,30 @@ const init = async (csrfToken: string) => {
 
   // Collapse / expand
   let collapsed = true;
+  let expandedHeight = Math.round(window.innerHeight / 3);
+
+  const maxExpandedHeight = () => window.innerHeight * MAX_EXPANDED_HEIGHT_RATIO;
+
   const applyState = () => {
+    const footerOffset = getFooterOffset();
     if (collapsed) {
-      const awsNavFooter = document.getElementById("awsc-nav-footer-content");
-      const footerHeight = Number(awsNavFooter?.clientHeight ?? DEFAULT_FOOTER_HEIGHT);
       const dividerHeight = 6;
-      container.style.bottom = `${footerHeight}px`;
+      container.style.bottom = `${footerOffset}px`;
       container.style.height = `${dividerHeight}px`;
       iframe.style.display = "none";
       chevron.textContent = "\u25B2";
       divider.title = "AWS CLI Web Shell (click to expand)";
       divider.setAttribute("aria-expanded", "false");
-      document.body.style.paddingBottom = `${footerHeight + dividerHeight}px`;
+      document.body.style.paddingBottom = `${Math.max(0, dividerHeight - FOOTER_RESERVE_CORRECTION)}px`;
     } else {
+      expandedHeight = Math.min(maxExpandedHeight(), Math.max(MIN_EXPANDED_HEIGHT, expandedHeight));
       container.style.bottom = "0";
-      container.style.height = "33.33vh";
+      container.style.height = `${expandedHeight}px`;
       iframe.style.display = "block";
       chevron.textContent = "\u25BC";
-      divider.title = "AWS CLI Web Shell (click to collapse)";
+      divider.title = "AWS CLI Web Shell (click to collapse, drag to resize)";
       divider.setAttribute("aria-expanded", "true");
-      document.body.style.paddingBottom = "33.33vh";
+      document.body.style.paddingBottom = `${Math.max(0, expandedHeight - footerOffset - FOOTER_RESERVE_CORRECTION)}px`;
     }
   };
 
@@ -246,7 +275,73 @@ const init = async (csrfToken: string) => {
     chrome.storage.local.set({ [STORAGE_KEY_COLLAPSED]: collapsed });
   };
 
-  divider.addEventListener("click", toggle);
+  // Drag-to-resize: only active while expanded. A drag that moves less than
+  // DRAG_THRESHOLD_PX is still treated as a click (collapse/expand toggle).
+  let isDragging = false;
+  let dragMoved = false;
+  let dragStartY = 0;
+  let dragStartHeight = 0;
+  let dragOverlay: HTMLDivElement | null = null;
+
+  divider.addEventListener("mousedown", (event: MouseEvent) => {
+    if (collapsed) return;
+    isDragging = true;
+    dragMoved = false;
+    dragStartY = event.clientY;
+    dragStartHeight = expandedHeight;
+    // Disable the height/bottom transition while dragging — otherwise every
+    // mousemove-driven resize gets animated over 0.2s, which reads as lag.
+    container.style.transition = "none";
+
+    // The iframe is a separate document — if the cursor moves over it
+    // mid-drag, our window-level mousemove/mouseup listeners stop receiving
+    // events (they go to the iframe's own document instead), which makes
+    // the drag appear to freeze/lag. A full-viewport overlay above the
+    // iframe captures pointer events for the duration of the drag.
+    dragOverlay = document.createElement("div");
+    Object.assign(dragOverlay.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "1000000",
+      cursor: "row-resize",
+    });
+    document.documentElement.appendChild(dragOverlay);
+
+    event.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (event: MouseEvent) => {
+    if (!isDragging) return;
+    const deltaY = dragStartY - event.clientY; // dragging up increases height
+    if (Math.abs(deltaY) > DRAG_THRESHOLD_PX) dragMoved = true;
+    expandedHeight = Math.min(maxExpandedHeight(), Math.max(MIN_EXPANDED_HEIGHT, dragStartHeight + deltaY));
+    container.style.height = `${expandedHeight}px`;
+    document.body.style.paddingBottom = `${Math.max(0, expandedHeight - getFooterOffset() - FOOTER_RESERVE_CORRECTION)}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!isDragging) return;
+    isDragging = false;
+    container.style.transition = "height 0.2s ease, bottom 0.2s ease";
+    dragOverlay?.remove();
+    dragOverlay = null;
+    if (dragMoved) {
+      chrome.storage.local.set({ [STORAGE_KEY_HEIGHT]: expandedHeight });
+    } else {
+      // The overlay makes mousedown/mouseup land on different elements, so
+      // the browser never synthesizes a native "click" here — decide the
+      // toggle ourselves instead of relying on the click listener below
+      // (which only fires for the no-overlay, collapsed-state case).
+      toggle();
+    }
+  });
+
+  divider.addEventListener("click", () => {
+    if (dragMoved || isDragging) {
+      return;
+    }
+    toggle();
+  });
   divider.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -271,10 +366,13 @@ const init = async (csrfToken: string) => {
   // Re-sync collapsed height/position with the AWS footer on viewport resize
   window.addEventListener("resize", applyState);
 
-  // Restore the user's last collapsed/expanded state (persisted across reloads)
-  const stored = await chrome.storage.local.get(STORAGE_KEY_COLLAPSED);
+  // Restore the user's last collapsed/expanded state and height (persisted across reloads)
+  const stored = await chrome.storage.local.get([STORAGE_KEY_COLLAPSED, STORAGE_KEY_HEIGHT]);
   if (typeof stored[STORAGE_KEY_COLLAPSED] === "boolean") {
     collapsed = stored[STORAGE_KEY_COLLAPSED];
+  }
+  if (typeof stored[STORAGE_KEY_HEIGHT] === "number") {
+    expandedHeight = stored[STORAGE_KEY_HEIGHT];
   }
 
   applyState();
@@ -336,15 +434,13 @@ const init = async (csrfToken: string) => {
  * leaving the user with no signal that the extension is even active here.
  */
 const initUnavailable = () => {
-  const awsNavFooter = document.getElementById("awsc-nav-footer-content");
-  const footerHeight = Number(awsNavFooter?.clientHeight ?? DEFAULT_FOOTER_HEIGHT);
-
+  const footerOffset = getFooterOffset();
   const bar = document.createElement("div");
   bar.id = "wasm-shell-container";
   bar.title = "AWS CLI Web Shell unavailable on this page";
   Object.assign(bar.style, {
     position: "fixed",
-    bottom: `${footerHeight}px`,
+    bottom: `${footerOffset}px`,
     left: "0",
     width: "100%",
     height: "6px",
@@ -355,7 +451,9 @@ const initUnavailable = () => {
     borderTop: "1px solid #888",
   });
 
-  document.body.style.paddingBottom = `${footerHeight + 6}px`;
+  // AWS's Console already reserves room for its own fixed footer bar — only
+  // reserve the extra 6px for our indicator bar sitting above it.
+  document.body.style.paddingBottom = `${Math.max(0, 6 - FOOTER_RESERVE_CORRECTION)}px`;
   document.documentElement.appendChild(bar);
 };
 
