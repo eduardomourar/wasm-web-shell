@@ -48,15 +48,19 @@ jobs:
         id: package_extension
         run: |
           sha_short=$(git rev-parse --short HEAD)
+          build_date=$(date -u +%Y-%m-%d)
+          build_date_compact=$(date -u +%Y%m%d)
           echo "sha_short=${sha_short}" >> "$GITHUB_OUTPUT"
-          zip -r "extension-${sha_short}.zip" extension/
+          echo "build_date=${build_date}" >> "$GITHUB_OUTPUT"
+          echo "build_date_compact=${build_date_compact}" >> "$GITHUB_OUTPUT"
+          zip -r "extension-${build_date_compact}-${sha_short}.zip" extension/
       - name: Upload Extension Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: extension-${{ steps.package_extension.outputs.sha_short }}
+          TAG: extension-${{ steps.package_extension.outputs.build_date_compact }}-${{ steps.package_extension.outputs.sha_short }}
         run: |
           gh release delete "$TAG" --yes || true
           gh release create "$TAG" \
-            "extension-${{ steps.package_extension.outputs.sha_short }}.zip" \
-            --title "Extension build ${{ steps.package_extension.outputs.sha_short }}" \
-            --notes "Automated extension build for commit ${{ github.sha }}."
+            "extension-${{ steps.package_extension.outputs.build_date_compact }}-${{ steps.package_extension.outputs.sha_short }}.zip" \
+            --title "Extension build ${{ steps.package_extension.outputs.build_date }} (${{ steps.package_extension.outputs.sha_short }})" \
+            --notes "Automated extension build for commit ${{ github.sha }} on ${{ steps.package_extension.outputs.build_date }}."
