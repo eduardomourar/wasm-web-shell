@@ -127,6 +127,14 @@ npm run start
 4. The terminal appears at the bottom of the page
 5. Try: `aws ssm list-public-parameters`
 
+## Settings
+
+Right-click the extension's toolbar icon and choose "Options" (or open `chrome://extensions/`, find the extension, and click "Extension options") to configure:
+
+- **Always start collapsed** — ignore the last expanded/collapsed state and always start collapsed on page load.
+- **Default region override** — used instead of the region parsed from the Console URL or session cookie, for cases where neither is correct.
+- **Reset panel size** — clears the height saved from dragging the divider, restoring the default.
+
 ## Permissions
 
 | Permission | Reason |

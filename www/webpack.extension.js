@@ -4,6 +4,7 @@
  * Produces:
  * - content.js  (content script injected into Console pages)
  * - background.js (service worker handling credential fetches)
+ * - options.js  (settings page at extension/options.html)
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ export default {
   entry: {
     content: "./src/extension/content.ts",
     background: "./src/extension/background.ts",
+    options: "./src/extension/options.ts",
   },
   context: dirname,
   module: {
