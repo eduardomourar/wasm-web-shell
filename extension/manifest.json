@@ -25,6 +25,15 @@
     "page": "options.html",
     "open_in_tab": true
   },
+  "commands": {
+    "toggle-shell": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+X",
+        "mac": "Command+Shift+X"
+      },
+      "description": "Toggle the AWS CLI Web Shell panel"
+    }
+  },
   "icons": {
     "16": "images/icon-16.png",
     "48": "images/icon-48.png",
