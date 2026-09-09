@@ -21,6 +21,10 @@
       "128": "images/icon-128.png"
     }
   },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "icons": {
     "16": "images/icon-16.png",
     "48": "images/icon-48.png",

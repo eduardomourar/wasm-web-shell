@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>AWS CLI Web Shell — Settings</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 480px;
+      margin: 2rem auto;
+      color: #16191f;
+    }
+
+    h1 {
+      font-size: 1.1rem;
+    }
+
+    label {
+      display: block;
+      margin: 1rem 0 0.25rem;
+      font-weight: 600;
+    }
+
+    .hint {
+      font-size: 0.85rem;
+      color: #5a6472;
+      margin: 0.15rem 0 0;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 0.4rem;
+      box-sizing: border-box;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    button {
+      margin-top: 1.5rem;
+      padding: 0.4rem 0.8rem;
+      cursor: pointer;
+    }
+
+    #status {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: #1a7a3c;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>AWS CLI Web Shell</h1>
+
+  <div class="row">
+    <input type="checkbox" id="always-collapsed">
+    <label for="always-collapsed" style="margin: 0;">Always start collapsed</label>
+  </div>
+  <p class="hint">Ignore the last expanded/collapsed state and always start collapsed when a Console page loads.</p>
+
+  <label for="region-override">Default region override</label>
+  <input type="text" id="region-override" placeholder="e.g. us-east-1">
+  <p class="hint">Used instead of the region detected from the Console URL or session cookie. Leave blank to auto-detect.</p>
+
+  <button id="reset-height">Reset panel size</button>
+  <p class="hint">Clears the saved panel height from dragging the divider, restoring the default.</p>
+
+  <div id="status"></div>
+
+  <script defer src="./options.js"></script>
+</body>
+
+</html>

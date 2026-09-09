@@ -31,6 +31,9 @@
  * chrome.storage.local so they survive page reloads and navigations instead
  * of always starting collapsed at a fixed height. The divider bar doubles
  * as a drag handle to resize the panel while expanded.
+ *
+ * "Always start collapsed" and "default region override" are set on the
+ * options page (options.ts) and also read from chrome.storage.local here.
  */
 
 import { extractCsrfToken } from "./utils";
@@ -44,6 +47,8 @@ const DEFAULT_FOOTER_HEIGHT = 34;
 const FOOTER_RESERVE_CORRECTION = 2;
 const STORAGE_KEY_COLLAPSED = "wasmShellCollapsed";
 const STORAGE_KEY_HEIGHT = "wasmShellHeightPx";
+const STORAGE_KEY_ALWAYS_COLLAPSED = "wasmShellAlwaysCollapsed";
+const STORAGE_KEY_REGION_OVERRIDE = "wasmShellRegionOverride";
 const MIN_EXPANDED_HEIGHT = 120;
 const MAX_EXPANDED_HEIGHT_RATIO = 0.9;
 const DRAG_THRESHOLD_PX = 3;
@@ -114,13 +119,20 @@ const handleFetchHttp = async (
 
 const handleGetRegion = async (
   data: { _requestId: string },
-  defaultRegion: string | null
+  regionOverride: string | null,
+  defaultRegion: string | null,
 ) => {
   const base = {
     action: "get-region-response",
     _requestId: data._requestId,
-    region: defaultRegion,
+    region: regionOverride ?? defaultRegion,
   };
+
+  // The options-page override is an explicit user preference — it should
+  // win over the region cookie, not just serve as a last-resort fallback.
+  if (regionOverride) {
+    return base;
+  }
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -171,6 +183,7 @@ const init = async (csrfToken: string) => {
     /^([a-z0-9-]+)\.console\.aws\.amazon\.com$/
   );
   const defaultRegion = regionMatch?.[1] ?? null;
+  let regionOverride: string | null = null;
 
   // --- UI: container + divider + iframe ---
 
@@ -366,13 +379,24 @@ const init = async (csrfToken: string) => {
   // Re-sync collapsed height/position with the AWS footer on viewport resize
   window.addEventListener("resize", applyState);
 
-  // Restore the user's last collapsed/expanded state and height (persisted across reloads)
-  const stored = await chrome.storage.local.get([STORAGE_KEY_COLLAPSED, STORAGE_KEY_HEIGHT]);
-  if (typeof stored[STORAGE_KEY_COLLAPSED] === "boolean") {
+  // Restore the user's last collapsed/expanded state and height (persisted across reloads),
+  // plus preferences set on the options page.
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEY_COLLAPSED,
+    STORAGE_KEY_HEIGHT,
+    STORAGE_KEY_ALWAYS_COLLAPSED,
+    STORAGE_KEY_REGION_OVERRIDE,
+  ]);
+  if (stored[STORAGE_KEY_ALWAYS_COLLAPSED] === true) {
+    collapsed = true;
+  } else if (typeof stored[STORAGE_KEY_COLLAPSED] === "boolean") {
     collapsed = stored[STORAGE_KEY_COLLAPSED];
   }
   if (typeof stored[STORAGE_KEY_HEIGHT] === "number") {
     expandedHeight = stored[STORAGE_KEY_HEIGHT];
+  }
+  if (typeof stored[STORAGE_KEY_REGION_OVERRIDE] === "string" && stored[STORAGE_KEY_REGION_OVERRIDE]) {
+    regionOverride = stored[STORAGE_KEY_REGION_OVERRIDE];
   }
 
   applyState();
@@ -414,7 +438,7 @@ const init = async (csrfToken: string) => {
         break;
 
       case "get-region":
-        handleGetRegion(data, defaultRegion)
+        handleGetRegion(data, regionOverride, defaultRegion)
           .then(reply)
           .catch(reply);
         break;
