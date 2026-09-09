@@ -276,18 +276,34 @@ const getCookie = async (url: string, name: string) => {
   return { error: `Cookie ${name} not found or empty.` };
 };
 
-/**
- * Message listener — the single entry point for all requests from the content script.
- *
- * Returns `true` to indicate an async response (sendResponse will be called later).
- * Returns `false` for unrecognized messages (Chrome will close the channel).
- */
+const toggleShellOnActiveTab = async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id !== undefined) {
+    chrome.tabs.sendMessage(tab.id, { action: "toggle-shell" });
+  }
+};
+
 // Toolbar icon click — toggle the shell panel on the active tab.
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id !== undefined) {
     chrome.tabs.sendMessage(tab.id, { action: "toggle-shell" });
   }
 });
+
+// Keyboard shortcut (see "commands" in manifest.json) — same toggle, for
+// whichever tab is currently focused.
+chrome.commands.onCommand.addListener((command) => {
+  if (command === "toggle-shell") {
+    toggleShellOnActiveTab();
+  }
+});
+
+/**
+ * Message listener — the single entry point for all requests from the content script.
+ *
+ * Returns `true` to indicate an async response (sendResponse will be called later).
+ * Returns `false` for unrecognized messages (Chrome will close the channel).
+ */
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "fetch-credentials") {
