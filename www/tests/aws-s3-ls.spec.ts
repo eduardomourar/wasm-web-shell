@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { gotoShell, typeCommand, waitForIdlePrompt } from './helpers';
 
 test.describe('aws s3 ls', () => {

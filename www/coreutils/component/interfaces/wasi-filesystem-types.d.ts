@@ -1,5 +1,22 @@
 /** @module Interface wasi:filesystem/types@0.2.3 **/
 export function filesystemErrorCode(err: Error): ErrorCode | undefined;
+export type Filesize = bigint;
+/**
+ * # Variants
+ * 
+ * ## `"normal"`
+ * 
+ * ## `"sequential"`
+ * 
+ * ## `"random"`
+ * 
+ * ## `"will-need"`
+ * 
+ * ## `"dont-need"`
+ * 
+ * ## `"no-reuse"`
+ */
+export type Advice = 'normal' | 'sequential' | 'random' | 'will-need' | 'dont-need' | 'no-reuse';
 /**
  * # Variants
  * 
@@ -86,7 +103,18 @@ export interface DescriptorFlags {
   requestedWriteSync?: boolean,
   mutateDirectory?: boolean,
 }
-export type Filesize = bigint;
+export type Datetime = import('./wasi-clocks-wall-clock.js').Datetime;
+export type NewTimestamp = NewTimestampNoChange | NewTimestampNow | NewTimestampTimestamp;
+export interface NewTimestampNoChange {
+  tag: 'no-change',
+}
+export interface NewTimestampNow {
+  tag: 'now',
+}
+export interface NewTimestampTimestamp {
+  tag: 'timestamp',
+  val: Datetime,
+}
 export type Error = import('./wasi-io-streams.js').Error;
 /**
  * # Variants
@@ -116,7 +144,6 @@ export interface PathFlags {
   symlinkFollow?: boolean,
 }
 export type LinkCount = bigint;
-export type Datetime = import('./wasi-clocks-wall-clock.js').Datetime;
 export interface DescriptorStat {
   type: DescriptorType,
   linkCount: LinkCount,
@@ -124,17 +151,6 @@ export interface DescriptorStat {
   dataAccessTimestamp?: Datetime,
   dataModificationTimestamp?: Datetime,
   statusChangeTimestamp?: Datetime,
-}
-export type NewTimestamp = NewTimestampNoChange | NewTimestampNow | NewTimestampTimestamp;
-export interface NewTimestampNoChange {
-  tag: 'no-change',
-}
-export interface NewTimestampNow {
-  tag: 'now',
-}
-export interface NewTimestampTimestamp {
-  tag: 'timestamp',
-  val: Datetime,
 }
 export interface OpenFlags {
   create?: boolean,
@@ -157,10 +173,12 @@ export class Descriptor {
   readViaStream(offset: Filesize): InputStream;
   writeViaStream(offset: Filesize): OutputStream;
   appendViaStream(): OutputStream;
+  advise(offset: Filesize, length: Filesize, advice: Advice): void;
   syncData(): void;
   getFlags(): DescriptorFlags;
   getType(): DescriptorType;
   setSize(size: Filesize): void;
+  setTimes(dataAccessTimestamp: NewTimestamp, dataModificationTimestamp: NewTimestamp): void;
   readDirectory(): DirectoryEntryStream;
   sync(): void;
   createDirectoryAt(path: string): void;

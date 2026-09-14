@@ -122,46 +122,27 @@ fn test_s3_list_objects() {
     }
 
     assert!(output.status.success(), "Command failed. stderr: {stderr}");
-    assert!(
-        stdout.eq(r###"{
-  "commonPrefixes": [],
-  "contents": [
-    {
-      "checksumAlgorithm": [
-        "CRC64NVME"
-      ],
-      "checksumType": "FULL_OBJECT",
-      "eTag": "\"f81bca79c43b72b879572af1c07af093\"",
-      "key": "authority-records/organization/organization-1.jsonl",
-      "lastModified": "2026-04-06T17:55:21Z",
-      "size": 392792,
-      "storageClass": "INTELLIGENT_TIERING"
-    },
-    {
-      "checksumAlgorithm": [
-        "CRC64NVME"
-      ],
-      "checksumType": "FULL_OBJECT",
-      "eTag": "\"bf7b32f1a52e4cbdc7d87afa45d32209\"",
-      "key": "authority-records/organization/organization-10.jsonl",
-      "lastModified": "2026-04-06T17:55:21Z",
-      "size": 412097,
-      "storageClass": "INTELLIGENT_TIERING"
+    // eTag/lastModified change whenever NARA re-uploads these objects, so only
+    // assert on the fields that are stable across re-uploads.
+    for expected in [
+        "\"commonPrefixes\": []",
+        "\"key\": \"authority-records/organization/organization-1.jsonl\"",
+        "\"key\": \"authority-records/organization/organization-10.jsonl\"",
+        "\"size\": 392792",
+        "\"size\": 412097,",
+        "\"storageClass\": \"INTELLIGENT_TIERING\"",
+        "\"delimiter\": \"/\"",
+        "\"isTruncated\": true",
+        "\"maxKeys\": 2",
+        "\"name\": \"nara-national-archives-catalog\"",
+        "\"nextMarker\": \"authority-records/organization/organization-10.jsonl\"",
+        "\"prefix\": \"authority-records/organization/\"",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "Expected stdout to contain {expected:?}, got: {stdout}"
+        );
     }
-  ],
-  "delimiter": "/",
-  "encodingType": null,
-  "isTruncated": true,
-  "marker": "",
-  "maxKeys": 2,
-  "name": "nara-national-archives-catalog",
-  "nextMarker": "authority-records/organization/organization-10.jsonl",
-  "prefix": "authority-records/organization/",
-  "requestCharged": null
-}
-"###),
-        "Unexpected stdout: {stdout}\nstderr: {stderr}"
-    );
 }
 
 #[test]
