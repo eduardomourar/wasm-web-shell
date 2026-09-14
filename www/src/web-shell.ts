@@ -3,23 +3,43 @@ import type { WasmFile } from "wasm-terminal";
 import { providers, setCredentials } from "./aws-providers";
 import { main as awsCommand } from "./aws-command";
 import { executeCoreutilsCommand } from "./coreutils-command";
-import { writeFile } from "./wasi-filesystem";
+import { _setPreopens, writeFile } from "./wasi-filesystem";
+
+// The generated component bindings use the WebAssembly JS Promise Integration
+// (JSPI) proposal (`WebAssembly.Suspending`/`WebAssembly.promising`) so that
+// component calls can invoke async host imports (fetch-backed credentials,
+// filesystem I/O) without blocking. JSPI is required - jco has no non-JSPI
+// fallback for components with async host imports (see AsyncMode::Sync vs
+// AsyncMode::JavaScriptPromiseIntegration in js-component-bindgen). As of
+// this writing, Chromium and Firefox 155+ support JSPI; Safari does not yet
+// (Safari Technology Preview 238+ does, behind an experimental flag).
+const isJspiSupported = () => typeof (WebAssembly as any).Suspending === "function";
+
+const JSPI_UNSUPPORTED_MESSAGE =
+  '\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m This browser does not support the WebAssembly "JS Promise Integration" (JSPI) proposal, which this shell requires to run WASM components. Try a recent Chromium-based browser or Firefox 155+, or enable JSPI in Safari Technology Preview.\n';
 
 export const webShell = (wasmBinaryPath: string) => {
   const preOpened: Record<string, string> = {
     "/": "/"
   };
   const wasmTerminal = new WasmTerminal(wasmBinaryPath);
+  const jspiSupported = isJspiSupported();
+
+  // Load the OPFS-backed filesystem once; the adapter keeps its in-memory
+  // tree in sync across every command run for the lifetime of the shell.
+  const preopensReady = _setPreopens(preOpened);
 
   wasmTerminal.onRedirectOutput = async (path: string, data: string, append: boolean) => {
     try {
-      await writeFile(preOpened["/"] ?? "/", path, new TextEncoder().encode(data), append);
+      await preopensReady;
+      writeFile("/", path, new TextEncoder().encode(data), append);
     } catch (error) {
       wasmTerminal.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m Unable to write to "${path}": ${error}\n`);
     }
   };
 
   wasmTerminal.onActivated = async () => {
+    await preopensReady;
 
     wasmTerminal.registerJsCommand("help", async (argsv: string[]) => {
       return `
@@ -52,6 +72,11 @@ A complete list of public S3 Buckets can be found at:
     wasmTerminal.registerJsCommand(
       "aws",
       async (argsv: string[], stdinPreset: string | null) => {
+        if (!jspiSupported) {
+          wasmTerminal.stderr(JSPI_UNSUPPORTED_MESSAGE);
+          return "";
+        }
+
         const envVars = {};
 
         try {
@@ -65,8 +90,9 @@ A complete list of public S3 Buckets can be found at:
             providers,
           )
         } catch (error: any) {
-          if ("code" in error && error.code !== 0) {
-            console.debug(error);
+          if (!("code" in error) || error.code !== 0) {
+            console.error(error);
+            wasmTerminal.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m ${error?.message ?? error}\n`);
           }
         }
         await wasmTerminal._waitForOutputPause();
@@ -78,6 +104,11 @@ A complete list of public S3 Buckets can be found at:
     // Register coreutils commands
     const createCoreutilsCommand = (commandName: string) => {
       return async (argsv: string[], stdinPreset: string | null) => {
+        if (!jspiSupported) {
+          wasmTerminal.stderr(JSPI_UNSUPPORTED_MESSAGE);
+          return "";
+        }
+
         try {
           await executeCoreutilsCommand(
             [commandName, ...argsv],
@@ -88,8 +119,9 @@ A complete list of public S3 Buckets can be found at:
             preOpened,
           );
         } catch (error: any) {
-          if ("code" in error && error.code !== 0) {
-            console.debug(error);
+          if (!("code" in error) || error.code !== 0) {
+            console.error(error);
+            wasmTerminal.stderr(`\x1b[1m[\x1b[31mERROR\x1b[39m]\x1b[0m ${error?.message ?? error}\n`);
           }
         }
         await wasmTerminal._waitForOutputPause();
@@ -194,6 +226,11 @@ A complete list of public S3 Buckets can be found at:
     intro += "Interact directly with AWS services in your browser.\r\n";
     intro +=
       "Source code at: https://github.com/eduardomourar/wasm-web-shell/\r\n\r\n";
+
+    if (!jspiSupported) {
+      intro +=
+        '\x1b[1m[\x1b[33mWARNING\x1b[39m]\x1b[0m Your browser lacks WebAssembly "JS Promise Integration" (JSPI) support, required to run commands here. Use a recent Chromium-based browser or Firefox 155+.\r\n\r\n';
+    }
 
     intro +=
       "Commands: " +

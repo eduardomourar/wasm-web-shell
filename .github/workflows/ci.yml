@@ -154,10 +154,11 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox
 
       - name: Run Playwright e2e tests
-        run: npm run test:e2e
+        # webkit is excluded here - see frontend-tests-webkit below.
+        run: npx playwright test --project=chromium --project=firefox
 
       - name: Upload Playwright report
         if: always()
@@ -167,16 +168,53 @@ jobs:
           path: www/playwright-report/
           retention-days: 14
 
+  # Linux runners only have WebKitGTK, a different (and less complete) engine
+  # from Apple's actual WebKit that Safari ships - it doesn't support the
+  # OPFS/component-model behavior this app depends on, so it can't stand in
+  # for Safari here. Playwright's "webkit" build is the real WebKit only on
+  # macOS, so this job runs there instead of alongside chromium/firefox above.
+  frontend-tests-webkit:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: www
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: "www/package.json"
+          cache: "npm"
+          cache-dependency-path: "www/package-lock.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps webkit
+
+      - name: Run Playwright e2e tests
+        run: npx playwright test --project=webkit
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-webkit
+          path: www/playwright-report/
+          retention-days: 14
+
   pr-success:
     needs:
       - build
       - unit-tests
       - frontend-tests
+      - frontend-tests-webkit
     # if pr-success is skipped, GH branch protection will not consider it a failure, we need to check the result of each dependency ourself
     # see: https://brunoscheufler.com/blog/2022-04-09-the-required-github-status-check-that-wasnt
     if: always()
     steps:
-      - if: needs.build.result == 'failure' || needs.unit-tests.result == 'failure' || needs.frontend-tests.result == 'failure'
+      - if: needs.build.result == 'failure' || needs.unit-tests.result == 'failure' || needs.frontend-tests.result == 'failure' || needs.frontend-tests-webkit.result == 'failure'
         run: echo "a required job failed, setting the failure() bit" && exit 1
       - if: success()
         run: echo "all dependencies succeeded"

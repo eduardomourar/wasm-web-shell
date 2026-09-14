@@ -14,4 +14,4 @@ wasmtime-wasi-http = { workspace = true }
 
 [build-dependencies]
 js-component-bindgen = "2"
-wac-graph = "0.10"
+wac-graph = "0.12"

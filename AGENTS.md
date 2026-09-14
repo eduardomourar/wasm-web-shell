@@ -313,7 +313,8 @@ wasmTerminal.registerJsCommand("aws", async (argv) => {
 - Backed by native browser File System API (no polyfills required)
 - Storage persists using origin-private filesystem (`navigator.storage.getDirectory()`)
 - Pre-opened directories available at `/sandbox`
-- Requires Chromium-based browsers (Chrome, Edge) for full File System API support
+- OPFS itself works in Chrome/Edge 86+, Firefox 111+, and Safari 15.2+; the
+  actual cross-browser blocker is JSPI support (see Limitations below), not OPFS
 - Full WASI Preview2 filesystem interface support:
   - `wasi:filesystem/preopens#get-directories` - Lists preopened directories
   - `wasi:filesystem/types#read-directory` - Directory listing
@@ -343,118 +344,71 @@ The project migrated from `wasm-webterm` (Wasmer + Emscripten) to `wasm-terminal
 
 ## WASI Filesystem Implementation
 
-The project implements a custom WASI filesystem interface that bridges WASI Preview2 components with the browser's File System Access API.
+`src/wasi-filesystem.ts` wires `wasi:filesystem` preopens to
+`@bytecodealliance/preview2-shim`'s `OpfsFilesystemAdapter`, which backs the
+guest-facing filesystem with the browser's Origin Private File System (OPFS).
 
 ### Architecture
 
 ```
-WASI Component (AWS CLI)
+WASI Component (AWS CLI / coreutils)
     ↓
-wasi-filesystem.ts (WASI interface implementation)
+wasi-filesystem.ts (loads OPFS dirs into the adapter)
     ↓
-File System API (navigator.storage.getDirectory())
+OpfsFilesystemAdapter (preview2-shim)
+    - in-memory tree, synchronous Descriptor ops
+    - debounced flush back to OPFS
     ↓
-Origin-Private Filesystem (Browser native storage)
+navigator.storage.getDirectory() (Origin-Private Filesystem)
 ```
 
-### Implementation (`src/wasi-filesystem.ts`)
+`OpfsFilesystemAdapter` mirrors each preopened OPFS directory into an
+in-memory tree once (`loadOpfsCapability`), so every guest-facing
+`Descriptor` operation (read, write, stat, symlink, advisory locking) stays
+fully synchronous, as WASI requires. Mutations are flushed back to OPFS
+automatically in the background.
 
-**Key function:** `createFilesystemPreopens(preopens: Map<string, FileSystemDirectoryHandle>)`
+**Important:** preopens must be configured *once* per shell session
+(`_setPreopens`, called from `web-shell.ts` at startup), not per command.
+The adapter's in-memory tree is meant to persist across commands — re-loading
+it from OPFS before every command both defeats the point and can lose writes
+if a stale snapshot wins a later debounced flush.
 
-Converts browser FileSystemDirectoryHandles to the in-memory fileData structure expected by `@bytecodealliance/preview2-shim` and registers them as preopens using the shim's built-in resource management.
+### Interface (`src/wasi-filesystem.ts`)
 
-**Architecture:**
+- `_setPreopens(preopensConfig: Record<string, string>)` - load each host
+  path (relative to the OPFS root) into the shared adapter as a preopen.
+- `preopens` / `types` - re-exported directly from
+  `@bytecodealliance/preview2-shim/filesystem`; pass straight through to
+  `initialize()`'s `filesystem` option.
+- `writeFile(virtualPath, path, data, append)` - write bytes into a preopen's
+  descriptor tree without going through a WASI guest. Used for shell
+  redirection (`>`, `>>`) where output is produced on the JS side.
 
-The implementation uses a hybrid approach combining lazy loading with in-memory caching:
-
-1. **Descriptor Wrapping**: Each `FileSystemDirectoryHandle` / `FileSystemFileHandle` is wrapped in a `FileSystemDescriptor` instance
-2. **Lazy Loading**: Files loaded from storage only when first accessed via `getFile()` + `arrayBuffer()`
-3. **Memory Caching**: File contents cached in memory for synchronous read access (required by WASI)
-4. **Direct Writes**: All writes flushed directly to storage via `FileSystemWritableFileStream`
-
-**Why This Approach:**
-
-WASI requires synchronous file operations, but the browser's File System API is inherently asynchronous. The hybrid approach bridges this gap:
-- Files lazy-loaded on first access (not upfront)
-- Cached in memory for subsequent synchronous reads
-- Writes immediately persisted to storage
-- Cache invalidated via `lastModified` timestamp checks
-
-**Implementation Details:**
-
-- `FileSystemDescriptor` class implements full WASI filesystem interface
-- `ensureFileLoaded()` - Loads file into cache on first access
-- `readViaStream` - Returns input stream using cached data (synchronous `blockingRead`)
-- `writeViaStream` / `appendViaStream` - Buffers writes, flushes to storage, updates cache
-- `openAt` - Pre-loads files into cache for immediate synchronous access
-
-**Tradeoffs:**
-
-- **✓ Pro**: Lazy loading - no upfront cost to load all files
-- **✓ Pro**: Immediate persistence - all writes go directly to browser storage
-- **✓ Pro**: WASI compliant - supports synchronous reads via caching
-- **✗ Con**: Accessed files consume memory (cached for session)
-- **✗ Con**: First access has async overhead (subsequent reads fast)
-- **✗ Con**: Cache coherency - external file changes not auto-detected
-
-**Persistence:** All writes are immediately flushed to browser's origin-private filesystem and cached. No manual sync required.
-
-### Usage Example
-
-**Setup (web-shell.ts):**
 ```typescript
-// Use native File System API (Chromium-based browsers)
-const preOpened = new Map<string, FileSystemDirectoryHandle>();
-preOpened.set(
-  "/sandbox",
-  await navigator.storage.getDirectory()
-);
+import { _setPreopens, preopens, types } from "./wasi-filesystem";
+
+await _setPreopens({ "/": "/" });
+const filesystem = { preopens, types };
+await initialize(providers, { filesystem, /* ... */ });
 ```
-
-**Integration (aws-command.ts):**
-```typescript
-import { filesystem } from "@bytecodealliance/preview2-shim";
-import { createFilesystemPreopens } from "./wasi-filesystem";
-
-// Convert browser FileSystemHandles to preview2-shim fileData structure
-const filesystemPreopens = await createFilesystemPreopens(preopens);
-
-// Extend default filesystem with browser-backed preopens
-const customFilesystem = {
-  ...filesystem,
-  preopens: {
-    getDirectories: () => filesystemPreopens.getDirectories(),
-  },
-};
-
-await initialize(credentialsProvider, {
-  filesystem: customFilesystem,
-  // ...
-});
-```
-
-**From AWS CLI:**
-```bash
-# Save S3 object to browser filesystem
-aws s3 get-object --bucket my-bucket --key file.txt --output /sandbox/file.txt
-
-# File is written to origin-private filesystem and persists across sessions
-```
-
-### Features
-
-- **Persistent storage** - Files saved to origin-private filesystem persist across browser sessions
-- **Native browser API** - Uses standard File System API, no polyfills required
-- **Standard WASI** - Works with any WASI Preview2 component
-- **Type-safe** - Full TypeScript implementation
 
 ### Limitations
 
-- **Browser compatibility** - Requires Chromium-based browsers (Chrome, Edge, Opera, Brave)
-  - Safari and Firefox have limited/no support for File System API
+- **Browser compatibility** - The generated component bindings require the
+  WebAssembly JS Promise Integration (JSPI) proposal
+  (`WebAssembly.Suspending`/`WebAssembly.promising`) to invoke async host
+  imports (fetch-backed credentials, filesystem I/O) without blocking - jco has
+  no non-JSPI fallback for components with async host imports. Chromium and
+  Firefox 155+ support JSPI; Safari does not yet (Safari Technology Preview
+  238+ does, behind an experimental flag). `web-shell.ts` detects this at
+  startup (`isJspiSupported`) and shows a clear warning/error instead of the
+  cryptic `TypeError: undefined is not a constructor (evaluating 'new
+  WebAssembly.Suspending(...))'` that unsupported browsers throw otherwise.
+  OPFS itself (used for the filesystem) is not the blocker - it's supported in
+  Chrome/Edge 86+, Firefox 111+, and Safari 15.2+.
 - **Storage quotas** - Subject to browser storage limits (typically 10-50% of free disk space)
 - **Security restrictions** - Subject to same-origin policy and browser permissions
-- **In-memory sync** - Files loaded into memory on initialization, changes don't auto-persist back to storage
 
 ## CI/CD
 

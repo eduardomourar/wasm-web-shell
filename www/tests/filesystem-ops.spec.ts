@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { gotoShell, typeCommand, getTerminalText } from './helpers';
 
 test.describe('Filesystem operations', () => {
