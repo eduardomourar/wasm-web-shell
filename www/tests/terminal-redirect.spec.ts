@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 async function typeCommand(page: import('@playwright/test').Page, command: string) {
   await page.locator('.xterm-screen').click();

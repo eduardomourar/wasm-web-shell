@@ -1,6 +1,6 @@
 import { initialize } from "aws-cli-wasm";
 import { ComponentExit, createWasiCli } from "./wasi-cli";
-import { _setPreopens, preopens, types } from "./wasi-filesystem";
+import { preopens, types } from "./wasi-filesystem";
 
 export const main = async (
   args: string[],
@@ -11,14 +11,9 @@ export const main = async (
   preOpened: Record<string, string>,
   providers: Parameters<typeof initialize>[0],
 ) => {
-  // Create custom WASI FileSystem
-  await _setPreopens(preOpened);
-  // preview2-shim types Descriptor methods as synchronous, but our
-  // OPFS-backed adapter is necessarily async.
-  const filesystem = {
-    preopens,
-    types,
-  } as any;
+  // Preopens are configured once at shell startup (see web-shell.ts) so the
+  // OPFS-backed adapter keeps a single in-memory tree across commands.
+  const filesystem = { preopens, types };
 
   // Create custom WASI CLI
   const { cli, exitPromise } = await createWasiCli(stdIn, stdOut, stdErr, preOpened);

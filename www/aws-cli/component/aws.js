@@ -75,27 +75,37 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     }
     return true;
   }
-  const utf16Decoder = new TextDecoder('utf-16');
+  const utf16Decoder = new TextDecoder('utf-16', { fatal: true, ignoreBOM: true });
   
   const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
   
   function _utf16AllocateAndEncode(str, realloc, memory) {
+    if (typeof str !== 'string') {
+      throw new TypeError('expected a string, received [' + typeof str + ']');
+    }
     const len = str.length;
     const ptr = realloc(0, 0, 2, len * 2);
     const out = new Uint16Array(memory.buffer, ptr, len);
-    let i = 0;
-    if (isLE) {
-      while (i < len) { out[i] = str.charCodeAt(i++); }
-    } else {
-      while (i < len) {
-        const ch = str.charCodeAt(i);
-        out[i++] = (ch & 0xff) << 8 | ch >>> 8;
+    const put = isLE
+    ? (i, ch) => { out[i] = ch; }
+    : (i, ch) => { out[i] = (ch & 0xff) << 8 | ch >>> 8; };
+    for (let i = 0; i < len; i++) {
+      let ch = str.charCodeAt(i);
+      if ((ch & 0xf800) === 0xd800) {
+        if (ch < 0xdc00 && i + 1 < len && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+          put(i++, ch);
+          ch = str.charCodeAt(i);
+        } else {
+          // Unpaired surrogates are replaced, as when converting to a `USVString`
+          ch = 0xfffd;
+        }
       }
+      put(i, ch);
     }
     return { ptr, len, codepoints: [...str].length };
   }
   
-  const TEXT_DECODER_UTF8 = new TextDecoder();
+  const TEXT_DECODER_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   const TEXT_ENCODER_UTF8 = new TextEncoder();
   
   function _utf8AllocateAndEncode(s, realloc, memory) {
@@ -147,6 +157,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     return free;
   }
   
+  const RESOURCE_SCOPE_TASKS = new Map();
+  const WebAssemblyRuntimeError = WebAssembly.RuntimeError;
   
   function rscTableRemove(table, handle) {
     const scope = table[handle << 1];
@@ -154,13 +166,20 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     const own = (val & T_FLAG) !== 0;
     const rep = val & ~T_FLAG;
     if (val === 0 || (scope & T_FLAG) !== 0) {
-      throw new TypeError("Invalid handle");
+      // Resource entries occupy scope/rep pairs after the table sentinel.
+      throw new WebAssemblyRuntimeError(`unknown handle index ${(handle << 1) + 1}`);
     }
+    if (own && scope !== 0) {
+      throw new WebAssemblyRuntimeError('cannot remove owned resource while borrowed');
+    }
+    const borrowTask = own ? undefined : RESOURCE_SCOPE_TASKS.get(scope);
     table[handle << 1] = table[0] | T_FLAG;
     table[0] = handle | T_FLAG;
+    borrowTask?.removeBorrowedHandle();
     return { rep, scope, own };
   }
   
+  let RESOURCE_SCOPE_ID = 0;
   
   let curResourceBorrows = [];
   const ASYNC_TASKS_BY_COMPONENT_IDX = new Map();
@@ -208,18 +227,17 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       throw new Error(`no current tasks for component instance [${componentIdx}] while ending task`);
     }
     
-    if (taskID !== undefined) {
-      const last = tasks[tasks.length - 1];
-      if (last.id !== taskID) {
-        // throw new Error('current task does not match expected task ID');
-        return;
-      }
+    const taskIdx = taskID === undefined
+    ? tasks.length - 1
+    : tasks.findIndex(meta => meta.id === taskID);
+    if (taskIdx === -1) { return; }
+    
+    const taskMeta = tasks.splice(taskIdx, 1)[0];
+    const globalTaskIdx = ASYNC_CURRENT_TASK_IDS.lastIndexOf(taskMeta.id);
+    if (globalTaskIdx !== -1) {
+      ASYNC_CURRENT_TASK_IDS.splice(globalTaskIdx, 1);
+      ASYNC_CURRENT_COMPONENT_IDXS.splice(globalTaskIdx, 1);
     }
-    
-    ASYNC_CURRENT_TASK_IDS.pop();
-    ASYNC_CURRENT_COMPONENT_IDXS.pop();
-    
-    const taskMeta = tasks.pop();
     return taskMeta.task;
   }
   const ASYNC_STATE = new Map();
@@ -343,9 +361,6 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           componentIdx: this.#componentIdx,
           waitable: this,
         });
-        if (this.hasPendingEvent()) {
-          throw new Error('waitables with pending events cannot be dropped');
-        }
         this.join(null);
       }
       
@@ -367,7 +382,80 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     }
     const INSTANCE_FLAGS = new Map();
     const STORE_TRAP = { error: null };
-    const WebAssemblyRuntimeError = WebAssembly.RuntimeError;
+    const STORE_ASYNC_STATE = { deadlockCheck: null, pendingHostOperations: 0 };
+    
+    function _checkForDeadlock() {
+      if (STORE_ASYNC_STATE.deadlockCheck !== null || STORE_TRAP.error !== null) { return; }
+      STORE_ASYNC_STATE.deadlockCheck = setTimeout(() => {
+        STORE_ASYNC_STATE.deadlockCheck = null;
+        if (STORE_TRAP.error !== null || STORE_ASYNC_STATE.pendingHostOperations > 0) { return; }
+        
+        const suspendedTasks = new Set();
+        for (const state of ASYNC_STATE.values()) {
+          if (state.hasPendingSchedulerWork()) {
+            state.runTickLoop();
+            return;
+          }
+          for (const meta of state.suspendedTaskMetas()) {
+            suspendedTasks.add(meta.task);
+          }
+        }
+        
+        const unresolvedRoots = new Set();
+        for (const task of suspendedTasks) {
+          const root = task.getRootTask();
+          if (!root.isResolvedState()) { unresolvedRoots.add(root); }
+        }
+        if (unresolvedRoots.size === 0) { return; }
+        
+        const err = new WebAssemblyRuntimeError('wasm trap: deadlock detected: event loop cannot make further progress');
+        // Which tasks were waiting, and on whose behalf. The message stays
+        // exactly what the Canonical ABI calls for, so this rides alongside
+        // it: a deadlock reported from a real program is otherwise a bare
+        // sentence, and the state that produced it is gone by the time
+        // anyone reads the failure.
+        err.deadlockDetail = {
+          pendingHostOperations: STORE_ASYNC_STATE.pendingHostOperations,
+          suspendedTasks: [...suspendedTasks].map((task) => ({
+            taskID: task.id(),
+            componentIdx: task.componentIdx(),
+            state: task.taskState(),
+            rootTaskID: task.getRootTask().id(),
+          })),
+          unresolvedRootTaskIDs: [...unresolvedRoots].map((root) => root.id()),
+        };
+        STORE_TRAP.error = err;
+        for (const root of unresolvedRoots) {
+          root.setErrored(err);
+          root.reject(err);
+        }
+        for (const task of suspendedTasks) {
+          if (!task.isResolvedState() && unresolvedRoots.has(task.getRootTask())) {
+            task.setErrored(err);
+            task.reject(err);
+          }
+        }
+        for (const state of ASYNC_STATE.values()) { state.runTickLoop(); }
+      }, 0);
+    }
+    
+    const CORE_TRAP_MESSAGES = new Map([
+    ['unreachable', "wasm trap: wasm `unreachable` instruction executed"],
+    ['memory access out of bounds', "wasm trap: out of bounds memory access"],
+    ['divide by zero', "wasm trap: integer divide by zero"],
+    ['remainder by zero', "wasm trap: integer divide by zero"],
+    ['divide result unrepresentable', "wasm trap: integer overflow"],
+    ['float unrepresentable in integer range', "wasm trap: invalid conversion to integer"],
+    ['table index is out of bounds', "wasm trap: undefined element: out of bounds table access"],
+    ['function signature mismatch', "wasm trap: indirect call type mismatch"],
+    ['call stack exhausted', "wasm trap: call stack exhausted"],
+    ]);
+    function _normalizeCoreTrap(err) {
+      if (!(err instanceof WebAssemblyRuntimeError)) { return err; }
+      const message = CORE_TRAP_MESSAGES.get(err.message);
+      if (message !== undefined) { err.message = message; }
+      return err;
+    }
     
     class RepTable {
       // Sentinel marking a freed slot; the freelist link for a freed slot
@@ -475,10 +563,12 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #lockHolderTaskID = null;
       #lockWaiters = [];
       #lockHandoffScheduled = false;
+      #pendingTaskStarts = 0;
       #parkedTasks = new Map();
       #suspendedTasksByTaskID = new Map();
       #suspendedTaskIDs = [];
       #errored = null;
+      #trapped = false;
       #backpressure = 0;
       #backpressureWaiters = 0n;
       
@@ -529,13 +619,17 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         if (!(err instanceof WebAssemblyRuntimeError)) {
           return false;
         }
+        err = _normalizeCoreTrap(err);
+        this.#trapped = true;
         _debugLog('[ComponentAsyncState#markTrapped()] component trapped', { err, componentIdx: this.#componentIdx });
         if (STORE_TRAP.error === null) { STORE_TRAP.error = err; }
         return true;
       }
       
       throwIfTrapped() {
-        if (STORE_TRAP.error !== null) { throw STORE_TRAP.error; }
+        if (this.#trapped) {
+          throw new WebAssemblyRuntimeError("wasm trap: cannot enter component instance");
+        }
       }
       
       callingSyncImport(val) {
@@ -684,7 +778,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       // Awaitable acquisition: takes the lock immediately when free,
       // otherwise queues FIFO behind the current holder and earlier
       // waiters. The resolved promise implies ownership.
-      async acquireExclusiveLock(taskID) {
+      acquireExclusiveLock(taskID) {
         if (taskID === undefined || taskID === null) {
           throw new Error('exclusive lock requires the acquiring task id');
         }
@@ -705,9 +799,20 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           componentIdx: this.#componentIdx,
           queued: this.#lockWaiters.length,
         });
-        await new Promise((resolve) => {
+        return new Promise((resolve) => {
           this.#lockWaiters.push({ taskID, resolve });
         });
+      }
+      
+      cancelExclusiveLockWaiter(taskID) {
+        const idx = this.#lockWaiters.findIndex(waiter => waiter.taskID === taskID);
+        if (idx === -1) { return false; }
+        const [waiter] = this.#lockWaiters.splice(idx, 1);
+        // Release the awaiting `enter()` continuation without granting
+        // ownership. It observes the task's resolved cancellation state
+        // before attempting to execute guest code.
+        waiter.resolve();
+        return true;
       }
       
       exclusiveRelease(taskID) {
@@ -809,7 +914,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       // TODO(threads): readyFn is normally on the thread
       suspendTask(args) {
-        const { task, readyFn } = args;
+        const { task, readyFn, cancellable, onResume } = args;
         const taskID = task.id();
         const componentIdx = task.componentIdx();
         _debugLog('[ComponentAsyncState#suspendTask()]', {
@@ -827,10 +932,19 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           throw new Error(`task [${taskID}] already suspended`);
         }
         
-        const { promise, resolve, reject } = promiseWithResolvers();
+        let promise;
+        let resume;
+        if (onResume) {
+          resume = () => onResume(!task.isCancelled());
+        } else {
+          const resolvers = promiseWithResolvers();
+          promise = resolvers.promise;
+          resume = () => resolvers.resolve(!task.isCancelled());
+        }
         this.#addSuspendedTaskMeta({
           task,
           taskID,
+          cancellable,
           readyFn,
           resume: () => {
             _debugLog('[ComponentAsyncState] resuming suspended task', {
@@ -838,20 +952,64 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
               componentIdx: this.#componentIdx,
             });
             // TODO(threads): it's thread cancellation we should be checking for below, not task
-            resolve(!task.isCancelled());
+            resume();
           },
         });
         
+        // A caller synchronously driving one task quantum (for
+        // example, subtask.cancel) waits for the resumed task to
+        // either resolve or suspend again.
+        task.notifyProgress();
+        
         this.runTickLoop();
+        _checkForDeadlock();
         
         return promise;
       }
       
       resumeTaskByID(taskID) {
         const meta = this.#removeSuspendedTaskMeta(taskID);
-        if (!meta) { return; }
+        if (!meta) { return false; }
         if (meta.taskID !== taskID) { throw new Error('task ID does not match'); }
         meta.resume();
+        return true;
+      }
+      
+      suspendedTaskReady(taskID) {
+        const meta = this.#getSuspendedTaskMeta(taskID);
+        if (!meta) { return false; }
+        if (!meta.readyFn) {
+          throw new Error(`suspended task [${taskID}] is missing a readiness function`);
+        }
+        if (meta.task.isRejected()) { return true; }
+        if (!meta.readyFn()) { return false; }
+        return !meta.task.needsExclusiveLock()
+        || !this.isExclusivelyLocked()
+        || this.exclusivelyLockedBy(taskID);
+      }
+      
+      suspendedTaskCancellable(taskID) {
+        return !!this.#getSuspendedTaskMeta(taskID)?.cancellable;
+      }
+      
+      isTaskSuspended(taskID) {
+        return this.#suspendedTasksByTaskID.has(taskID);
+      }
+      
+      suspendedTaskMetas() {
+        return this.#suspendedTasksByTaskID.values();
+      }
+      
+      addPendingTaskStart() { this.#pendingTaskStarts++; }
+      removePendingTaskStart() { this.#pendingTaskStarts--; }
+      
+      hasPendingSchedulerWork() {
+        if (this.#pendingTaskStarts > 0) { return true; }
+        if (this.#lockHandoffScheduled) { return true; }
+        for (const meta of this.#suspendedTasksByTaskID.values()) {
+          if (meta.task.isRejected() || meta.readyFn()) { return true; }
+        }
+        return false;
       }
       
       async runTickLoop() {
@@ -860,6 +1018,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         setTimeout(async () => {
           let result = this.tick();
           while (result !== ComponentAsyncState.TickResult.DONE) {
+            if (result === ComponentAsyncState.TickResult.IDLE) {
+              _checkForDeadlock();
+            }
             // After resuming a task, re-tick as soon as the resumed
             // slice's microtask continuations have drained (timeout 0)
             // so queued sibling resumptions aren't charged the idle
@@ -890,7 +1051,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
             return ComponentAsyncState.TickResult.RESUMED;
           }
           
-          const isReady = meta.readyFn();
+          const isReady = this.suspendedTaskReady(taskID);
           if (!isReady) { continue; }
           
           _debugLog('[ComponentAsyncState#tick()] resuming task via tick', {
@@ -933,6 +1094,36 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       }
       return ASYNC_STATE.get(componentIdx);
     }
+    const symbolDispose = Symbol.dispose || Symbol.for('dispose');
+    
+    // Dispose of a host-provided value that a guest discarded, using `disposeFn`
+    // if provided, otherwise the value's `Symbol.asyncDispose` or `Symbol.dispose`.
+    //
+    // Disposal runs in a microtask, so host code never runs inside a canonical
+    // built-in (where it could re-enter the component), and errors are reported
+    // rather than surfaced to the guest.
+    function _disposeHostValue(value, disposeFn) {
+      if (!disposeFn) {
+        if (value === null || (typeof value !== 'object' && typeof value !== 'function')) { return; }
+        if (typeof Symbol.asyncDispose === 'symbol' && typeof value[Symbol.asyncDispose] === 'function') {
+          disposeFn = value[Symbol.asyncDispose];
+        } else if (typeof value[symbolDispose] === 'function') {
+          disposeFn = value[symbolDispose];
+        } else {
+          return;
+        }
+      }
+      const reportErr = (err) => console.error('[jco] error while disposing discarded host value', err);
+      queueMicrotask(() => {
+        try {
+          const res = disposeFn.call(value);
+          if (res && typeof res.then === 'function') { res.then(undefined, reportErr); }
+        } catch (err) {
+          reportErr(err);
+        }
+      });
+    }
+    
     const GLOBAL_COMPONENT_MEMORY_MAP = new Map();
     
     function lookupMemoriesForComponent(args) {
@@ -993,10 +1184,16 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #result = null;
       #resultSet = false;
       
+      // Pending value returned by a host implementation of this (async import)
+      // subtask, held so it can be disposed if the guest discards the call
+      #hostPendingResult = null;
+      
       fnName;
       target;
       isAsync;
       isManualAsync;
+      // One execution slice awaited by the conditional cancel trampoline.
+      cancelProgress = null;
       
       constructor(args) {
         if (typeof args.componentIdx !== 'number') {
@@ -1097,11 +1294,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       // If the callee is another guest task, the request is delivered to it and
       // the callee confirms via `task.cancel` (or still resolves via `task.return`).
       //
-      // If the callee is a host function there is (currently) no host-side
-      // cancellation hook, so the pending call is treated as immediately
-      // cancelled -- consistent with hosts being expected to resolve
+      // If the callee is a host function, the pending call is treated as
+      // immediately cancelled -- consistent with hosts being expected to resolve
       // cancellation promptly -- and any later host resolution is discarded
-      // (see `AsyncTask#onResolve`).
+      // (see `AsyncTask#onResolve`). The host is notified of the discard by
+      // disposing the pending value it returned (see `setHostPendingResult`).
       requestCancellation() {
         _debugLog('[AsyncSubtask#requestCancellation()] args', {
           componentIdx: this.#componentIdx,
@@ -1123,6 +1320,30 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
         
         this.onResolve(null);
+        this.#disposeHostPendingResult();
+      }
+      
+      // Record the value returned by the host implementation of this subtask.
+      //
+      // Host imports may return a thenable that implements `Symbol.asyncDispose`
+      // or `Symbol.dispose`. If the guest cancels the call before its result is
+      // delivered, the result is discarded and the thenable is disposed so the
+      // host can stop pending work and release anything it produced.
+      setHostPendingResult(v) {
+        if (v === null || (typeof v !== 'object' && typeof v !== 'function') || typeof v.then !== 'function') {
+          return;
+        }
+        this.#hostPendingResult = v;
+        if (this.#resolved && this.#state !== AsyncSubtask.State.RETURNED) {
+          this.#disposeHostPendingResult();
+        }
+      }
+      
+      #disposeHostPendingResult() {
+        const pending = this.#hostPendingResult;
+        if (!pending) { return; }
+        this.#hostPendingResult = null;
+        _disposeHostValue(pending);
       }
       
       registerOnStartHandler(f) {
@@ -1139,6 +1360,14 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         });
         
         if (this.#onProgressFn) { this.#onProgressFn(); }
+        
+        // Starting a nested operation is a task execution boundary.
+        // In particular, a cancellation handler may synchronously
+        // enter an import which then suspends in the host.  Wake a
+        // supertask that is driving one cancellation slice so an
+        // async `subtask.cancel` can report BLOCKED without waiting
+        // for that nested operation to finish.
+        this.#parentTask.notifyProgress();
         
         this.#state = AsyncSubtask.State.STARTED;
         
@@ -1176,6 +1405,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
         
         this.#resolved = true;
+        this.#hostPendingResult = null;
         this.#parentTask.removeSubtask(this);
         this.#parentTask.reject(subtaskErr);
       }
@@ -1211,6 +1441,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
             throw new Error('resolved subtask must have been started before completion');
           }
           this.#state = AsyncSubtask.State.RETURNED;
+          // The host result is delivered to the guest, so it is no longer ours to dispose
+          this.#hostPendingResult = null;
         }
         
         this.setResult(subtaskValue);
@@ -1231,7 +1463,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         const memory = callMetadata.memory ?? this.#parentTask?.getReturnMemory() ?? lookupMemoriesForComponent({ componentIdx: this.#parentTask?.componentIdx() })[0];
         // NOTE: cancelled resolutions carry no value, so nothing is lowered
         const returned = this.#state === AsyncSubtask.State.RETURNED;
-        if (returned && callMetadata && !callMetadata.returnFn && this.isAsync && callMetadata.resultPtr && memory) {
+        if (returned && callMetadata && !callMetadata.returnFn && (this.isAsync || callMetadata.funcTypeIsAsync) && callMetadata.resultPtr && memory) {
           const { resultPtr, realloc } = callMetadata;
           const lowers = callMetadata.lowers; // may have been updated in task.return of the child
           if (lowers && lowers.length > 0) {
@@ -1337,7 +1569,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         });
         if (!this.#waitable) { throw new Error('missing/invalid inner waitable'); }
         if (!this.resolveDelivered()) {
-          throw new Error('cannot drop subtask before resolve is delivered');
+          throw new Error('cannot drop a subtask which has not yet resolved');
         }
         if (this.#waitable) { this.#waitable.drop() }
         this.#dropped = true;
@@ -1434,8 +1666,10 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       if (!args.fn) { throw new TypeError('missing fn'); }
       const { taskID, componentIdx, fn } = args;
       const previous = CURRENT_TASK_META[componentIdx] ?? null;
+      const previousCurrent = CURRENT_TASK_META.current ?? null;
       
       try {
+        CURRENT_TASK_META.current =
         CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
         return fn();
       } catch (err) {
@@ -1450,6 +1684,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         // helper core exports (for example fused return adapters) can
         // temporarily run under a different task of the same component.
         CURRENT_TASK_META[componentIdx] = previous;
+        CURRENT_TASK_META.current = previousCurrent;
       }
     }
     
@@ -1463,6 +1698,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       const { taskID, componentIdx, fn } = args;
       
       try {
+        CURRENT_TASK_META.current =
         CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
         return await fn();
       } catch (err) {
@@ -1473,6 +1709,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         throw err;
       } finally {
         CURRENT_TASK_META[componentIdx] = null;
+        if (CURRENT_TASK_META.current?.taskID === taskID) {
+          CURRENT_TASK_META.current = null;
+        }
       }
     }
     
@@ -1503,7 +1742,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #entryFnName = null;
       
       #onResolveHandlers = [];
+      #progressWaiters = [];
       #completionPromise = null;
+      #completionValue;
+      #completionReady = false;
+      #settleCompletionPromise;
       #rejected = false;
       
       #exitPromise = null;
@@ -1518,6 +1761,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #postReturnFn = null;
       
       #getCalleeParamsFn = null;
+      #calleeIsAsync = null;
       
       #stringEncoding = null;
       
@@ -1529,6 +1773,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #backpressureWaiters = 0n;
       
       #returnLowerFns = null;
+      
+      #resourceScopeId;
+      #resourceBorrowCount = 0;
+      #resourceLenders = [];
+      #resourceScopeExited = false;
       
       #subtasks = [];
       
@@ -1542,12 +1791,12 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       returnCalls =  0;
       storage = [0, 0];
-      borrowedHandles = {};
-      
       tmpRetI64HighBits = 0|0;
       
       constructor(opts) {
         this.#id = ++AsyncTask._ID;
+        this.#resourceScopeId = ++RESOURCE_SCOPE_ID;
+        RESOURCE_SCOPE_TASKS.set(this.#resourceScopeId, this);
         
         if (opts?.componentIdx === undefined) {
           throw new TypeError('missing component id during task creation');
@@ -1577,23 +1826,34 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         // original rejected promise for the eventual caller.
         completionPromise.catch(() => {});
         
-        this.#onResolveHandlers.push((results) => {
-          if (this.#parentSubtask !== null) { return; }
-          if (!this.#isAsync) { return; }
-          
+        let completionSettled = false;
+        const settleCompletionPromise = () => {
+          if (completionSettled || !this.#completionReady) { return; }
+          completionSettled = true;
           if (this.#errored !== null) {
             rejectCompletionPromise(this.#errored);
-            return;
           } else if (this.#rejected) {
-            rejectCompletionPromise(results);
-            return;
-          }
-          
-          if (this.#preserveFutureResult && results instanceof FutureValue) {
-            results.resolveAsValue(resolveCompletionPromise);
+            rejectCompletionPromise(this.#completionValue);
+          } else if (
+          this.#preserveFutureResult
+          && this.#completionValue instanceof FutureValue
+          ) {
+            this.#completionValue.resolveAsValue(resolveCompletionPromise);
           } else {
-            resolveCompletionPromise(results);
+            resolveCompletionPromise(this.#completionValue);
           }
+        };
+        
+        this.#settleCompletionPromise = settleCompletionPromise;
+        this.#onResolveHandlers.push((results) => {
+          if (this.#parentSubtask !== null) { return; }
+          if (!this.#isAsync && !this.#isManualAsync) { return; }
+          this.#completionValue = results;
+          this.#completionReady = true;
+          // Publish after the current guest slice returns, so a trap
+          // in that slice can still reject the call. Do not wait for
+          // task exit: detached work may require further host calls
+          // or consumption of a returned resource's stream.
         });
         
         const {
@@ -1604,6 +1864,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         this.#exitPromise = exitPromise;
         
         this.#onExitHandlers.push(() => {
+          if (this.#parentSubtask === null && (this.#isAsync || this.#isManualAsync)) {
+            settleCompletionPromise();
+          }
           resolveExitPromise();
         });
         
@@ -1611,7 +1874,6 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         if (opts.callbackFnName) { this.#callbackFnName = opts.callbackFnName; }
         
         if (opts.getCalleeParamsFn) { this.#getCalleeParamsFn = opts.getCalleeParamsFn; }
-        
         if (opts.stringEncoding) { this.#stringEncoding = opts.stringEncoding; }
         
         if (opts.parentSubtask) { this.#parentSubtask = opts.parentSubtask; }
@@ -1625,10 +1887,65 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       componentIdx() { return this.#componentIdx; }
       entryFnName() { return this.#entryFnName; }
       
+      resourceScopeId() { return this.#resourceScopeId; }
+      
+      addBorrowedHandle() {
+        if (this.#resourceScopeExited) {
+          throw new Error('cannot add a borrow to an exited resource scope');
+        }
+        this.#resourceBorrowCount++;
+      }
+      
+      removeBorrowedHandle() {
+        if (this.#resourceBorrowCount === 0) {
+          throw new Error('resource borrow count underflow');
+        }
+        this.#resourceBorrowCount--;
+      }
+      
+      addResourceLender(table, handle) {
+        if (this.#resourceScopeExited) {
+          throw new Error('cannot add a lender to an exited resource scope');
+        }
+        this.#resourceLenders.push({ table, handle });
+      }
+      
+      validateResourceBorrowScope() {
+        if (this.#resourceScopeExited) { return; }
+        if (this.#resourceBorrowCount !== 0) {
+          throw new WebAssemblyRuntimeError('borrow handles still remain at the end of the call');
+        }
+        for (const { table, handle } of this.#resourceLenders) {
+          const idx = handle << 1;
+          const lendCount = table[idx];
+          if (!Number.isInteger(lendCount) || lendCount <= 0 || lendCount >= 2**30) {
+            throw new Error('invalid resource lender state at scope exit');
+          }
+          table[idx] = lendCount - 1;
+        }
+        this.#resourceLenders = [];
+        this.#resourceScopeExited = true;
+        RESOURCE_SCOPE_TASKS.delete(this.#resourceScopeId);
+      }
+      
       completionPromise() { return this.#completionPromise; }
+      settleCompletion() { this.#settleCompletionPromise(); }
       exitPromise() { return this.#exitPromise; }
       
+      waitForProgress() {
+        const { promise, resolve } = promiseWithResolvers();
+        this.#progressWaiters.push(resolve);
+        return promise;
+      }
+      
+      notifyProgress() {
+        const waiters = this.#progressWaiters;
+        this.#progressWaiters = [];
+        for (const resolve of waiters) { resolve(); }
+      }
+      
       isAsync() { return this.#isAsync; }
+      isManualAsync() { return this.#isManualAsync; }
       isSync() { return !this.isAsync(); }
       
       getErrHandling() { return this.#errHandling; }
@@ -1649,6 +1966,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       setReturnLowerFns(fns) { this.#returnLowerFns = fns; }
       getReturnLowerFns() { return this.#returnLowerFns; }
+      
+      setCalleeIsAsync(value) {
+        if (typeof value !== 'boolean') { throw new TypeError('callee async state must be a boolean'); }
+        this.#calleeIsAsync = value;
+      }
       
       setParentSubtask(subtask) {
         if (!subtask || !(subtask instanceof AsyncSubtask)) { return }
@@ -1688,8 +2010,15 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         return this.#callbackFnName;
       }
       
-      async runCallbackFn(...args) {
+      runCallbackFn(...args) {
         if (!this.#callbackFn) { throw new Error('no callback function has been set for task'); }
+        if (this.#callbackFn._jcoMaySuspend === false) {
+          return _withGlobalCurrentTaskMeta({
+            taskID: this.#id,
+            componentIdx: this.#componentIdx,
+            fn: () => this.#callbackFn.apply(null, args),
+          });
+        }
         return _withGlobalCurrentTaskMetaAsync({
           taskID: this.#id,
           componentIdx: this.#componentIdx,
@@ -1702,7 +2031,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         return this.#getCalleeParamsFn();
       }
       
-      mayBlock() { return this.isAsync() || this.isResolvedState() }
+      // Legacy manually-async exports are sync-typed in the component
+      // but use JSPI precisely so their guest stack may suspend.
+      mayBlock() { return this.isAsync() || this.isManualAsync() || this.isResolvedState() }
       
       mayEnter(task) {
         const cstate = getOrCreateAsyncState(this.#componentIdx);
@@ -1744,6 +2075,37 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         return true;
       }
       
+      tryEnter() {
+        if (this.#entered) {
+          throw new Error(`task with ID [${this.#id}] should not be entered twice`);
+        }
+        
+        if (this.deliverPendingCancel({ cancellable: true })) {
+          this.cancel();
+          return false;
+        }
+        
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        if (this.isSync()) {
+          this.#entered = true;
+          return true;
+        }
+        if (cstate.hasBackpressure()) { return null; }
+        if (this.needsExclusiveLock()) {
+          if (cstate.isExclusivelyLocked()) { return null; }
+          cstate.exclusiveLock(this.#id);
+        }
+        
+        if (this.deliverPendingCancel({ cancellable: true })) {
+          cstate.exclusiveRelease(this.#id);
+          this.cancel();
+          return false;
+        }
+        
+        this.#entered = true;
+        return true;
+      }
+      
       async enter(opts) {
         _debugLog('[AsyncTask#enter()] args', {
           taskID: this.#id,
@@ -1768,6 +2130,17 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         
         if (opts?.isHost) {
           this.#entered = true;
+          // A guest task may be synchronously blocked in this
+          // host entry. Propagate that boundary so an async
+          // cancellation driver can yield BLOCKED while the host
+          // operation is outstanding.
+          const parentTask = this.#parentSubtask?.getParentTask();
+          if (
+          parentTask?.taskState() === AsyncTask.State.CANCEL_DELIVERED
+          || (parentTask && !parentTask.hasCallback())
+          ) {
+            parentTask.notifyProgress();
+          }
           return this.#entered;
         }
         
@@ -1808,8 +2181,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           
           cstate.removeBackpressureWaiter();
           
-          if (result === AsyncTask.BlockResult.CANCELLED) {
-            this.cancel();
+          if (!result || this.isCancelled()) {
+            if (!this.isResolvedState()) { this.cancel(); }
             return false;
           }
         }
@@ -1819,6 +2192,23 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         // driver loop releases/re-acquires it per slice thereafter.
         if (this.needsExclusiveLock()) {
           await cstate.acquireExclusiveLock(this.#id);
+        }
+        
+        // Cancellation-before-start may resolve this task while its
+        // queued lock acquisition is still pending. Acquiring the lock
+        // does not make the already-resolved task runnable again.
+        if (this.isResolvedState() || this.isCancelled()) {
+          cstate.exclusiveRelease(this.#id);
+          return false;
+        }
+        
+        // Cancellation can be requested while entry is waiting for
+        // backpressure or its exclusive lock. Do not execute the guest
+        // after acquiring a lock for a task that should no longer start.
+        if (this.deliverPendingCancel({ cancellable: true })) {
+          cstate.exclusiveRelease(this.#id);
+          this.cancel();
+          return false;
         }
         
         this.#entered = true;
@@ -1856,7 +2246,10 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           componentIdx: this.#componentIdx,
         });
         
-        const keepGoing = await this.suspendUntil({ readyFn, cancellable });
+        // A callback YIELD is an explicit request to let other work run.
+        // Unlike waits whose condition is already ready, it must always
+        // suspend for at least one scheduler turn.
+        const keepGoing = await this.immediateSuspend({ readyFn, cancellable });
         if (keepGoing) {
           return {
             code: ASYNC_EVENT_CODE.NONE,
@@ -1887,6 +2280,32 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         
         const completed = await this.immediateSuspendUntil({ readyFn, cancellable });
         return completed;
+      }
+      
+      suspendUntilCallback(opts, onResume) {
+        const { cancellable, readyFn } = opts;
+        if (this.deliverPendingCancel({ cancellable })) {
+          onResume(false);
+          return;
+        }
+        
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        cstate.suspendTask({
+          task: this,
+          cancellable,
+          readyFn: () => {
+            if (cancellable && this.#state === AsyncTask.State.CANCEL_PENDING) {
+              return true;
+            }
+            return readyFn();
+          },
+          onResume: (keepGoing) => {
+            if (keepGoing && this.deliverPendingCancel({ cancellable })) {
+              keepGoing = false;
+            }
+            onResume(keepGoing);
+          },
+        });
       }
       
       // TODO(threads): equivalent to thread.suspend_until()
@@ -1922,6 +2341,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       const cstate = getOrCreateAsyncState(this.#componentIdx);
       const keepGoing = await cstate.suspendTask({
         task: this,
+        cancellable,
         readyFn: () => {
           // A pending cancellation request wakes cancellable waits
           if (cancellable && this.#state === AsyncTask.State.CANCEL_PENDING) {
@@ -1951,6 +2371,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     }
     
     isCancelled() { return this.cancelled }
+    cancellationRequested() { return this.cancelRequested; }
     
     // Request cooperative cancellation of this task, called on behalf of a
     // supertask performing `subtask.cancel` on the subtask this task backs.
@@ -1969,6 +2390,28 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       this.cancelRequested = true;
       if (this.#state === AsyncTask.State.INITIAL) {
         this.#state = AsyncTask.State.CANCEL_PENDING;
+        // A task still waiting for backpressure or its
+        // initial instance lock has no guest thread to
+        // resume. Cancellation is therefore delivered
+        // and acknowledged eagerly as
+        // CANCELLED_BEFORE_STARTED.
+        if (!this.#entered) {
+          this.deliverPendingCancel({ cancellable: true });
+          this.cancel();
+          
+          const cstate = getOrCreateAsyncState(this.#componentIdx);
+          // `enter()` may already be parked either in the scheduler's
+          // explicit-backpressure wait or in the exclusive-lock FIFO.
+          // Wake/remove that entry work now so it cannot retain a timer,
+          // waiter count, or lock-queue slot after cancellation.
+          cstate.resumeTaskByID(this.#id);
+          cstate.cancelExclusiveLockWaiter(this.#id);
+          
+          // No guest thread was registered, so no driver loop will call
+          // `exit()`. Retire the task's JS bookkeeping explicitly.
+          this.exit({ skipExclusiveLockCheck: true });
+          return;
+        }
       }
       // Nudge the component's tick loop so that any suspended cancellable
       // wait observes the pending cancellation promptly
@@ -1978,15 +2421,19 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     cancel(args) {
       _debugLog('[AsyncTask#cancel()] args', { });
       if (this.taskState() !== AsyncTask.State.CANCEL_DELIVERED) {
-        throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}] invalid task state [${this.taskState()}] for cancellation`);
+        throw new Error('`task.cancel` called by task which has not been cancelled');
       }
-      if (this.borrowedHandles.length > 0) { throw new Error('task still has borrow handles'); }
+      this.validateResourceBorrowScope();
       this.cancelled = true;
       // Cancelled tasks resolve with no value (spec: `Task.cancel` calls
       // `on_resolve(None)`); an explicit error is only present on the
       // host-driven rejection path (see `reject()`).
       this.onResolve(args?.error ?? null);
       this.#state = AsyncTask.State.RESOLVED;
+      // A task cancelled before entry has no driver loop that can
+      // report its exit. Entered tasks notify after releasing their
+      // component slice in `exit()`.
+      if (!this.#entered) { this.notifyProgress(); }
     }
     
     onResolve(taskValue) {
@@ -2013,8 +2460,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       // cancelled via `subtask.cancel` while this task was still pending),
       // this task's resolution must be discarded rather than delivered.
       const parentSubtaskPending = this.#parentSubtask && !this.#parentSubtask.isResolved();
+      const taskReturned = !this.isCancelled();
       
-      if (parentSubtaskPending) {
+      if (parentSubtaskPending && taskReturned) {
         const meta = this.#parentSubtask.getCallMetadata();
         // Run the rturn fn if it has not already been called -- this *should* have happened in
         // `task.return`, but some paths do not go through task.return (e.g. async lower of sync fn
@@ -2035,7 +2483,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
       }
       
-      if (this.#postReturnFn) {
+      if (this.#postReturnFn && taskReturned) {
         _debugLog('[AsyncTask#onResolve()] running post return ', {
           componentIdx: this.#componentIdx,
           taskID: this.#id,
@@ -2064,7 +2512,12 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     isRejected() { return this.#rejected; }
     
     isErrored() { return this.#errored; }
-    setErrored(err) { this.#errored = err; }
+    setErrored(err) {
+      // Preserve the originating trap when unwinding through
+      // additional guest frames produces secondary traps (often
+      // an `unreachable` after a call which was expected to trap).
+      if (this.#errored === null) { this.#errored = err; }
+    }
     
     reject(taskErr) {
       _debugLog('[AsyncTask#reject()] args', {
@@ -2077,7 +2530,19 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         errMsg: taskErr.message,
       });
       
-      if (this.isResolvedState() || this.#rejected) { return; }
+      this.setErrored(taskErr);
+      if (this.#rejected) { return; }
+      
+      // A task may call `task.return` before its callback exits.
+      // A trap in cleanup or spawned work must still reject the
+      // host call and poison the enclosing task chain.
+      if (this.isResolvedState()) {
+        this.#rejected = true;
+        this.#errored = taskErr;
+        const parentTask = this.#parentSubtask?.getParentTask();
+        if (parentTask) { parentTask.reject(taskErr); }
+        return;
+      }
       
       this.#rejected = true;
       this.cancelRequested = true;
@@ -2098,12 +2563,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       });
       
       if (this.#state === AsyncTask.State.RESOLVED) {
+        if (this.#errored !== null) { throw this.#errored; }
         throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}]  is already resolved (did you forget to wait for an import?)`);
       }
       
-      if (this.borrowedHandles.length > 0) {
-        throw new Error('task still has borrow handles');
-      }
+      this.validateResourceBorrowScope();
       
       this.#state = AsyncTask.State.RESOLVED;
       
@@ -2139,9 +2603,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}] exited without resolution`);
       }
       
-      if (this.borrowedHandles > 0) {
-        throw new Error('task [${this.#id}] exited without clearing borrowed handles');
-      }
+      this.validateResourceBorrowScope();
       
       const state = getOrCreateAsyncState(this.#componentIdx);
       if (!state) { throw new Error('missing async state for component [' + this.#componentIdx + ']'); }
@@ -2157,6 +2619,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       // task exiting while another task's slice holds the lock no
       // longer clears the foreign hold).
       state.exclusiveRelease(this.#id);
+      this.notifyProgress();
       
       for (const f of this.#onExitHandlers) {
         try {
@@ -2180,7 +2643,10 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       // inside the calling guest slice, which already holds the
       // lock; only tasks that execute guest slices need it.
       if (!this.#callingWasmExport) { return false; }
-      return !this.#isAsync || this.hasCallback();
+      // A sync-lifted callee cannot be reentered until the whole
+      // stackful call returns. This is the Component Model's
+      // automatic-backpressure rule for async-lowered calls.
+      return !this.#isAsync || this.hasCallback() || this.#calleeIsAsync === false;
     }
     
     createSubtask(args) {
@@ -2301,10 +2767,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
   }
   
   function _getGlobalCurrentTaskMeta(componentIdx) {
-    if (componentIdx === null || componentIdx === undefined) {
-      throw new Error("missing/invalid component idx");
-    }
-    const v = CURRENT_TASK_META[componentIdx];
+    const v = componentIdx === undefined || componentIdx === null
+    ? CURRENT_TASK_META.current
+    : CURRENT_TASK_META[componentIdx];
     if (v === undefined || v === null) {
       return undefined;
     }
@@ -2317,7 +2782,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
     if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
     const { taskID, componentIdx } = args;
-    return CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
+    return CURRENT_TASK_META.current =
+    CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
   }
   
   
@@ -2339,6 +2805,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     }
     
     CURRENT_TASK_META[componentIdx] = null;
+    if (CURRENT_TASK_META.current?.taskID === taskID) {
+      CURRENT_TASK_META.current = null;
+    }
   }
   
   function _lowerImportBackwardsCompat(args) {
@@ -2363,7 +2832,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     
     _checkMayLeave(componentIdx);
     
-    let meta = _getGlobalCurrentTaskMeta(componentIdx);
+    const meta = _getGlobalCurrentTaskMeta(componentIdx);
+    let taskMeta = meta && getCurrentTask(componentIdx, meta.taskID);
     let createdTask;
     
     // Some components depend on initialization logic (i.e. `_initialize` or some such
@@ -2374,7 +2844,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     // transpiled context -- so we may get a call to an export that is lowered without going
     // through `CallWasm` or `CallInterface`.
     //
-    if (!meta) {
+    // A nested synchronous call can leave global metadata for a task
+    // that has already exited. Treat it like a call with no current task.
+    if (!taskMeta) {
       if (funcTypeIsAsync || (isAsync && !isManualAsync)) {
         throw new Error('p3 async wasm exports cannot use backwards compat auto-task init');
       }
@@ -2400,12 +2872,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         taskID: newTaskID,
       });
       
-      meta = _getGlobalCurrentTaskMeta(componentIdx);
+      taskMeta = getCurrentTask(componentIdx, newTaskID);
     }
-    
-    const { taskID } = meta;
-    
-    const taskMeta = getCurrentTask(componentIdx, taskID);
     if (!taskMeta) {
       throw new Error('invalid/missing async task meta');
     }
@@ -2424,7 +2892,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     // Canonical ABI lower appends result storage as a trailing
     // param when async lower has any flat result, or sync lower
     // has more than one flat result.
-    const resultPtr = hasResultPointer ? params[params.length - 1] : undefined;
+    const resultPtr = hasResultPointer ? params[params.length - 1] >>> 0 : undefined;
     const subtask = task.createSubtask({
       componentIdx,
       parentTask: task,
@@ -2438,6 +2906,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         getReallocFn,
         resultPtr,
         lowers: resultLowerFns,
+        funcTypeIsAsync,
         stringEncoding,
       }
     });
@@ -2573,6 +3042,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     return Number(subtask.waitableRep()) << 4 | subtaskState;
   }
   
+  const CURRENT_TASK_MAY_BLOCK= globalThis.WebAssembly ? new globalThis.WebAssembly.Global({ value: 'i32', mutable: true }, 0) : false;
+  
+  
   function _liftFlatU8(ctx) {
     _debugLog('[_liftFlatU8()] args', { ctx });
     let val;
@@ -2679,7 +3151,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     if (ctx.useDirectParams) {
       if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
       let offset = ctx.params[0];
-      if (typeof offset === 'bigint') { offset = Number(offset); }
+      if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
       if (!Number.isSafeInteger(offset)) { throw new Error('invalid offset'); }
       const len = ctx.params[1];
       if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
@@ -2698,7 +3170,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     val = TEXT_DECODER_UTF8.decode(new Uint8Array(ctx.memory.buffer, start, codeUnits));
     
     ctx.storagePtr += 8;
-    if (ctx.storageLen !== undefined) { ctx.storagelen -= 8; }
+    if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
     
     return [val, ctx];
   }
@@ -2710,21 +3182,26 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     if (ctx.useDirectParams) {
       if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
       let offset = ctx.params[0];
-      if (typeof offset === 'bigint') { offset = Number(offset); }
+      if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
       if (!Number.isSafeInteger(offset)) {  throw new Error('invalid offset'); }
       const len = ctx.params[1];
       if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
-      val = utf16Decoder.decode(new DataView(ctx.memory.buffer, offset, len));
+      val = utf16Decoder.decode(new DataView(ctx.memory.buffer, offset, len * 2));
       ctx.params = ctx.params.slice(2);
       return [val, ctx];
     }
     
-    const data = new DataView(ctx.memory.buffer)
-    const start = data.getUint32(ctx.storagePtr, vals[0], true);
-    const codeUnits = data.getUint32(ctx.storagePtr, vals[0] + 4, true);
-    val = utf16Decoder.decode(new Uint16Array(ctx.memory.buffer, start, codeUnits));
-    ctx.storagePtr = ctx.storagePtr + 2 * codeUnits;
-    if (ctx.storageLen !== undefined) { ctx.storageLen = ctx.storageLen - 2 * codeUnits }
+    const rem = ctx.storagePtr % 4;
+    if (rem !== 0) { ctx.storagePtr += (4 - rem); }
+    
+    const dv = new DataView(ctx.memory.buffer);
+    const start = dv.getUint32(ctx.storagePtr, true);
+    const codeUnits = dv.getUint32(ctx.storagePtr + 4, true);
+    
+    val = utf16Decoder.decode(new DataView(ctx.memory.buffer, start, codeUnits * 2));
+    
+    ctx.storagePtr += 8;
+    if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
     
     return [val, ctx];
   }
@@ -2874,6 +3351,14 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     : values => new typedArray(values);
     
     const readValuesAndReset = (ctx, originalPtr, originalLen, dataPtr, len) => {
+      if (
+      dataPtr < 0 || len < 0 ||
+      (elemSize32 !== 0 && len > Math.floor(((1 << 28) - 1) / elemSize32)) ||
+      dataPtr > ctx.memory.buffer.byteLength ||
+      (elemSize32 !== 0 && len > Math.floor((ctx.memory.buffer.byteLength - dataPtr) / elemSize32))
+      ) {
+        throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
+      }
       if (dataPtr % elemAlign32 !== 0) {
         throw new TypeError(`list pointer [${dataPtr}] is not aligned to ${elemAlign32}`);
       }
@@ -2919,7 +3404,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
   
   if (ctx.useDirectParams) {
     // unknown length list ptr w/ direct params
-    const dataPtr = ctx.params[0];
+    const dataPtr = ctx.params[0] >>> 0;
     const len = ctx.params[1];
     ctx.params = ctx.params.slice(2);
     
@@ -2997,10 +3482,15 @@ function _liftFlatFlags(meta) {
 }
 
 function _liftFlatOption(meta) {
+  const { payloadMaybeNull } = meta;
   const f = _liftFlatVariant(meta);
   return function _liftFlatOptionInner(ctx) {
     _debugLog('[_liftFlatOption()] args', { ctx });
-    return f(ctx);
+    const res = f(ctx);
+    if (!payloadMaybeNull) {
+      res[0] = res[0].tag === 'none' ? undefined : res[0].val;
+    }
+    return res;
   }
 }
 
@@ -3008,12 +3498,14 @@ function _liftFlatResult(meta) {
   const f = _liftFlatVariant(meta);
   return function _liftFlatResultInner(ctx) {
     _debugLog('[_liftFlatResult()] args', { ctx });
-    return f(ctx);
+    const res = f(ctx);
+    if (!('val' in res[0])) { res[0].val = undefined; }
+    return res;
   }
 }
 
 function _liftFlatOwn(meta) {
-  const { classNameFn, createResourceFn, componentIdx } = meta;
+  const { classNameFn, createResourceFn, componentIdx, tableIdx } = meta;
   
   return function _liftFlatOwnInner(ctx) {
     _debugLog('[_liftFlatOwn()] args', { ctx, className: classNameFn() });
@@ -3023,7 +3515,9 @@ function _liftFlatOwn(meta) {
     }
     
     const [handle, newCtx] = _liftFlatU32(ctx);
-    const resource = createResourceFn(handle);
+    const resource = ctx.liftResource
+    ? ctx.liftResource(handle, tableIdx)
+    : createResourceFn(handle);
     
     return [resource, newCtx];
   }
@@ -3043,7 +3537,7 @@ function _lowerFlatBool(ctx) {
     throw new Error(`unexpected number [${ctx.vals.length}] of vals (expected 1)`);
   }
   
-  _requireValidNumericPrimitive.bind('bool', ctx.vals[0]);
+  
   new DataView(ctx.memory.buffer).setUint8(ctx.storagePtr, ctx.vals[0] ? 1 : 0);
   
   ctx.storagePtr += 1;
@@ -3056,7 +3550,7 @@ function _lowerFlatU8(ctx) {
     throw new Error(`unexpected number [${ctx.vals.length}] of vals (expected 1)`);
   }
   
-  _requireValidNumericPrimitive.bind('u8', ctx.vals[0]);
+  
   
   if (!ctx.memory) { throw new Error("missing memory for lower"); }
   new DataView(ctx.memory.buffer).setUint8(ctx.storagePtr, ctx.vals[0]);
@@ -3075,7 +3569,7 @@ function _lowerFlatU16(ctx) {
   const rem = ctx.storagePtr % 2;
   if (rem !== 0) { ctx.storagePtr += (2 - rem); }
   
-  _requireValidNumericPrimitive.bind('u16', ctx.vals[0]);
+  
   new DataView(ctx.memory.buffer).setUint16(ctx.storagePtr, ctx.vals[0], true);
   
   ctx.storagePtr += 2;
@@ -3091,7 +3585,7 @@ function _lowerFlatU32(ctx) {
   const rem = ctx.storagePtr % 4;
   if (rem !== 0) { ctx.storagePtr += (4 - rem); }
   
-  _requireValidNumericPrimitive.bind('u32', ctx.vals[0]);
+  
   new DataView(ctx.memory.buffer).setUint32(ctx.storagePtr, ctx.vals[0], true);
   
   ctx.storagePtr += 4;
@@ -3105,7 +3599,7 @@ function _lowerFlatU64(ctx) {
   const rem = ctx.storagePtr % 8;
   if (rem !== 0) { ctx.storagePtr += (8 - rem); }
   
-  _requireValidNumericPrimitive.bind('u64', ctx.vals[0]);
+  
   new DataView(ctx.memory.buffer).setBigUint64(ctx.storagePtr, ctx.vals[0], true);
   
   ctx.storagePtr += 8;
@@ -3237,7 +3731,7 @@ function _lowerFlatList(meta) {
     
     if (ctx.useDirectParams) {
       if (ctx.params.length < 2) { throw new Error('insufficient params left to lower list'); }
-      const storagePtr = ctx.params[0];
+      const storagePtr = ctx.params[0] >>> 0;
       const elemCount = ctx.params[1];
       ctx.params = ctx.params.slice(2);
       
@@ -3399,6 +3893,7 @@ function _lowerFlatEnum(meta) {
 }
 
 function _lowerFlatOption(meta) {
+  const { payloadMaybeNull } = meta;
   const f = _lowerFlatVariant(meta);
   return function _lowerFlatOptionInner(ctx) {
     _debugLog('[_lowerFlatOption()] args', { ctx });
@@ -3406,7 +3901,7 @@ function _lowerFlatOption(meta) {
     const v = ctx.vals[0];
     if (v === null || v === undefined) {
       ctx.vals[0] = { tag: 'none' };
-    } else {
+    } else if (payloadMaybeNull) {
       const isNotOptionObject = typeof v !== 'object'
       || Object.keys(v).length !== 2
       || !('tag' in v)
@@ -3415,6 +3910,8 @@ function _lowerFlatOption(meta) {
       if (isNotOptionObject) {
         ctx.vals[0] = { tag: 'some', val: v };
       }
+    } else {
+      ctx.vals[0] = { tag: 'some', val: v };
     }
     
     f(ctx);
@@ -3441,7 +3938,7 @@ function _lowerFlatResult(meta) {
 }
 
 function _lowerFlatOwn(meta) {
-  const { lowerFn, componentIdx } = meta;
+  const { lowerFn, componentIdx, tableIdx } = meta;
   
   return function _lowerFlatOwnInner(ctx) {
     _debugLog('[_lowerFlatOwn()] args', { ctx });
@@ -3453,11 +3950,42 @@ function _lowerFlatOwn(meta) {
     
     const obj = ctx.vals[0];
     if (obj === undefined || obj === null) { throw new Error('missing resource'); }
-    const handle = lowerFn(obj);
+    const handle = ctx.lowerResource
+    ? ctx.lowerResource(obj, tableIdx)
+    : lowerFn(obj);
     
     ctx.vals[0] = handle;
     _lowerFlatU32(ctx);
   };
+}
+
+function _trackHostOperation(operation) {
+  const result = operation();
+  if (result === null ||
+  (typeof result !== 'object' && typeof result !== 'function') ||
+  typeof result.then !== 'function') {
+    return result;
+  }
+  
+  STORE_ASYNC_STATE.pendingHostOperations++;
+  const tracked = Promise.resolve(result).finally(() => {
+    STORE_ASYNC_STATE.pendingHostOperations--;
+    if (STORE_ASYNC_STATE.pendingHostOperations < 0) {
+      throw new Error('negative pending host operation count');
+    }
+    for (const state of ASYNC_STATE.values()) { state.runTickLoop(); }
+    _checkForDeadlock();
+  });
+  
+  // Forward disposal to the host's value, so it is notified if a guest
+  // discards the value (e.g. a future) produced from this operation
+  for (const sym of [Symbol.asyncDispose, symbolDispose]) {
+    if (typeof sym === 'symbol' && typeof result[sym] === 'function') {
+      tracked[sym] = () => result[sym]();
+    }
+  }
+  
+  return tracked;
 }
 
 function _guardMayLeave(componentIdx, fn) {
@@ -3474,7 +4002,6 @@ const symbolCabiDispose = Symbol.for('cabiDispose');
 const symbolRscHandle = Symbol('handle');
 
 const symbolRscRep = Symbol.for('cabiRep');
-const symbolDispose = Symbol.dispose || Symbol.for('dispose');
 
 const HANDLE_TABLES= [];
 
@@ -3495,15 +4022,54 @@ function getErrorPayload(e) {
   return e;
 }
 
-function _suspendingImport(componentIdx, fn) {
-  return async function (...args) {
+function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = false) {
+  return function (...args) {
     _checkMayLeave(componentIdx);
     const saved = CURRENT_TASK_META[componentIdx] ?? null;
-    try {
-      return await fn.apply(null, args);
-    } finally {
-      CURRENT_TASK_META[componentIdx] = saved;
+    
+    const savedTask = saved
+    ? getCurrentTask(saved.componentIdx, saved.taskID)?.task
+    : null;
+    const mayBlock = savedTask
+    ? (savedTask?.mayBlock() ?? (CURRENT_TASK_MAY_BLOCK.value !== 0))
+    : false;
+    if (!saved && !mayBlock) {
+      throw new WebAssemblyRuntimeError('cannot block a synchronous task before returning');
     }
+    
+    if (syncOnly || !mayBlock) {
+      let result;
+      try {
+        result = fn.apply(null, args);
+      } catch (err) {
+        CURRENT_TASK_META[componentIdx] = saved;
+        if (!switchesTask) { CURRENT_TASK_META.current = saved; }
+        throw err;
+      }
+      
+      CURRENT_TASK_META[componentIdx] = saved;
+      if (!switchesTask) { CURRENT_TASK_META.current = saved; }
+      
+      if (result !== null &&
+      (typeof result === 'object' || typeof result === 'function') &&
+      typeof result.then === 'function') {
+        // The helper may already have returned a rejected promise.
+        // Mark it handled before replacing it with the canonical
+        // synchronous-task trap.
+        Promise.resolve(result).catch(() => {});
+        throw new WebAssemblyRuntimeError('cannot block a synchronous task before returning');
+      }
+      return result;
+    }
+    
+    return (async () => {
+      try {
+        return await fn.apply(null, args);
+      } finally {
+        CURRENT_TASK_META[componentIdx] = saved;
+        if (!switchesTask) { CURRENT_TASK_META.current = saved; }
+      }
+    })();
   };
 }
 
@@ -3772,13 +4338,14 @@ if (insecureSeed=== undefined) {
   throw err;
 }
 
-let gen = (function* _initGenerator () {
+let gen= (function* _initGenerator () {
   const instanceFlags0 = new WebAssembly.Global({ value: "i32", mutable: true }, 1);
   INSTANCE_FLAGS.set(0, instanceFlags0);
   let exports0;
   
   const handleTable5 = [T_FLAG, 0];
   handleTable5._createdReps = new Set();
+  handleTable5._componentIdx = 0;
   
   
   const captureTable5= new Map();
@@ -3788,6 +4355,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable6 = [T_FLAG, 0];
   handleTable6._createdReps = new Set();
+  handleTable6._componentIdx = 0;
   
   
   const captureTable6= new Map();
@@ -3853,14 +4421,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => IncomingBody.finish(rsc0),
+        fn: () => _trackHostOperation(() => IncomingBody.finish(rsc0)),
       })
       ;
     } catch (err) {
@@ -3903,6 +4471,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable0 = [T_FLAG, 0];
   handleTable0._createdReps = new Set();
+  handleTable0._componentIdx = 0;
   
   
   const captureTable0= new Map();
@@ -3965,14 +4534,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.subscribe(),
+        fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
     } catch (err) {
@@ -4025,6 +4594,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable8 = [T_FLAG, 0];
   handleTable8._createdReps = new Set();
+  handleTable8._componentIdx = 0;
   
   
   const captureTable8= new Map();
@@ -4087,14 +4657,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.subscribe(),
+        fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
     } catch (err) {
@@ -4147,6 +4717,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable9 = [T_FLAG, 0];
   handleTable9._createdReps = new Set();
+  handleTable9._componentIdx = 0;
   
   
   const captureTable9= new Map();
@@ -4156,6 +4727,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable7 = [T_FLAG, 0];
   handleTable7._createdReps = new Set();
+  handleTable7._componentIdx = 0;
   
   
   const captureTable7= new Map();
@@ -4218,14 +4790,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.headers(),
+        fn: () => _trackHostOperation(() => rsc0.headers()),
       })
       ;
     } catch (err) {
@@ -4331,14 +4903,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.status(),
+        fn: () => _trackHostOperation(() => rsc0.status()),
       })
       ;
     } catch (err) {
@@ -4431,14 +5003,18 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     
     try {
       ret = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => subscribeDuration(BigInt.asUintN(64, BigInt(arg0))),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = subscribeDuration(BigInt.asUintN(64, BigInt(arg0)));
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
     } catch (err) {
@@ -4524,14 +5100,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => now(),
+        fn: () => _trackHostOperation(() => now()),
       })
       ;
     } catch (err) {
@@ -4563,6 +5139,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable10 = [T_FLAG, 0];
   handleTable10._createdReps = new Set();
+  handleTable10._componentIdx = 0;
   
   
   const captureTable10= new Map();
@@ -4628,14 +5205,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => new OutgoingRequest(rsc0),
+        fn: () => _trackHostOperation(() => new OutgoingRequest(rsc0)),
       })
       ;
     } catch (err) {
@@ -4678,6 +5255,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable11 = [T_FLAG, 0];
   handleTable11._createdReps = new Set();
+  handleTable11._componentIdx = 0;
   
   
   const captureTable11= new Map();
@@ -4729,14 +5307,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => new RequestOptions(),
+        fn: () => _trackHostOperation(() => new RequestOptions()),
       })
       ;
     } catch (err) {
@@ -4846,13 +5424,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet4 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setConnectTimeout(variant3),
+        fn: () => _trackHostOperation(() => rsc0.setConnectTimeout(variant3)),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -4974,13 +5552,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet4 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setFirstByteTimeout(variant3),
+        fn: () => _trackHostOperation(() => rsc0.setFirstByteTimeout(variant3)),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -5102,13 +5680,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet4 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setBetweenBytesTimeout(variant3),
+        fn: () => _trackHostOperation(() => rsc0.setBetweenBytesTimeout(variant3)),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -5163,6 +5741,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable2 = [T_FLAG, 0];
   handleTable2._createdReps = new Set();
+  handleTable2._componentIdx = 0;
   
   
   const captureTable2= new Map();
@@ -5225,14 +5804,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.subscribe(),
+        fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
     } catch (err) {
@@ -5285,6 +5864,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable3 = [T_FLAG, 0];
   handleTable3._createdReps = new Set();
+  handleTable3._componentIdx = 0;
   
   
   const captureTable3= new Map();
@@ -5347,14 +5927,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.subscribe(),
+        fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
     } catch (err) {
@@ -5460,14 +6040,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.ready(),
+        fn: () => _trackHostOperation(() => rsc0.ready()),
       })
       ;
     } catch (err) {
@@ -5551,14 +6131,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => new Fields(),
+        fn: () => _trackHostOperation(() => new Fields()),
       })
       ;
     } catch (err) {
@@ -5663,14 +6243,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => exit(variant0),
+        fn: () => _trackHostOperation(() => exit(variant0)),
       })
       ;
     } catch (err) {
@@ -5763,14 +6343,18 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     
     try {
       ret = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.block(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.block();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
     } catch (err) {
@@ -5854,14 +6438,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getStdin(),
+        fn: () => _trackHostOperation(() => getStdin()),
       })
       ;
     } catch (err) {
@@ -5946,14 +6530,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getStdout(),
+        fn: () => _trackHostOperation(() => getStdout()),
       })
       ;
     } catch (err) {
@@ -6038,14 +6622,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getStderr(),
+        fn: () => _trackHostOperation(() => getStderr()),
       })
       ;
     } catch (err) {
@@ -6090,25 +6674,8 @@ let gen = (function* _initGenerator () {
   let realloc0;
   let realloc0Async;
   
-  const _trampoline37 = async function(arg0, arg1, arg2, arg3) {
-    let variant1;
-    switch (arg0) {
-      case 0: {
-        variant1 = undefined;
-        break;
-      }
-      case 1: {
-        var ptr0 = arg1;
-        var len0 = arg2;
-        var result0 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr0, len0));
-        variant1 = result0;
-        break;
-      }
-      default: {
-        throw new TypeError('invalid variant discriminant for option');
-      }
-    }
-    _debugLog('[iface="component:aws-cli/providers", function="provide-region"] [Instruction::CallInterface] (sync, @ enter)');
+  const _trampoline37 = function(arg0) {
+    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
@@ -6119,7 +6686,7 @@ let gen = (function* _initGenerator () {
       const results = createNewCurrentTask({
         componentIdx: -1,
         isAsync: false,
-        entryFnName: 'provideRegion',
+        entryFnName: 'insecureSeed',
         getCallbackFn: () => null,
         callbackFnName: null,
         errHandling: 'none',
@@ -6150,29 +6717,20 @@ let gen = (function* _initGenerator () {
       }
     }
     
-    
-    const started = await task.enter({ isHost: hostProvided });
-    if (!started) {
-      _debugLog('[Instruction::CallInterface] failed to enter task', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-      });
-      throw new Error("failed to enter task");
-    }
-    
-    
+    const started = task.enterSync();
     let ret;
     
+    
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => provideRegion(variant1),
+        fn: () => _trackHostOperation(() => insecureSeed()),
       })
       ;
     } catch (err) {
       
-      _debugLog('[Instruction::CallInterface] error during async call', {
+      _debugLog('[Instruction::CallInterface] error during sync call', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
         err,
@@ -6181,26 +6739,15 @@ let gen = (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
-    var variant3 = ret;
-    if (variant3 === null || variant3=== undefined) {
-      dataView(memory0).setInt8(arg3 + 0, 0, true);
-    } else {
-      const e = variant3;
-      dataView(memory0).setInt8(arg3 + 0, 1, true);
-      
-      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
-      var ptr2= encodeRes.ptr;
-      var len2 = encodeRes.len;
-      
-      dataView(memory0).setUint32(arg3 + 8, len2, true);
-      dataView(memory0).setUint32(arg3 + 4, ptr2, true);
-    }
-    _debugLog('[iface="component:aws-cli/providers", function="provide-region"][Instruction::Return]', {
-      funcName: 'provide-region',
+    var [tuple0_0, tuple0_1] = ret;
+    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 0, toUint64(tuple0_0), true);
+    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 8, toUint64(tuple0_1), true);
+    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"][Instruction::Return]', {
+      funcName: 'insecure-seed',
       paramCount: 0,
       async: false,
       postReturn: false
@@ -6208,8 +6755,7 @@ let gen = (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline37.fnName = 'component:aws-cli/providers#provideRegion';
-  _trampoline37.manuallyAsync = true;
+  _trampoline37.fnName = 'wasi:random/insecure-seed@0.2.12#insecureSeed';
   
   const _trampoline38 = async function(arg0, arg1, arg2, arg3) {
     let variant1;
@@ -6219,7 +6765,7 @@ let gen = (function* _initGenerator () {
         break;
       }
       case 1: {
-        var ptr0 = arg1;
+        var ptr0 = (arg1 >>> 0) >>> 0;
         var len0 = arg2;
         var result0 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr0, len0));
         variant1 = result0;
@@ -6281,13 +6827,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet2 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => provideCredentials(variant1),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = provideCredentials(variant1);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet2 !== null && typeof hostRet2 === 'object' && (hostRet2.tag === 'ok' || hostRet2.tag === 'err')
@@ -6302,87 +6852,87 @@ let gen = (function* _initGenerator () {
     switch (variant13.tag) {
       case 'ok': {
         const e = variant13.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         var {accessKeyId: v3_0, secretAccessKey: v3_1, sessionToken: v3_2, expiresAfter: v3_3, accountId: v3_4 } = e;
         
         var encodeRes = _utf8AllocateAndEncode(v3_0, realloc0, memory0);
         var ptr4= encodeRes.ptr;
         var len4 = encodeRes.len;
         
-        dataView(memory0).setUint32(arg3 + 12, len4, true);
-        dataView(memory0).setUint32(arg3 + 8, ptr4, true);
+        dataView(memory0).setUint32(((arg3 >>> 0)) + 12, len4, true);
+        dataView(memory0).setUint32(((arg3 >>> 0)) + 8, ptr4, true);
         
         var encodeRes = _utf8AllocateAndEncode(v3_1, realloc0, memory0);
         var ptr5= encodeRes.ptr;
         var len5 = encodeRes.len;
         
-        dataView(memory0).setUint32(arg3 + 20, len5, true);
-        dataView(memory0).setUint32(arg3 + 16, ptr5, true);
+        dataView(memory0).setUint32(((arg3 >>> 0)) + 20, len5, true);
+        dataView(memory0).setUint32(((arg3 >>> 0)) + 16, ptr5, true);
         var variant7 = v3_2;
         if (variant7 === null || variant7=== undefined) {
-          dataView(memory0).setInt8(arg3 + 24, 0, true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 24, 0, true);
         } else {
           const e = variant7;
-          dataView(memory0).setInt8(arg3 + 24, 1, true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 24, 1, true);
           
           var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
           var ptr6= encodeRes.ptr;
           var len6 = encodeRes.len;
           
-          dataView(memory0).setUint32(arg3 + 32, len6, true);
-          dataView(memory0).setUint32(arg3 + 28, ptr6, true);
+          dataView(memory0).setUint32(((arg3 >>> 0)) + 32, len6, true);
+          dataView(memory0).setUint32(((arg3 >>> 0)) + 28, ptr6, true);
         }
         var variant8 = v3_3;
         if (variant8 === null || variant8=== undefined) {
-          dataView(memory0).setInt8(arg3 + 40, 0, true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 40, 0, true);
         } else {
           const e = variant8;
-          dataView(memory0).setInt8(arg3 + 40, 1, true);
-          dataView(memory0).setBigInt64(arg3 + 48, toUint64(e), true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 40, 1, true);
+          dataView(memory0).setBigInt64(((arg3 >>> 0)) + 48, toUint64(e), true);
         }
         var variant10 = v3_4;
         if (variant10 === null || variant10=== undefined) {
-          dataView(memory0).setInt8(arg3 + 56, 0, true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 56, 0, true);
         } else {
           const e = variant10;
-          dataView(memory0).setInt8(arg3 + 56, 1, true);
+          dataView(memory0).setInt8(((arg3 >>> 0)) + 56, 1, true);
           
           var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
           var ptr9= encodeRes.ptr;
           var len9 = encodeRes.len;
           
-          dataView(memory0).setUint32(arg3 + 64, len9, true);
-          dataView(memory0).setUint32(arg3 + 60, ptr9, true);
+          dataView(memory0).setUint32(((arg3 >>> 0)) + 64, len9, true);
+          dataView(memory0).setUint32(((arg3 >>> 0)) + 60, ptr9, true);
         }
         
         break;
       }
       case 'err': {
         const e = variant13.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var variant12 = e;
         switch (variant12.tag) {
           case 'credentials-not-loaded': {
-            dataView(memory0).setInt8(arg3 + 8, 0, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 0, true);
             break;
           }
           case 'provider-timed-out': {
             const e = variant12.val;
-            dataView(memory0).setInt8(arg3 + 8, 1, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 1, true);
             var {duration: v11_0 } = e;
-            dataView(memory0).setBigInt64(arg3 + 16, toUint64(v11_0), true);
+            dataView(memory0).setBigInt64(((arg3 >>> 0)) + 16, toUint64(v11_0), true);
             break;
           }
           case 'invalid-configuration': {
-            dataView(memory0).setInt8(arg3 + 8, 2, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 2, true);
             break;
           }
           case 'provider-error': {
-            dataView(memory0).setInt8(arg3 + 8, 3, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 3, true);
             break;
           }
           case 'unhandled': {
-            dataView(memory0).setInt8(arg3 + 8, 4, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 4, true);
             break;
           }
           default: {
@@ -6409,7 +6959,132 @@ let gen = (function* _initGenerator () {
   _trampoline38.fnName = 'component:aws-cli/providers#provideCredentials';
   _trampoline38.manuallyAsync = true;
   
-  const _trampoline39 = function(arg0) {
+  const _trampoline39 = async function(arg0, arg1, arg2, arg3) {
+    let variant1;
+    switch (arg0) {
+      case 0: {
+        variant1 = undefined;
+        break;
+      }
+      case 1: {
+        var ptr0 = (arg1 >>> 0) >>> 0;
+        var len0 = arg2;
+        var result0 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr0, len0));
+        variant1 = result0;
+        break;
+      }
+      default: {
+        throw new TypeError('invalid variant discriminant for option');
+      }
+    }
+    _debugLog('[iface="component:aws-cli/providers", function="provide-region"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'provideRegion',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    
+    const started = await task.enter({ isHost: hostProvided });
+    if (!started) {
+      _debugLog('[Instruction::CallInterface] failed to enter task', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+      });
+      throw new Error("failed to enter task");
+    }
+    
+    let ret;
+    
+    
+    try {
+      ret = await  _withGlobalCurrentTaskMetaAsync({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = provideRegion(variant1);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during async call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      return task.completionPromise();
+      
+    }
+    
+    var variant3 = ret;
+    if (variant3 === null || variant3=== undefined) {
+      dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
+    } else {
+      const e = variant3;
+      dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
+      
+      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+      var ptr2= encodeRes.ptr;
+      var len2 = encodeRes.len;
+      
+      dataView(memory0).setUint32(((arg3 >>> 0)) + 8, len2, true);
+      dataView(memory0).setUint32(((arg3 >>> 0)) + 4, ptr2, true);
+    }
+    _debugLog('[iface="component:aws-cli/providers", function="provide-region"][Instruction::Return]', {
+      funcName: 'provide-region',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline39.fnName = 'component:aws-cli/providers#provideRegion';
+  _trampoline39.manuallyAsync = true;
+  
+  const _trampoline40 = function(arg0) {
     _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-arguments"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
@@ -6453,14 +7128,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getArguments(),
+        fn: () => _trackHostOperation(() => getArguments()),
       })
       ;
     } catch (err) {
@@ -6481,6 +7156,7 @@ let gen = (function* _initGenerator () {
     var vec1 = ret;
     var len1 = vec1.length;
     var result1 = realloc0(0, 0, 4, len1 * 8);
+    if (result1 < 0 || len1 < 0 || len1 > 33554431 || result1 > memory0.buffer.byteLength || len1 > Math.floor((memory0.buffer.byteLength - result1) / 8)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec1.length; i++) {
       const e = vec1[i];
       const base = result1 + i * 8;
@@ -6488,11 +7164,11 @@ let gen = (function* _initGenerator () {
       var ptr0= encodeRes.ptr;
       var len0 = encodeRes.len;
       
-      dataView(memory0).setUint32(base + 4, len0, true);
-      dataView(memory0).setUint32(base + 0, ptr0, true);
+      dataView(memory0).setUint32((base) + 4, len0, true);
+      dataView(memory0).setUint32((base) + 0, ptr0, true);
     }
-    dataView(memory0).setUint32(arg0 + 4, len1, true);
-    dataView(memory0).setUint32(arg0 + 0, result1, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 4, len1, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 0, result1, true);
     _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-arguments"][Instruction::Return]', {
       funcName: 'get-arguments',
       paramCount: 0,
@@ -6502,93 +7178,11 @@ let gen = (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline39.fnName = 'wasi:cli/environment@0.2.12#getArguments';
-  
-  const _trampoline40 = function(arg0) {
-    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'insecureSeed',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => insecureSeed(),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-        err,
-      });
-      getOrCreateAsyncState(0).markTrapped(err);
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    var [tuple0_0, tuple0_1] = ret;
-    dataView(memory0).setBigInt64(arg0 + 0, toUint64(tuple0_0), true);
-    dataView(memory0).setBigInt64(arg0 + 8, toUint64(tuple0_1), true);
-    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"][Instruction::Return]', {
-      funcName: 'insecure-seed',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline40.fnName = 'wasi:random/insecure-seed@0.2.12#insecureSeed';
+  _trampoline40.fnName = 'wasi:cli/environment@0.2.12#getArguments';
   
   const handleTable4 = [T_FLAG, 0];
   handleTable4._createdReps = new Set();
+  handleTable4._componentIdx = 0;
   
   
   const captureTable4= new Map();
@@ -6651,13 +7245,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.write(),
+        fn: () => _trackHostOperation(() => rsc0.write()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -6682,7 +7276,7 @@ let gen = (function* _initGenerator () {
     switch (variant5.tag) {
       case 'ok': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
@@ -6694,13 +7288,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         
         break;
       }
@@ -6775,13 +7369,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.stream(),
+        fn: () => _trackHostOperation(() => rsc0.stream()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -6806,7 +7400,7 @@ let gen = (function* _initGenerator () {
     switch (variant5.tag) {
       case 'ok': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof InputStream)) {
           throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
@@ -6818,13 +7412,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable3, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         
         break;
       }
@@ -6899,14 +7493,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.get(),
+        fn: () => _trackHostOperation(() => rsc0.get()),
       })
       ;
     } catch (err) {
@@ -6936,20 +7530,20 @@ let gen = (function* _initGenerator () {
     curResourceBorrows = [];
     var variant44 = ret;
     if (variant44 === null || variant44=== undefined) {
-      dataView(memory0).setInt8(arg1 + 0, 0, true);
+      dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
     } else {
       const e = variant44;
-      dataView(memory0).setInt8(arg1 + 0, 1, true);
+      dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
       var variant43 = e;
       switch (variant43.tag) {
         case 'ok': {
           const e = variant43.val;
-          dataView(memory0).setInt8(arg1 + 8, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 0, true);
           var variant42 = e;
           switch (variant42.tag) {
             case 'ok': {
               const e = variant42.val;
-              dataView(memory0).setInt8(arg1 + 16, 0, true);
+              dataView(memory0).setInt8(((arg1 >>> 0)) + 16, 0, true);
               
               if (!(e instanceof IncomingResponse)) {
                 throw new TypeError('Resource error: Not a valid \"IncomingResponse\" resource.');
@@ -6961,418 +7555,418 @@ let gen = (function* _initGenerator () {
                 handle3 = rscTableCreateOwn(handleTable9, rep);
               }
               
-              dataView(memory0).setInt32(arg1 + 24, handle3, true);
+              dataView(memory0).setInt32(((arg1 >>> 0)) + 24, handle3, true);
               
               break;
             }
             case 'err': {
               const e = variant42.val;
-              dataView(memory0).setInt8(arg1 + 16, 1, true);
+              dataView(memory0).setInt8(((arg1 >>> 0)) + 16, 1, true);
               var variant41 = e;
               switch (variant41.tag) {
                 case 'DNS-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 0, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 0, true);
                   break;
                 }
                 case 'DNS-error': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 1, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 1, true);
                   var {rcode: v4_0, infoCode: v4_1 } = e;
                   var variant6 = v4_0;
                   if (variant6 === null || variant6=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant6;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr5= encodeRes.ptr;
                     var len5 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len5, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr5, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len5, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr5, true);
                   }
                   var variant7 = v4_1;
                   if (variant7 === null || variant7=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant7;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt16(arg1 + 46, toUint16(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt16(((arg1 >>> 0)) + 46, toUint16(e), true);
                   }
                   break;
                 }
                 case 'destination-not-found': {
-                  dataView(memory0).setInt8(arg1 + 24, 2, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 2, true);
                   break;
                 }
                 case 'destination-unavailable': {
-                  dataView(memory0).setInt8(arg1 + 24, 3, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 3, true);
                   break;
                 }
                 case 'destination-IP-prohibited': {
-                  dataView(memory0).setInt8(arg1 + 24, 4, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 4, true);
                   break;
                 }
                 case 'destination-IP-unroutable': {
-                  dataView(memory0).setInt8(arg1 + 24, 5, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 5, true);
                   break;
                 }
                 case 'connection-refused': {
-                  dataView(memory0).setInt8(arg1 + 24, 6, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 6, true);
                   break;
                 }
                 case 'connection-terminated': {
-                  dataView(memory0).setInt8(arg1 + 24, 7, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 7, true);
                   break;
                 }
                 case 'connection-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 8, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 8, true);
                   break;
                 }
                 case 'connection-read-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 9, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 9, true);
                   break;
                 }
                 case 'connection-write-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 10, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 10, true);
                   break;
                 }
                 case 'connection-limit-reached': {
-                  dataView(memory0).setInt8(arg1 + 24, 11, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 11, true);
                   break;
                 }
                 case 'TLS-protocol-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 12, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 12, true);
                   break;
                 }
                 case 'TLS-certificate-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 13, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 13, true);
                   break;
                 }
                 case 'TLS-alert-received': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 14, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 14, true);
                   var {alertId: v8_0, alertMessage: v8_1 } = e;
                   var variant9 = v8_0;
                   if (variant9 === null || variant9=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant9;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt8(arg1 + 33, toUint8(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 33, toUint8(e), true);
                   }
                   var variant11 = v8_1;
                   if (variant11 === null || variant11=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 36, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 0, true);
                   } else {
                     const e = variant11;
-                    dataView(memory0).setInt8(arg1 + 36, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr10= encodeRes.ptr;
                     var len10 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 44, len10, true);
-                    dataView(memory0).setUint32(arg1 + 40, ptr10, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 44, len10, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, ptr10, true);
                   }
                   break;
                 }
                 case 'HTTP-request-denied': {
-                  dataView(memory0).setInt8(arg1 + 24, 15, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 15, true);
                   break;
                 }
                 case 'HTTP-request-length-required': {
-                  dataView(memory0).setInt8(arg1 + 24, 16, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 16, true);
                   break;
                 }
                 case 'HTTP-request-body-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 17, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 17, true);
                   var variant12 = e;
                   if (variant12 === null || variant12=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant12;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setBigInt64(arg1 + 40, toUint64(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setBigInt64(((arg1 >>> 0)) + 40, toUint64(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-method-invalid': {
-                  dataView(memory0).setInt8(arg1 + 24, 18, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 18, true);
                   break;
                 }
                 case 'HTTP-request-URI-invalid': {
-                  dataView(memory0).setInt8(arg1 + 24, 19, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 19, true);
                   break;
                 }
                 case 'HTTP-request-URI-too-long': {
-                  dataView(memory0).setInt8(arg1 + 24, 20, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 20, true);
                   break;
                 }
                 case 'HTTP-request-header-section-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 21, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 21, true);
                   var variant13 = e;
                   if (variant13 === null || variant13=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant13;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-header-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 22, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 22, true);
                   var variant18 = e;
                   if (variant18 === null || variant18=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant18;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     var {fieldName: v14_0, fieldSize: v14_1 } = e;
                     var variant16 = v14_0;
                     if (variant16 === null || variant16=== undefined) {
-                      dataView(memory0).setInt8(arg1 + 36, 0, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 0, true);
                     } else {
                       const e = variant16;
-                      dataView(memory0).setInt8(arg1 + 36, 1, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                       
                       var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                       var ptr15= encodeRes.ptr;
                       var len15 = encodeRes.len;
                       
-                      dataView(memory0).setUint32(arg1 + 44, len15, true);
-                      dataView(memory0).setUint32(arg1 + 40, ptr15, true);
+                      dataView(memory0).setUint32(((arg1 >>> 0)) + 44, len15, true);
+                      dataView(memory0).setUint32(((arg1 >>> 0)) + 40, ptr15, true);
                     }
                     var variant17 = v14_1;
                     if (variant17 === null || variant17=== undefined) {
-                      dataView(memory0).setInt8(arg1 + 48, 0, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 48, 0, true);
                     } else {
                       const e = variant17;
-                      dataView(memory0).setInt8(arg1 + 48, 1, true);
-                      dataView(memory0).setInt32(arg1 + 52, toUint32(e), true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 48, 1, true);
+                      dataView(memory0).setInt32(((arg1 >>> 0)) + 52, toUint32(e), true);
                     }
                   }
                   break;
                 }
                 case 'HTTP-request-trailer-section-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 23, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 23, true);
                   var variant19 = e;
                   if (variant19 === null || variant19=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant19;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-trailer-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 24, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 24, true);
                   var {fieldName: v20_0, fieldSize: v20_1 } = e;
                   var variant22 = v20_0;
                   if (variant22 === null || variant22=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant22;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr21= encodeRes.ptr;
                     var len21 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len21, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr21, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len21, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr21, true);
                   }
                   var variant23 = v20_1;
                   if (variant23 === null || variant23=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant23;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-incomplete': {
-                  dataView(memory0).setInt8(arg1 + 24, 25, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 25, true);
                   break;
                 }
                 case 'HTTP-response-header-section-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 26, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 26, true);
                   var variant24 = e;
                   if (variant24 === null || variant24=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant24;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-header-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 27, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 27, true);
                   var {fieldName: v25_0, fieldSize: v25_1 } = e;
                   var variant27 = v25_0;
                   if (variant27 === null || variant27=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant27;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr26= encodeRes.ptr;
                     var len26 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len26, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr26, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len26, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr26, true);
                   }
                   var variant28 = v25_1;
                   if (variant28 === null || variant28=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant28;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-body-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 28, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 28, true);
                   var variant29 = e;
                   if (variant29 === null || variant29=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant29;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setBigInt64(arg1 + 40, toUint64(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setBigInt64(((arg1 >>> 0)) + 40, toUint64(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-trailer-section-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 29, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 29, true);
                   var variant30 = e;
                   if (variant30 === null || variant30=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant30;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-trailer-size': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 30, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 30, true);
                   var {fieldName: v31_0, fieldSize: v31_1 } = e;
                   var variant33 = v31_0;
                   if (variant33 === null || variant33=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant33;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr32= encodeRes.ptr;
                     var len32 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len32, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr32, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len32, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr32, true);
                   }
                   var variant34 = v31_1;
                   if (variant34 === null || variant34=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant34;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-transfer-coding': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 31, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 31, true);
                   var variant36 = e;
                   if (variant36 === null || variant36=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant36;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr35= encodeRes.ptr;
                     var len35 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len35, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr35, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len35, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr35, true);
                   }
                   break;
                 }
                 case 'HTTP-response-content-coding': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 32, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 32, true);
                   var variant38 = e;
                   if (variant38 === null || variant38=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant38;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr37= encodeRes.ptr;
                     var len37 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len37, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr37, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len37, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr37, true);
                   }
                   break;
                 }
                 case 'HTTP-response-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 33, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 33, true);
                   break;
                 }
                 case 'HTTP-upgrade-failed': {
-                  dataView(memory0).setInt8(arg1 + 24, 34, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 34, true);
                   break;
                 }
                 case 'HTTP-protocol-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 35, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 35, true);
                   break;
                 }
                 case 'loop-detected': {
-                  dataView(memory0).setInt8(arg1 + 24, 36, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 36, true);
                   break;
                 }
                 case 'configuration-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 37, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 37, true);
                   break;
                 }
                 case 'internal-error': {
                   const e = variant41.val;
-                  dataView(memory0).setInt8(arg1 + 24, 38, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 38, true);
                   var variant40 = e;
                   if (variant40 === null || variant40=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant40;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr39= encodeRes.ptr;
                     var len39 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len39, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr39, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len39, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr39, true);
                   }
                   break;
                 }
@@ -7393,7 +7987,7 @@ let gen = (function* _initGenerator () {
         }
         case 'err': {
           const e = variant43.val;
-          dataView(memory0).setInt8(arg1 + 8, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 1, true);
           
           break;
         }
@@ -7469,13 +8063,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.consume(),
+        fn: () => _trackHostOperation(() => rsc0.consume()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -7500,7 +8094,7 @@ let gen = (function* _initGenerator () {
     switch (variant5.tag) {
       case 'ok': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof IncomingBody)) {
           throw new TypeError('Resource error: Not a valid \"IncomingBody\" resource.');
@@ -7512,13 +8106,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable5, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         
         break;
       }
@@ -7607,7 +8201,7 @@ let gen = (function* _initGenerator () {
         break;
       }
       case 9: {
-        var ptr3 = arg2;
+        var ptr3 = (arg2 >>> 0) >>> 0;
         var len3 = arg3;
         var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
         variant4= {
@@ -7663,13 +8257,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet5 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setMethod(variant4),
+        fn: () => _trackHostOperation(() => rsc0.setMethod(variant4)),
       })
       ;
       ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
@@ -7756,7 +8350,7 @@ let gen = (function* _initGenerator () {
             break;
           }
           case 2: {
-            var ptr3 = arg3;
+            var ptr3 = (arg3 >>> 0) >>> 0;
             var len3 = arg4;
             var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
             variant4= {
@@ -7819,13 +8413,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet6 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setScheme(variant5),
+        fn: () => _trackHostOperation(() => rsc0.setScheme(variant5)),
       })
       ;
       ret = hostRet6 !== null && typeof hostRet6 === 'object' && (hostRet6.tag === 'ok' || hostRet6.tag === 'err')
@@ -7897,7 +8491,7 @@ let gen = (function* _initGenerator () {
         break;
       }
       case 1: {
-        var ptr3 = arg2;
+        var ptr3 = (arg2 >>> 0) >>> 0;
         var len3 = arg3;
         var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
         variant4 = result3;
@@ -7950,13 +8544,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet5 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setAuthority(variant4),
+        fn: () => _trackHostOperation(() => rsc0.setAuthority(variant4)),
       })
       ;
       ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
@@ -8028,7 +8622,7 @@ let gen = (function* _initGenerator () {
         break;
       }
       case 1: {
-        var ptr3 = arg2;
+        var ptr3 = (arg2 >>> 0) >>> 0;
         var len3 = arg3;
         var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
         variant4 = result3;
@@ -8081,13 +8675,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet5 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.setPathWithQuery(variant4),
+        fn: () => _trackHostOperation(() => rsc0.setPathWithQuery(variant4)),
       })
       ;
       ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
@@ -8195,13 +8789,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.body(),
+        fn: () => _trackHostOperation(() => rsc0.body()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -8226,7 +8820,7 @@ let gen = (function* _initGenerator () {
     switch (variant5.tag) {
       case 'ok': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof OutgoingBody)) {
           throw new TypeError('Resource error: Not a valid \"OutgoingBody\" resource.');
@@ -8238,13 +8832,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable4, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant5.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         
         break;
       }
@@ -8319,14 +8913,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.get(),
+        fn: () => _trackHostOperation(() => rsc0.get()),
       })
       ;
     } catch (err) {
@@ -8356,26 +8950,26 @@ let gen = (function* _initGenerator () {
     curResourceBorrows = [];
     var variant45 = ret;
     if (variant45 === null || variant45=== undefined) {
-      dataView(memory0).setInt8(arg1 + 0, 0, true);
+      dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
     } else {
       const e = variant45;
-      dataView(memory0).setInt8(arg1 + 0, 1, true);
+      dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
       var variant44 = e;
       switch (variant44.tag) {
         case 'ok': {
           const e = variant44.val;
-          dataView(memory0).setInt8(arg1 + 8, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 0, true);
           var variant43 = e;
           switch (variant43.tag) {
             case 'ok': {
               const e = variant43.val;
-              dataView(memory0).setInt8(arg1 + 16, 0, true);
+              dataView(memory0).setInt8(((arg1 >>> 0)) + 16, 0, true);
               var variant4 = e;
               if (variant4 === null || variant4=== undefined) {
-                dataView(memory0).setInt8(arg1 + 24, 0, true);
+                dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 0, true);
               } else {
                 const e = variant4;
-                dataView(memory0).setInt8(arg1 + 24, 1, true);
+                dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 1, true);
                 
                 if (!(e instanceof Fields)) {
                   throw new TypeError('Resource error: Not a valid \"Trailers\" resource.');
@@ -8387,419 +8981,419 @@ let gen = (function* _initGenerator () {
                   handle3 = rscTableCreateOwn(handleTable7, rep);
                 }
                 
-                dataView(memory0).setInt32(arg1 + 28, handle3, true);
+                dataView(memory0).setInt32(((arg1 >>> 0)) + 28, handle3, true);
               }
               
               break;
             }
             case 'err': {
               const e = variant43.val;
-              dataView(memory0).setInt8(arg1 + 16, 1, true);
+              dataView(memory0).setInt8(((arg1 >>> 0)) + 16, 1, true);
               var variant42 = e;
               switch (variant42.tag) {
                 case 'DNS-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 0, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 0, true);
                   break;
                 }
                 case 'DNS-error': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 1, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 1, true);
                   var {rcode: v5_0, infoCode: v5_1 } = e;
                   var variant7 = v5_0;
                   if (variant7 === null || variant7=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant7;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr6= encodeRes.ptr;
                     var len6 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len6, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr6, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len6, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr6, true);
                   }
                   var variant8 = v5_1;
                   if (variant8 === null || variant8=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant8;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt16(arg1 + 46, toUint16(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt16(((arg1 >>> 0)) + 46, toUint16(e), true);
                   }
                   break;
                 }
                 case 'destination-not-found': {
-                  dataView(memory0).setInt8(arg1 + 24, 2, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 2, true);
                   break;
                 }
                 case 'destination-unavailable': {
-                  dataView(memory0).setInt8(arg1 + 24, 3, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 3, true);
                   break;
                 }
                 case 'destination-IP-prohibited': {
-                  dataView(memory0).setInt8(arg1 + 24, 4, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 4, true);
                   break;
                 }
                 case 'destination-IP-unroutable': {
-                  dataView(memory0).setInt8(arg1 + 24, 5, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 5, true);
                   break;
                 }
                 case 'connection-refused': {
-                  dataView(memory0).setInt8(arg1 + 24, 6, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 6, true);
                   break;
                 }
                 case 'connection-terminated': {
-                  dataView(memory0).setInt8(arg1 + 24, 7, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 7, true);
                   break;
                 }
                 case 'connection-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 8, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 8, true);
                   break;
                 }
                 case 'connection-read-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 9, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 9, true);
                   break;
                 }
                 case 'connection-write-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 10, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 10, true);
                   break;
                 }
                 case 'connection-limit-reached': {
-                  dataView(memory0).setInt8(arg1 + 24, 11, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 11, true);
                   break;
                 }
                 case 'TLS-protocol-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 12, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 12, true);
                   break;
                 }
                 case 'TLS-certificate-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 13, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 13, true);
                   break;
                 }
                 case 'TLS-alert-received': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 14, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 14, true);
                   var {alertId: v9_0, alertMessage: v9_1 } = e;
                   var variant10 = v9_0;
                   if (variant10 === null || variant10=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant10;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt8(arg1 + 33, toUint8(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 33, toUint8(e), true);
                   }
                   var variant12 = v9_1;
                   if (variant12 === null || variant12=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 36, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 0, true);
                   } else {
                     const e = variant12;
-                    dataView(memory0).setInt8(arg1 + 36, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr11= encodeRes.ptr;
                     var len11 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 44, len11, true);
-                    dataView(memory0).setUint32(arg1 + 40, ptr11, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 44, len11, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, ptr11, true);
                   }
                   break;
                 }
                 case 'HTTP-request-denied': {
-                  dataView(memory0).setInt8(arg1 + 24, 15, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 15, true);
                   break;
                 }
                 case 'HTTP-request-length-required': {
-                  dataView(memory0).setInt8(arg1 + 24, 16, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 16, true);
                   break;
                 }
                 case 'HTTP-request-body-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 17, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 17, true);
                   var variant13 = e;
                   if (variant13 === null || variant13=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant13;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setBigInt64(arg1 + 40, toUint64(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setBigInt64(((arg1 >>> 0)) + 40, toUint64(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-method-invalid': {
-                  dataView(memory0).setInt8(arg1 + 24, 18, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 18, true);
                   break;
                 }
                 case 'HTTP-request-URI-invalid': {
-                  dataView(memory0).setInt8(arg1 + 24, 19, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 19, true);
                   break;
                 }
                 case 'HTTP-request-URI-too-long': {
-                  dataView(memory0).setInt8(arg1 + 24, 20, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 20, true);
                   break;
                 }
                 case 'HTTP-request-header-section-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 21, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 21, true);
                   var variant14 = e;
                   if (variant14 === null || variant14=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant14;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-header-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 22, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 22, true);
                   var variant19 = e;
                   if (variant19 === null || variant19=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant19;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     var {fieldName: v15_0, fieldSize: v15_1 } = e;
                     var variant17 = v15_0;
                     if (variant17 === null || variant17=== undefined) {
-                      dataView(memory0).setInt8(arg1 + 36, 0, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 0, true);
                     } else {
                       const e = variant17;
-                      dataView(memory0).setInt8(arg1 + 36, 1, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                       
                       var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                       var ptr16= encodeRes.ptr;
                       var len16 = encodeRes.len;
                       
-                      dataView(memory0).setUint32(arg1 + 44, len16, true);
-                      dataView(memory0).setUint32(arg1 + 40, ptr16, true);
+                      dataView(memory0).setUint32(((arg1 >>> 0)) + 44, len16, true);
+                      dataView(memory0).setUint32(((arg1 >>> 0)) + 40, ptr16, true);
                     }
                     var variant18 = v15_1;
                     if (variant18 === null || variant18=== undefined) {
-                      dataView(memory0).setInt8(arg1 + 48, 0, true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 48, 0, true);
                     } else {
                       const e = variant18;
-                      dataView(memory0).setInt8(arg1 + 48, 1, true);
-                      dataView(memory0).setInt32(arg1 + 52, toUint32(e), true);
+                      dataView(memory0).setInt8(((arg1 >>> 0)) + 48, 1, true);
+                      dataView(memory0).setInt32(((arg1 >>> 0)) + 52, toUint32(e), true);
                     }
                   }
                   break;
                 }
                 case 'HTTP-request-trailer-section-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 23, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 23, true);
                   var variant20 = e;
                   if (variant20 === null || variant20=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant20;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-request-trailer-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 24, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 24, true);
                   var {fieldName: v21_0, fieldSize: v21_1 } = e;
                   var variant23 = v21_0;
                   if (variant23 === null || variant23=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant23;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr22= encodeRes.ptr;
                     var len22 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len22, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr22, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len22, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr22, true);
                   }
                   var variant24 = v21_1;
                   if (variant24 === null || variant24=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant24;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-incomplete': {
-                  dataView(memory0).setInt8(arg1 + 24, 25, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 25, true);
                   break;
                 }
                 case 'HTTP-response-header-section-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 26, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 26, true);
                   var variant25 = e;
                   if (variant25 === null || variant25=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant25;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-header-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 27, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 27, true);
                   var {fieldName: v26_0, fieldSize: v26_1 } = e;
                   var variant28 = v26_0;
                   if (variant28 === null || variant28=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant28;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr27= encodeRes.ptr;
                     var len27 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len27, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr27, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len27, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr27, true);
                   }
                   var variant29 = v26_1;
                   if (variant29 === null || variant29=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant29;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-body-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 28, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 28, true);
                   var variant30 = e;
                   if (variant30 === null || variant30=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant30;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setBigInt64(arg1 + 40, toUint64(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setBigInt64(((arg1 >>> 0)) + 40, toUint64(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-trailer-section-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 29, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 29, true);
                   var variant31 = e;
                   if (variant31 === null || variant31=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant31;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
-                    dataView(memory0).setInt32(arg1 + 36, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 36, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-trailer-size': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 30, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 30, true);
                   var {fieldName: v32_0, fieldSize: v32_1 } = e;
                   var variant34 = v32_0;
                   if (variant34 === null || variant34=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant34;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr33= encodeRes.ptr;
                     var len33 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len33, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr33, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len33, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr33, true);
                   }
                   var variant35 = v32_1;
                   if (variant35 === null || variant35=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 44, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 0, true);
                   } else {
                     const e = variant35;
-                    dataView(memory0).setInt8(arg1 + 44, 1, true);
-                    dataView(memory0).setInt32(arg1 + 48, toUint32(e), true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 44, 1, true);
+                    dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(e), true);
                   }
                   break;
                 }
                 case 'HTTP-response-transfer-coding': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 31, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 31, true);
                   var variant37 = e;
                   if (variant37 === null || variant37=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant37;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr36= encodeRes.ptr;
                     var len36 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len36, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr36, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len36, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr36, true);
                   }
                   break;
                 }
                 case 'HTTP-response-content-coding': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 32, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 32, true);
                   var variant39 = e;
                   if (variant39 === null || variant39=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant39;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr38= encodeRes.ptr;
                     var len38 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len38, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr38, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len38, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr38, true);
                   }
                   break;
                 }
                 case 'HTTP-response-timeout': {
-                  dataView(memory0).setInt8(arg1 + 24, 33, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 33, true);
                   break;
                 }
                 case 'HTTP-upgrade-failed': {
-                  dataView(memory0).setInt8(arg1 + 24, 34, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 34, true);
                   break;
                 }
                 case 'HTTP-protocol-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 35, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 35, true);
                   break;
                 }
                 case 'loop-detected': {
-                  dataView(memory0).setInt8(arg1 + 24, 36, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 36, true);
                   break;
                 }
                 case 'configuration-error': {
-                  dataView(memory0).setInt8(arg1 + 24, 37, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 37, true);
                   break;
                 }
                 case 'internal-error': {
                   const e = variant42.val;
-                  dataView(memory0).setInt8(arg1 + 24, 38, true);
+                  dataView(memory0).setInt8(((arg1 >>> 0)) + 24, 38, true);
                   var variant41 = e;
                   if (variant41 === null || variant41=== undefined) {
-                    dataView(memory0).setInt8(arg1 + 32, 0, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
                   } else {
                     const e = variant41;
-                    dataView(memory0).setInt8(arg1 + 32, 1, true);
+                    dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
                     var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                     var ptr40= encodeRes.ptr;
                     var len40 = encodeRes.len;
                     
-                    dataView(memory0).setUint32(arg1 + 40, len40, true);
-                    dataView(memory0).setUint32(arg1 + 36, ptr40, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 40, len40, true);
+                    dataView(memory0).setUint32(((arg1 >>> 0)) + 36, ptr40, true);
                   }
                   break;
                 }
@@ -8820,7 +9414,7 @@ let gen = (function* _initGenerator () {
         }
         case 'err': {
           const e = variant44.val;
-          dataView(memory0).setInt8(arg1 + 8, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 1, true);
           
           break;
         }
@@ -8927,13 +9521,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet7 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => OutgoingBody.finish(rsc0, variant6),
+        fn: () => _trackHostOperation(() => OutgoingBody.finish(rsc0, variant6)),
       })
       ;
       ret = hostRet7 !== null && typeof hostRet7 === 'object' && (hostRet7.tag === 'ok' || hostRet7.tag === 'err')
@@ -8948,418 +9542,418 @@ let gen = (function* _initGenerator () {
     switch (variant46.tag) {
       case 'ok': {
         const e = variant46.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         
         break;
       }
       case 'err': {
         const e = variant46.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var variant45 = e;
         switch (variant45.tag) {
           case 'DNS-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 0, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 0, true);
             break;
           }
           case 'DNS-error': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 1, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 1, true);
             var {rcode: v8_0, infoCode: v8_1 } = e;
             var variant10 = v8_0;
             if (variant10 === null || variant10=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant10;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr9= encodeRes.ptr;
               var len9 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len9, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr9, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len9, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr9, true);
             }
             var variant11 = v8_1;
             if (variant11 === null || variant11=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant11;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt16(arg3 + 30, toUint16(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt16(((arg3 >>> 0)) + 30, toUint16(e), true);
             }
             break;
           }
           case 'destination-not-found': {
-            dataView(memory0).setInt8(arg3 + 8, 2, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 2, true);
             break;
           }
           case 'destination-unavailable': {
-            dataView(memory0).setInt8(arg3 + 8, 3, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 3, true);
             break;
           }
           case 'destination-IP-prohibited': {
-            dataView(memory0).setInt8(arg3 + 8, 4, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 4, true);
             break;
           }
           case 'destination-IP-unroutable': {
-            dataView(memory0).setInt8(arg3 + 8, 5, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 5, true);
             break;
           }
           case 'connection-refused': {
-            dataView(memory0).setInt8(arg3 + 8, 6, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 6, true);
             break;
           }
           case 'connection-terminated': {
-            dataView(memory0).setInt8(arg3 + 8, 7, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 7, true);
             break;
           }
           case 'connection-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 8, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 8, true);
             break;
           }
           case 'connection-read-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 9, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 9, true);
             break;
           }
           case 'connection-write-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 10, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 10, true);
             break;
           }
           case 'connection-limit-reached': {
-            dataView(memory0).setInt8(arg3 + 8, 11, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 11, true);
             break;
           }
           case 'TLS-protocol-error': {
-            dataView(memory0).setInt8(arg3 + 8, 12, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 12, true);
             break;
           }
           case 'TLS-certificate-error': {
-            dataView(memory0).setInt8(arg3 + 8, 13, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 13, true);
             break;
           }
           case 'TLS-alert-received': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 14, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 14, true);
             var {alertId: v12_0, alertMessage: v12_1 } = e;
             var variant13 = v12_0;
             if (variant13 === null || variant13=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant13;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt8(arg3 + 17, toUint8(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 17, toUint8(e), true);
             }
             var variant15 = v12_1;
             if (variant15 === null || variant15=== undefined) {
-              dataView(memory0).setInt8(arg3 + 20, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 0, true);
             } else {
               const e = variant15;
-              dataView(memory0).setInt8(arg3 + 20, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr14= encodeRes.ptr;
               var len14 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 28, len14, true);
-              dataView(memory0).setUint32(arg3 + 24, ptr14, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 28, len14, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, ptr14, true);
             }
             break;
           }
           case 'HTTP-request-denied': {
-            dataView(memory0).setInt8(arg3 + 8, 15, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 15, true);
             break;
           }
           case 'HTTP-request-length-required': {
-            dataView(memory0).setInt8(arg3 + 8, 16, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 16, true);
             break;
           }
           case 'HTTP-request-body-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 17, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 17, true);
             var variant16 = e;
             if (variant16 === null || variant16=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant16;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setBigInt64(arg3 + 24, toUint64(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setBigInt64(((arg3 >>> 0)) + 24, toUint64(e), true);
             }
             break;
           }
           case 'HTTP-request-method-invalid': {
-            dataView(memory0).setInt8(arg3 + 8, 18, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 18, true);
             break;
           }
           case 'HTTP-request-URI-invalid': {
-            dataView(memory0).setInt8(arg3 + 8, 19, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 19, true);
             break;
           }
           case 'HTTP-request-URI-too-long': {
-            dataView(memory0).setInt8(arg3 + 8, 20, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 20, true);
             break;
           }
           case 'HTTP-request-header-section-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 21, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 21, true);
             var variant17 = e;
             if (variant17 === null || variant17=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant17;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-request-header-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 22, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 22, true);
             var variant22 = e;
             if (variant22 === null || variant22=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant22;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               var {fieldName: v18_0, fieldSize: v18_1 } = e;
               var variant20 = v18_0;
               if (variant20 === null || variant20=== undefined) {
-                dataView(memory0).setInt8(arg3 + 20, 0, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 0, true);
               } else {
                 const e = variant20;
-                dataView(memory0).setInt8(arg3 + 20, 1, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
                 
                 var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                 var ptr19= encodeRes.ptr;
                 var len19 = encodeRes.len;
                 
-                dataView(memory0).setUint32(arg3 + 28, len19, true);
-                dataView(memory0).setUint32(arg3 + 24, ptr19, true);
+                dataView(memory0).setUint32(((arg3 >>> 0)) + 28, len19, true);
+                dataView(memory0).setUint32(((arg3 >>> 0)) + 24, ptr19, true);
               }
               var variant21 = v18_1;
               if (variant21 === null || variant21=== undefined) {
-                dataView(memory0).setInt8(arg3 + 32, 0, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 32, 0, true);
               } else {
                 const e = variant21;
-                dataView(memory0).setInt8(arg3 + 32, 1, true);
-                dataView(memory0).setInt32(arg3 + 36, toUint32(e), true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 32, 1, true);
+                dataView(memory0).setInt32(((arg3 >>> 0)) + 36, toUint32(e), true);
               }
             }
             break;
           }
           case 'HTTP-request-trailer-section-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 23, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 23, true);
             var variant23 = e;
             if (variant23 === null || variant23=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant23;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-request-trailer-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 24, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 24, true);
             var {fieldName: v24_0, fieldSize: v24_1 } = e;
             var variant26 = v24_0;
             if (variant26 === null || variant26=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant26;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr25= encodeRes.ptr;
               var len25 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len25, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr25, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len25, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr25, true);
             }
             var variant27 = v24_1;
             if (variant27 === null || variant27=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant27;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-incomplete': {
-            dataView(memory0).setInt8(arg3 + 8, 25, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 25, true);
             break;
           }
           case 'HTTP-response-header-section-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 26, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 26, true);
             var variant28 = e;
             if (variant28 === null || variant28=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant28;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-header-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 27, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 27, true);
             var {fieldName: v29_0, fieldSize: v29_1 } = e;
             var variant31 = v29_0;
             if (variant31 === null || variant31=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant31;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr30= encodeRes.ptr;
               var len30 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len30, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr30, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len30, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr30, true);
             }
             var variant32 = v29_1;
             if (variant32 === null || variant32=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant32;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-body-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 28, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 28, true);
             var variant33 = e;
             if (variant33 === null || variant33=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant33;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setBigInt64(arg3 + 24, toUint64(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setBigInt64(((arg3 >>> 0)) + 24, toUint64(e), true);
             }
             break;
           }
           case 'HTTP-response-trailer-section-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 29, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 29, true);
             var variant34 = e;
             if (variant34 === null || variant34=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant34;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-trailer-size': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 30, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 30, true);
             var {fieldName: v35_0, fieldSize: v35_1 } = e;
             var variant37 = v35_0;
             if (variant37 === null || variant37=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant37;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr36= encodeRes.ptr;
               var len36 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len36, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr36, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len36, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr36, true);
             }
             var variant38 = v35_1;
             if (variant38 === null || variant38=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant38;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-transfer-coding': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 31, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 31, true);
             var variant40 = e;
             if (variant40 === null || variant40=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant40;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr39= encodeRes.ptr;
               var len39 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len39, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr39, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len39, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr39, true);
             }
             break;
           }
           case 'HTTP-response-content-coding': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 32, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 32, true);
             var variant42 = e;
             if (variant42 === null || variant42=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant42;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr41= encodeRes.ptr;
               var len41 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len41, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr41, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len41, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr41, true);
             }
             break;
           }
           case 'HTTP-response-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 33, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 33, true);
             break;
           }
           case 'HTTP-upgrade-failed': {
-            dataView(memory0).setInt8(arg3 + 8, 34, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 34, true);
             break;
           }
           case 'HTTP-protocol-error': {
-            dataView(memory0).setInt8(arg3 + 8, 35, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 35, true);
             break;
           }
           case 'loop-detected': {
-            dataView(memory0).setInt8(arg3 + 8, 36, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 36, true);
             break;
           }
           case 'configuration-error': {
-            dataView(memory0).setInt8(arg3 + 8, 37, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 37, true);
             break;
           }
           case 'internal-error': {
             const e = variant45.val;
-            dataView(memory0).setInt8(arg3 + 8, 38, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 38, true);
             var variant44 = e;
             if (variant44 === null || variant44=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant44;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr43= encodeRes.ptr;
               var len43 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len43, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr43, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len43, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr43, true);
             }
             break;
           }
@@ -9386,144 +9980,7 @@ let gen = (function* _initGenerator () {
   }
   _trampoline51.fnName = 'wasi:http/types@0.2.12#OutgoingBody.finish';
   
-  const _trampoline52 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable7.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Fields.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    var ptr3 = arg1;
-    var len3 = arg2;
-    var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
-    var ptr4 = arg3;
-    var len4 = arg4;
-    if (ptr4 % 1 !== 0) throw new TypeError(`list pointer [${ptr4}] is not aligned to 1`);
-    var result4 = new Uint8Array(memory0.buffer.slice(ptr4, ptr4 + len4 * 1));
-    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.append"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'append',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'result-catch-handler',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    
-    let ret;
-    try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => rsc0.append(result3, result4),
-      })
-      ;
-      ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
-      ? hostRet5
-      : { tag: 'ok', val: hostRet5};
-    } catch (e) {
-      if (getOrCreateAsyncState(0).markTrapped(e)) { throw e; }
-      ret = { tag: 'err', val: getErrorPayload(e) };
-    }
-    
-    for (const entry of curResourceBorrows) {
-      const rsc = entry.rsc ?? entry;
-      if (entry.drop) {
-        if (rsc[symbolRscHandle]) {
-          entry.drop(rsc[symbolRscHandle]);
-        }
-      }
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    var variant7 = ret;
-    switch (variant7.tag) {
-      case 'ok': {
-        const e = variant7.val;
-        dataView(memory0).setInt8(arg5 + 0, 0, true);
-        
-        break;
-      }
-      case 'err': {
-        const e = variant7.val;
-        dataView(memory0).setInt8(arg5 + 0, 1, true);
-        var variant6 = e;
-        switch (variant6.tag) {
-          case 'invalid-syntax': {
-            dataView(memory0).setInt8(arg5 + 1, 0, true);
-            break;
-          }
-          case 'forbidden': {
-            dataView(memory0).setInt8(arg5 + 1, 1, true);
-            break;
-          }
-          case 'immutable': {
-            dataView(memory0).setInt8(arg5 + 1, 2, true);
-            break;
-          }
-          default: {
-            throw new TypeError(`invalid variant tag value \`${JSON.stringify(variant6.tag)}\` (received \`${variant6}\`) specified for \`HeaderError\``);
-          }
-        }
-        
-        break;
-      }
-      default: {
-        _debugLog("ERROR: invalid value (expected result as object with 'tag' member)", { value: variant7, valueType: typeof variant7});
-        throw new TypeError('invalid variant specified for result');
-      }
-    }
-    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.append"][Instruction::Return]', {
-      funcName: '[method]fields.append',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline52.fnName = 'wasi:http/types@0.2.12#append';
-  
-  const _trampoline53 = function(arg0, arg1) {
+  const _trampoline52 = function(arg0, arg1) {
     var handle1 = arg0;
     
     var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
@@ -9578,14 +10035,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.entries(),
+        fn: () => _trackHostOperation(() => rsc0.entries()),
       })
       ;
     } catch (err) {
@@ -9616,6 +10073,7 @@ let gen = (function* _initGenerator () {
     var vec6 = ret;
     var len6 = vec6.length;
     var result6 = realloc0(0, 0, 4, len6 * 16);
+    if (result6 < 0 || len6 < 0 || len6 > 16777215 || result6 > memory0.buffer.byteLength || len6 > Math.floor((memory0.buffer.byteLength - result6) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec6.length; i++) {
       const e = vec6[i];
       const base = result6 + i * 16;var [tuple3_0, tuple3_1] = e;
@@ -9624,8 +10082,8 @@ let gen = (function* _initGenerator () {
       var ptr4= encodeRes.ptr;
       var len4 = encodeRes.len;
       
-      dataView(memory0).setUint32(base + 4, len4, true);
-      dataView(memory0).setUint32(base + 0, ptr4, true);
+      dataView(memory0).setUint32((base) + 4, len4, true);
+      dataView(memory0).setUint32((base) + 0, ptr4, true);
       var val5 = tuple3_1;
       var len5 = Array.isArray(val5) ? val5.length : val5.byteLength;
       var ptr5 = realloc0(0, 0, 1, len5 * 1);
@@ -9648,11 +10106,11 @@ let gen = (function* _initGenerator () {
         out5.set(valData5);
       }
       
-      dataView(memory0).setUint32(base + 12, len5, true);
-      dataView(memory0).setUint32(base + 8, ptr5, true);
+      dataView(memory0).setUint32((base) + 12, len5, true);
+      dataView(memory0).setUint32((base) + 8, ptr5, true);
     }
-    dataView(memory0).setUint32(arg1 + 4, len6, true);
-    dataView(memory0).setUint32(arg1 + 0, result6, true);
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 4, len6, true);
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 0, result6, true);
     _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.entries"][Instruction::Return]', {
       funcName: '[method]fields.entries',
       paramCount: 0,
@@ -9662,10 +10120,149 @@ let gen = (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline53.fnName = 'wasi:http/types@0.2.12#entries';
+  _trampoline52.fnName = 'wasi:http/types@0.2.12#entries';
+  
+  const _trampoline53 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
+    var rsc0 = captureTable7.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Fields.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    var ptr3 = (arg1 >>> 0) >>> 0;
+    var len3 = arg2;
+    var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+    var ptr4 = (arg3 >>> 0) >>> 0;
+    var len4 = arg4;
+    if (ptr4 < 0 || len4 < 0 || len4 > 268435455 || ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
+    if (ptr4 % 1 !== 0) throw new TypeError(`list pointer [${ptr4}] is not aligned to 1`);
+    var result4 = new Uint8Array(memory0.buffer.slice(ptr4, ptr4 + len4 * 1));
+    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.append"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let subtask;
+    
+    const createTask = () => {
+      const results = createNewCurrentTask({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'append',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'result-catch-handler',
+        callingWasmExport: false,
+      });
+      task = results[0];
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentTaskMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    try {
+      const hostRet5 = _withGlobalCurrentTaskMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        fn: () => _trackHostOperation(() => rsc0.append(result3, result4)),
+      })
+      ;
+      ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
+      ? hostRet5
+      : { tag: 'ok', val: hostRet5};
+    } catch (e) {
+      if (getOrCreateAsyncState(0).markTrapped(e)) { throw e; }
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    
+    for (const entry of curResourceBorrows) {
+      const rsc = entry.rsc ?? entry;
+      if (entry.drop) {
+        if (rsc[symbolRscHandle]) {
+          entry.drop(rsc[symbolRscHandle]);
+        }
+      }
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    var variant7 = ret;
+    switch (variant7.tag) {
+      case 'ok': {
+        const e = variant7.val;
+        dataView(memory0).setInt8(((arg5 >>> 0)) + 0, 0, true);
+        
+        break;
+      }
+      case 'err': {
+        const e = variant7.val;
+        dataView(memory0).setInt8(((arg5 >>> 0)) + 0, 1, true);
+        var variant6 = e;
+        switch (variant6.tag) {
+          case 'invalid-syntax': {
+            dataView(memory0).setInt8(((arg5 >>> 0)) + 1, 0, true);
+            break;
+          }
+          case 'forbidden': {
+            dataView(memory0).setInt8(((arg5 >>> 0)) + 1, 1, true);
+            break;
+          }
+          case 'immutable': {
+            dataView(memory0).setInt8(((arg5 >>> 0)) + 1, 2, true);
+            break;
+          }
+          default: {
+            throw new TypeError(`invalid variant tag value \`${JSON.stringify(variant6.tag)}\` (received \`${variant6}\`) specified for \`HeaderError\``);
+          }
+        }
+        
+        break;
+      }
+      default: {
+        _debugLog("ERROR: invalid value (expected result as object with 'tag' member)", { value: variant7, valueType: typeof variant7});
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.append"][Instruction::Return]', {
+      funcName: '[method]fields.append',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline53.fnName = 'wasi:http/types@0.2.12#append';
   
   const handleTable1 = [T_FLAG, 0];
   handleTable1._createdReps = new Set();
+  handleTable1._componentIdx = 0;
   
   
   const captureTable1= new Map();
@@ -9739,13 +10336,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet6 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.splice(rsc3, BigInt.asUintN(64, BigInt(arg2))),
+        fn: () => _trackHostOperation(() => rsc0.splice(rsc3, BigInt.asUintN(64, BigInt(arg2)))),
       })
       ;
       ret = hostRet6 !== null && typeof hostRet6 === 'object' && (hostRet6.tag === 'ok' || hostRet6.tag === 'err')
@@ -9770,19 +10367,19 @@ let gen = (function* _initGenerator () {
     switch (variant9.tag) {
       case 'ok': {
         const e = variant9.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
-        dataView(memory0).setBigInt64(arg3 + 8, toUint64(e), true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
+        dataView(memory0).setBigInt64(((arg3 >>> 0)) + 8, toUint64(e), true);
         
         break;
       }
       case 'err': {
         const e = variant9.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var variant8 = e;
         switch (variant8.tag) {
           case 'last-operation-failed': {
             const e = variant8.val;
-            dataView(memory0).setInt8(arg3 + 8, 0, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 0, true);
             
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
@@ -9794,11 +10391,11 @@ let gen = (function* _initGenerator () {
               handle7 = rscTableCreateOwn(handleTable1, rep);
             }
             
-            dataView(memory0).setInt32(arg3 + 12, handle7, true);
+            dataView(memory0).setInt32(((arg3 >>> 0)) + 12, handle7, true);
             break;
           }
           case 'closed': {
-            dataView(memory0).setInt8(arg3 + 8, 1, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 1, true);
             break;
           }
           default: {
@@ -9879,13 +10476,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.checkWrite(),
+        fn: () => _trackHostOperation(() => rsc0.checkWrite()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -9910,19 +10507,19 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
-        dataView(memory0).setBigInt64(arg1 + 8, toUint64(e), true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
+        dataView(memory0).setBigInt64(((arg1 >>> 0)) + 8, toUint64(e), true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var variant5 = e;
         switch (variant5.tag) {
           case 'last-operation-failed': {
             const e = variant5.val;
-            dataView(memory0).setInt8(arg1 + 8, 0, true);
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 0, true);
             
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
@@ -9934,11 +10531,11 @@ let gen = (function* _initGenerator () {
               handle4 = rscTableCreateOwn(handleTable1, rep);
             }
             
-            dataView(memory0).setInt32(arg1 + 12, handle4, true);
+            dataView(memory0).setInt32(((arg1 >>> 0)) + 12, handle4, true);
             break;
           }
           case 'closed': {
-            dataView(memory0).setInt8(arg1 + 8, 1, true);
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 8, 1, true);
             break;
           }
           default: {
@@ -9976,8 +10573,9 @@ let gen = (function* _initGenerator () {
     }
     
     curResourceBorrows.push(rsc0);
-    var ptr3 = arg1;
+    var ptr3 = (arg1 >>> 0) >>> 0;
     var len3 = arg2;
+    if (ptr3 < 0 || len3 < 0 || len3 > 268435455 || ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     if (ptr3 % 1 !== 0) throw new TypeError(`list pointer [${ptr3}] is not aligned to 1`);
     var result3 = new Uint8Array(memory0.buffer.slice(ptr3, ptr3 + len3 * 1));
     _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]output-stream.write"] [Instruction::CallInterface] (sync, @ enter)');
@@ -10023,13 +10621,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet4 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.write(result3),
+        fn: () => _trackHostOperation(() => rsc0.write(result3)),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -10054,18 +10652,18 @@ let gen = (function* _initGenerator () {
     switch (variant7.tag) {
       case 'ok': {
         const e = variant7.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         
         break;
       }
       case 'err': {
         const e = variant7.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var variant6 = e;
         switch (variant6.tag) {
           case 'last-operation-failed': {
             const e = variant6.val;
-            dataView(memory0).setInt8(arg3 + 4, 0, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 4, 0, true);
             
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
@@ -10077,11 +10675,11 @@ let gen = (function* _initGenerator () {
               handle5 = rscTableCreateOwn(handleTable1, rep);
             }
             
-            dataView(memory0).setInt32(arg3 + 8, handle5, true);
+            dataView(memory0).setInt32(((arg3 >>> 0)) + 8, handle5, true);
             break;
           }
           case 'closed': {
-            dataView(memory0).setInt8(arg3 + 4, 1, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 4, 1, true);
             break;
           }
           default: {
@@ -10162,13 +10760,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.read(BigInt.asUintN(64, BigInt(arg1))),
+        fn: () => _trackHostOperation(() => rsc0.read(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -10193,7 +10791,7 @@ let gen = (function* _initGenerator () {
     switch (variant7.tag) {
       case 'ok': {
         const e = variant7.val;
-        dataView(memory0).setInt8(arg2 + 0, 0, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 0, true);
         var val4 = e;
         var len4 = Array.isArray(val4) ? val4.length : val4.byteLength;
         var ptr4 = realloc0(0, 0, 1, len4 * 1);
@@ -10216,19 +10814,19 @@ let gen = (function* _initGenerator () {
           out4.set(valData4);
         }
         
-        dataView(memory0).setUint32(arg2 + 8, len4, true);
-        dataView(memory0).setUint32(arg2 + 4, ptr4, true);
+        dataView(memory0).setUint32(((arg2 >>> 0)) + 8, len4, true);
+        dataView(memory0).setUint32(((arg2 >>> 0)) + 4, ptr4, true);
         
         break;
       }
       case 'err': {
         const e = variant7.val;
-        dataView(memory0).setInt8(arg2 + 0, 1, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 1, true);
         var variant6 = e;
         switch (variant6.tag) {
           case 'last-operation-failed': {
             const e = variant6.val;
-            dataView(memory0).setInt8(arg2 + 4, 0, true);
+            dataView(memory0).setInt8(((arg2 >>> 0)) + 4, 0, true);
             
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
@@ -10240,11 +10838,11 @@ let gen = (function* _initGenerator () {
               handle5 = rscTableCreateOwn(handleTable1, rep);
             }
             
-            dataView(memory0).setInt32(arg2 + 8, handle5, true);
+            dataView(memory0).setInt32(((arg2 >>> 0)) + 8, handle5, true);
             break;
           }
           case 'closed': {
-            dataView(memory0).setInt8(arg2 + 4, 1, true);
+            dataView(memory0).setInt8(((arg2 >>> 0)) + 4, 1, true);
             break;
           }
           default: {
@@ -10325,14 +10923,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.toDebugString(),
+        fn: () => _trackHostOperation(() => rsc0.toDebugString()),
       })
       ;
     } catch (err) {
@@ -10365,8 +10963,8 @@ let gen = (function* _initGenerator () {
     var ptr3= encodeRes.ptr;
     var len3 = encodeRes.len;
     
-    dataView(memory0).setUint32(arg1 + 4, len3, true);
-    dataView(memory0).setUint32(arg1 + 0, ptr3, true);
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 4, len3, true);
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 0, ptr3, true);
     _debugLog('[iface="wasi:io/error@0.2.12", function="[method]error.to-debug-string"][Instruction::Return]', {
       funcName: '[method]error.to-debug-string',
       paramCount: 0,
@@ -10464,13 +11062,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet7 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => handle(rsc0, variant6),
+        fn: () => _trackHostOperation(() => handle(rsc0, variant6)),
       })
       ;
       ret = hostRet7 !== null && typeof hostRet7 === 'object' && (hostRet7.tag === 'ok' || hostRet7.tag === 'err')
@@ -10485,7 +11083,7 @@ let gen = (function* _initGenerator () {
     switch (variant47.tag) {
       case 'ok': {
         const e = variant47.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof FutureIncomingResponse)) {
           throw new TypeError('Resource error: Not a valid \"FutureIncomingResponse\" resource.');
@@ -10497,418 +11095,418 @@ let gen = (function* _initGenerator () {
           handle8 = rscTableCreateOwn(handleTable8, rep);
         }
         
-        dataView(memory0).setInt32(arg3 + 8, handle8, true);
+        dataView(memory0).setInt32(((arg3 >>> 0)) + 8, handle8, true);
         
         break;
       }
       case 'err': {
         const e = variant47.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var variant46 = e;
         switch (variant46.tag) {
           case 'DNS-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 0, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 0, true);
             break;
           }
           case 'DNS-error': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 1, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 1, true);
             var {rcode: v9_0, infoCode: v9_1 } = e;
             var variant11 = v9_0;
             if (variant11 === null || variant11=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant11;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr10= encodeRes.ptr;
               var len10 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len10, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr10, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len10, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr10, true);
             }
             var variant12 = v9_1;
             if (variant12 === null || variant12=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant12;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt16(arg3 + 30, toUint16(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt16(((arg3 >>> 0)) + 30, toUint16(e), true);
             }
             break;
           }
           case 'destination-not-found': {
-            dataView(memory0).setInt8(arg3 + 8, 2, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 2, true);
             break;
           }
           case 'destination-unavailable': {
-            dataView(memory0).setInt8(arg3 + 8, 3, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 3, true);
             break;
           }
           case 'destination-IP-prohibited': {
-            dataView(memory0).setInt8(arg3 + 8, 4, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 4, true);
             break;
           }
           case 'destination-IP-unroutable': {
-            dataView(memory0).setInt8(arg3 + 8, 5, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 5, true);
             break;
           }
           case 'connection-refused': {
-            dataView(memory0).setInt8(arg3 + 8, 6, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 6, true);
             break;
           }
           case 'connection-terminated': {
-            dataView(memory0).setInt8(arg3 + 8, 7, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 7, true);
             break;
           }
           case 'connection-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 8, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 8, true);
             break;
           }
           case 'connection-read-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 9, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 9, true);
             break;
           }
           case 'connection-write-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 10, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 10, true);
             break;
           }
           case 'connection-limit-reached': {
-            dataView(memory0).setInt8(arg3 + 8, 11, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 11, true);
             break;
           }
           case 'TLS-protocol-error': {
-            dataView(memory0).setInt8(arg3 + 8, 12, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 12, true);
             break;
           }
           case 'TLS-certificate-error': {
-            dataView(memory0).setInt8(arg3 + 8, 13, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 13, true);
             break;
           }
           case 'TLS-alert-received': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 14, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 14, true);
             var {alertId: v13_0, alertMessage: v13_1 } = e;
             var variant14 = v13_0;
             if (variant14 === null || variant14=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant14;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt8(arg3 + 17, toUint8(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 17, toUint8(e), true);
             }
             var variant16 = v13_1;
             if (variant16 === null || variant16=== undefined) {
-              dataView(memory0).setInt8(arg3 + 20, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 0, true);
             } else {
               const e = variant16;
-              dataView(memory0).setInt8(arg3 + 20, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr15= encodeRes.ptr;
               var len15 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 28, len15, true);
-              dataView(memory0).setUint32(arg3 + 24, ptr15, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 28, len15, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, ptr15, true);
             }
             break;
           }
           case 'HTTP-request-denied': {
-            dataView(memory0).setInt8(arg3 + 8, 15, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 15, true);
             break;
           }
           case 'HTTP-request-length-required': {
-            dataView(memory0).setInt8(arg3 + 8, 16, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 16, true);
             break;
           }
           case 'HTTP-request-body-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 17, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 17, true);
             var variant17 = e;
             if (variant17 === null || variant17=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant17;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setBigInt64(arg3 + 24, toUint64(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setBigInt64(((arg3 >>> 0)) + 24, toUint64(e), true);
             }
             break;
           }
           case 'HTTP-request-method-invalid': {
-            dataView(memory0).setInt8(arg3 + 8, 18, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 18, true);
             break;
           }
           case 'HTTP-request-URI-invalid': {
-            dataView(memory0).setInt8(arg3 + 8, 19, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 19, true);
             break;
           }
           case 'HTTP-request-URI-too-long': {
-            dataView(memory0).setInt8(arg3 + 8, 20, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 20, true);
             break;
           }
           case 'HTTP-request-header-section-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 21, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 21, true);
             var variant18 = e;
             if (variant18 === null || variant18=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant18;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-request-header-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 22, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 22, true);
             var variant23 = e;
             if (variant23 === null || variant23=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant23;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               var {fieldName: v19_0, fieldSize: v19_1 } = e;
               var variant21 = v19_0;
               if (variant21 === null || variant21=== undefined) {
-                dataView(memory0).setInt8(arg3 + 20, 0, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 0, true);
               } else {
                 const e = variant21;
-                dataView(memory0).setInt8(arg3 + 20, 1, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
                 
                 var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
                 var ptr20= encodeRes.ptr;
                 var len20 = encodeRes.len;
                 
-                dataView(memory0).setUint32(arg3 + 28, len20, true);
-                dataView(memory0).setUint32(arg3 + 24, ptr20, true);
+                dataView(memory0).setUint32(((arg3 >>> 0)) + 28, len20, true);
+                dataView(memory0).setUint32(((arg3 >>> 0)) + 24, ptr20, true);
               }
               var variant22 = v19_1;
               if (variant22 === null || variant22=== undefined) {
-                dataView(memory0).setInt8(arg3 + 32, 0, true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 32, 0, true);
               } else {
                 const e = variant22;
-                dataView(memory0).setInt8(arg3 + 32, 1, true);
-                dataView(memory0).setInt32(arg3 + 36, toUint32(e), true);
+                dataView(memory0).setInt8(((arg3 >>> 0)) + 32, 1, true);
+                dataView(memory0).setInt32(((arg3 >>> 0)) + 36, toUint32(e), true);
               }
             }
             break;
           }
           case 'HTTP-request-trailer-section-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 23, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 23, true);
             var variant24 = e;
             if (variant24 === null || variant24=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant24;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-request-trailer-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 24, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 24, true);
             var {fieldName: v25_0, fieldSize: v25_1 } = e;
             var variant27 = v25_0;
             if (variant27 === null || variant27=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant27;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr26= encodeRes.ptr;
               var len26 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len26, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr26, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len26, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr26, true);
             }
             var variant28 = v25_1;
             if (variant28 === null || variant28=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant28;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-incomplete': {
-            dataView(memory0).setInt8(arg3 + 8, 25, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 25, true);
             break;
           }
           case 'HTTP-response-header-section-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 26, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 26, true);
             var variant29 = e;
             if (variant29 === null || variant29=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant29;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-header-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 27, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 27, true);
             var {fieldName: v30_0, fieldSize: v30_1 } = e;
             var variant32 = v30_0;
             if (variant32 === null || variant32=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant32;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr31= encodeRes.ptr;
               var len31 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len31, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr31, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len31, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr31, true);
             }
             var variant33 = v30_1;
             if (variant33 === null || variant33=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant33;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-body-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 28, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 28, true);
             var variant34 = e;
             if (variant34 === null || variant34=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant34;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setBigInt64(arg3 + 24, toUint64(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setBigInt64(((arg3 >>> 0)) + 24, toUint64(e), true);
             }
             break;
           }
           case 'HTTP-response-trailer-section-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 29, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 29, true);
             var variant35 = e;
             if (variant35 === null || variant35=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant35;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
-              dataView(memory0).setInt32(arg3 + 20, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 20, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-trailer-size': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 30, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 30, true);
             var {fieldName: v36_0, fieldSize: v36_1 } = e;
             var variant38 = v36_0;
             if (variant38 === null || variant38=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant38;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr37= encodeRes.ptr;
               var len37 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len37, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr37, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len37, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr37, true);
             }
             var variant39 = v36_1;
             if (variant39 === null || variant39=== undefined) {
-              dataView(memory0).setInt8(arg3 + 28, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 0, true);
             } else {
               const e = variant39;
-              dataView(memory0).setInt8(arg3 + 28, 1, true);
-              dataView(memory0).setInt32(arg3 + 32, toUint32(e), true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 28, 1, true);
+              dataView(memory0).setInt32(((arg3 >>> 0)) + 32, toUint32(e), true);
             }
             break;
           }
           case 'HTTP-response-transfer-coding': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 31, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 31, true);
             var variant41 = e;
             if (variant41 === null || variant41=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant41;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr40= encodeRes.ptr;
               var len40 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len40, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr40, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len40, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr40, true);
             }
             break;
           }
           case 'HTTP-response-content-coding': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 32, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 32, true);
             var variant43 = e;
             if (variant43 === null || variant43=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant43;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr42= encodeRes.ptr;
               var len42 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len42, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr42, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len42, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr42, true);
             }
             break;
           }
           case 'HTTP-response-timeout': {
-            dataView(memory0).setInt8(arg3 + 8, 33, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 33, true);
             break;
           }
           case 'HTTP-upgrade-failed': {
-            dataView(memory0).setInt8(arg3 + 8, 34, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 34, true);
             break;
           }
           case 'HTTP-protocol-error': {
-            dataView(memory0).setInt8(arg3 + 8, 35, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 35, true);
             break;
           }
           case 'loop-detected': {
-            dataView(memory0).setInt8(arg3 + 8, 36, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 36, true);
             break;
           }
           case 'configuration-error': {
-            dataView(memory0).setInt8(arg3 + 8, 37, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 37, true);
             break;
           }
           case 'internal-error': {
             const e = variant46.val;
-            dataView(memory0).setInt8(arg3 + 8, 38, true);
+            dataView(memory0).setInt8(((arg3 >>> 0)) + 8, 38, true);
             var variant45 = e;
             if (variant45 === null || variant45=== undefined) {
-              dataView(memory0).setInt8(arg3 + 16, 0, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 0, true);
             } else {
               const e = variant45;
-              dataView(memory0).setInt8(arg3 + 16, 1, true);
+              dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
               var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
               var ptr44= encodeRes.ptr;
               var len44 = encodeRes.len;
               
-              dataView(memory0).setUint32(arg3 + 24, len44, true);
-              dataView(memory0).setUint32(arg3 + 20, ptr44, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 24, len44, true);
+              dataView(memory0).setUint32(((arg3 >>> 0)) + 20, ptr44, true);
             }
             break;
           }
@@ -10937,12 +11535,13 @@ let gen = (function* _initGenerator () {
   
   const _trampoline60 = async function(arg0, arg1, arg2) {
     var len3 = arg1;
-    var base3 = arg0;
+    var base3 = (arg0 >>> 0) >>> 0;
+    if (base3 < 0 || len3 < 0 || len3 > 67108863 || base3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - base3) / 4)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     if (base3 % 4 !== 0) throw new TypeError(`list pointer [${base3}] is not aligned to 4`);
     var result3 = [];
     for (let i = 0; i < len3; i++) {
       const base = base3 + i * 4;
-      var handle1 = dataView(memory0).getInt32(base + 0, true);
+      var handle1 = dataView(memory0).getInt32((base) + 0, true);
       
       var rep2 = handleTable0[(handle1 << 1) + 1] & ~T_FLAG;
       var rsc0 = captureTable0.get(rep2);
@@ -11007,14 +11606,18 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     
     try {
       ret = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => poll(result3),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = poll(result3);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
     } catch (err) {
@@ -11064,8 +11667,8 @@ let gen = (function* _initGenerator () {
       out4.set(valData4);
     }
     
-    dataView(memory0).setUint32(arg2 + 4, len4, true);
-    dataView(memory0).setUint32(arg2 + 0, ptr4, true);
+    dataView(memory0).setUint32(((arg2 >>> 0)) + 4, len4, true);
+    dataView(memory0).setUint32(((arg2 >>> 0)) + 0, ptr4, true);
     _debugLog('[iface="wasi:io/poll@0.2.12", function="poll"][Instruction::Return]', {
       funcName: 'poll',
       paramCount: 0,
@@ -11142,13 +11745,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.blockingFlush(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.blockingFlush();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -11173,18 +11780,18 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var variant5 = e;
         switch (variant5.tag) {
           case 'last-operation-failed': {
             const e = variant5.val;
-            dataView(memory0).setInt8(arg1 + 4, 0, true);
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 0, true);
             
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
@@ -11196,11 +11803,11 @@ let gen = (function* _initGenerator () {
               handle4 = rscTableCreateOwn(handleTable1, rep);
             }
             
-            dataView(memory0).setInt32(arg1 + 8, handle4, true);
+            dataView(memory0).setInt32(((arg1 >>> 0)) + 8, handle4, true);
             break;
           }
           case 'closed': {
-            dataView(memory0).setInt8(arg1 + 4, 1, true);
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 1, true);
             break;
           }
           default: {
@@ -11229,6 +11836,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable14 = [T_FLAG, 0];
   handleTable14._createdReps = new Set();
+  handleTable14._componentIdx = 0;
   
   
   const captureTable14= new Map();
@@ -11291,13 +11899,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.readViaStream(BigInt.asUintN(64, BigInt(arg1))),
+        fn: () => _trackHostOperation(() => rsc0.readViaStream(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -11322,7 +11930,7 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg2 + 0, 0, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof InputStream)) {
           throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
@@ -11334,13 +11942,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable3, rep);
         }
         
-        dataView(memory0).setInt32(arg2 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg2 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg2 + 0, 1, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -11500,7 +12108,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg2 + 4, enum5, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 4, enum5, true);
         
         break;
       }
@@ -11575,13 +12183,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.writeViaStream(BigInt.asUintN(64, BigInt(arg1))),
+        fn: () => _trackHostOperation(() => rsc0.writeViaStream(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -11606,7 +12214,7 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg2 + 0, 0, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
@@ -11618,13 +12226,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
         
-        dataView(memory0).setInt32(arg2 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg2 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg2 + 0, 1, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -11784,7 +12392,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg2 + 4, enum5, true);
+        dataView(memory0).setInt8(((arg2 >>> 0)) + 4, enum5, true);
         
         break;
       }
@@ -11868,13 +12476,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.appendViaStream(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.appendViaStream();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -11899,7 +12511,7 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
@@ -11911,13 +12523,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -12077,7 +12689,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 4, enum5, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 4, enum5, true);
         
         break;
       }
@@ -12153,13 +12765,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.getFlags(),
+        fn: () => _trackHostOperation(() => rsc0.getFlags()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -12184,20 +12796,20 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         let flags4 = 0;
         if (typeof e === 'object' && e !== null) {
           flags4 = Boolean(e.read) << 0 | Boolean(e.write) << 1 | Boolean(e.fileIntegritySync) << 2 | Boolean(e.dataIntegritySync) << 3 | Boolean(e.requestedWriteSync) << 4 | Boolean(e.mutateDirectory) << 5;
         } else if (e !== null && e!== undefined) {
           throw new TypeError('only an object, undefined or null can be converted to flags');
         }
-        dataView(memory0).setInt8(arg1 + 1, flags4, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 1, flags4, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -12357,7 +12969,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 1, enum5, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 1, enum5, true);
         
         break;
       }
@@ -12379,6 +12991,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable15 = [T_FLAG, 0];
   handleTable15._createdReps = new Set();
+  handleTable15._componentIdx = 0;
   
   
   const captureTable15= new Map();
@@ -12450,13 +13063,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.readDirectory(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.readDirectory();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -12481,7 +13098,7 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof DirectoryEntryStream)) {
           throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
@@ -12493,13 +13110,13 @@ let gen = (function* _initGenerator () {
           handle4 = rscTableCreateOwn(handleTable15, rep);
         }
         
-        dataView(memory0).setInt32(arg1 + 4, handle4, true);
+        dataView(memory0).setInt32(((arg1 >>> 0)) + 4, handle4, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -12659,7 +13276,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 4, enum5, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 4, enum5, true);
         
         break;
       }
@@ -12692,7 +13309,7 @@ let gen = (function* _initGenerator () {
     }
     
     curResourceBorrows.push(rsc0);
-    var ptr3 = arg1;
+    var ptr3 = (arg1 >>> 0) >>> 0;
     var len3 = arg2;
     var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.create-directory-at"] [Instruction::CallInterface] (sync, @ enter)');
@@ -12747,13 +13364,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet4 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.createDirectoryAt(result3),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.createDirectoryAt(result3);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -12778,13 +13399,13 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -12944,7 +13565,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg3 + 1, enum5, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 1, enum5, true);
         
         break;
       }
@@ -13029,13 +13650,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.stat(),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.stat();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -13060,7 +13685,7 @@ let gen = (function* _initGenerator () {
     switch (variant13.tag) {
       case 'ok': {
         const e = variant13.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         var {type: v4_0, linkCount: v4_1, size: v4_2, dataAccessTimestamp: v4_3, dataModificationTimestamp: v4_4, statusChangeTimestamp: v4_5 } = e;
         var val5 = v4_0;
         let enum5;
@@ -13105,45 +13730,45 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of descriptor-type`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 8, enum5, true);
-        dataView(memory0).setBigInt64(arg1 + 16, toUint64(v4_1), true);
-        dataView(memory0).setBigInt64(arg1 + 24, toUint64(v4_2), true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 8, enum5, true);
+        dataView(memory0).setBigInt64(((arg1 >>> 0)) + 16, toUint64(v4_1), true);
+        dataView(memory0).setBigInt64(((arg1 >>> 0)) + 24, toUint64(v4_2), true);
         var variant7 = v4_3;
         if (variant7 === null || variant7=== undefined) {
-          dataView(memory0).setInt8(arg1 + 32, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 0, true);
         } else {
           const e = variant7;
-          dataView(memory0).setInt8(arg1 + 32, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
           var {seconds: v6_0, nanoseconds: v6_1 } = e;
-          dataView(memory0).setBigInt64(arg1 + 40, toUint64(v6_0), true);
-          dataView(memory0).setInt32(arg1 + 48, toUint32(v6_1), true);
+          dataView(memory0).setBigInt64(((arg1 >>> 0)) + 40, toUint64(v6_0), true);
+          dataView(memory0).setInt32(((arg1 >>> 0)) + 48, toUint32(v6_1), true);
         }
         var variant9 = v4_4;
         if (variant9 === null || variant9=== undefined) {
-          dataView(memory0).setInt8(arg1 + 56, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 56, 0, true);
         } else {
           const e = variant9;
-          dataView(memory0).setInt8(arg1 + 56, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 56, 1, true);
           var {seconds: v8_0, nanoseconds: v8_1 } = e;
-          dataView(memory0).setBigInt64(arg1 + 64, toUint64(v8_0), true);
-          dataView(memory0).setInt32(arg1 + 72, toUint32(v8_1), true);
+          dataView(memory0).setBigInt64(((arg1 >>> 0)) + 64, toUint64(v8_0), true);
+          dataView(memory0).setInt32(((arg1 >>> 0)) + 72, toUint32(v8_1), true);
         }
         var variant11 = v4_5;
         if (variant11 === null || variant11=== undefined) {
-          dataView(memory0).setInt8(arg1 + 80, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 80, 0, true);
         } else {
           const e = variant11;
-          dataView(memory0).setInt8(arg1 + 80, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 80, 1, true);
           var {seconds: v10_0, nanoseconds: v10_1 } = e;
-          dataView(memory0).setBigInt64(arg1 + 88, toUint64(v10_0), true);
-          dataView(memory0).setInt32(arg1 + 96, toUint32(v10_1), true);
+          dataView(memory0).setBigInt64(((arg1 >>> 0)) + 88, toUint64(v10_0), true);
+          dataView(memory0).setInt32(((arg1 >>> 0)) + 96, toUint32(v10_1), true);
         }
         
         break;
       }
       case 'err': {
         const e = variant13.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val12 = e;
         let enum12;
         switch (val12) {
@@ -13303,7 +13928,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val12}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 8, enum12, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 8, enum12, true);
         
         break;
       }
@@ -13342,7 +13967,7 @@ let gen = (function* _initGenerator () {
     var flags3 = {
       symlinkFollow: Boolean(arg1 & 1),
     };
-    var ptr4 = arg2;
+    var ptr4 = (arg2 >>> 0) >>> 0;
     var len4 = arg3;
     var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.stat-at"] [Instruction::CallInterface] (sync, @ enter)');
@@ -13397,13 +14022,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet5 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.statAt(flags3, result4),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.statAt(flags3, result4);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
@@ -13428,7 +14057,7 @@ let gen = (function* _initGenerator () {
     switch (variant15.tag) {
       case 'ok': {
         const e = variant15.val;
-        dataView(memory0).setInt8(arg4 + 0, 0, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 0, 0, true);
         var {type: v6_0, linkCount: v6_1, size: v6_2, dataAccessTimestamp: v6_3, dataModificationTimestamp: v6_4, statusChangeTimestamp: v6_5 } = e;
         var val7 = v6_0;
         let enum7;
@@ -13473,45 +14102,45 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val7}" is not one of the cases of descriptor-type`);
           }
         }
-        dataView(memory0).setInt8(arg4 + 8, enum7, true);
-        dataView(memory0).setBigInt64(arg4 + 16, toUint64(v6_1), true);
-        dataView(memory0).setBigInt64(arg4 + 24, toUint64(v6_2), true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 8, enum7, true);
+        dataView(memory0).setBigInt64(((arg4 >>> 0)) + 16, toUint64(v6_1), true);
+        dataView(memory0).setBigInt64(((arg4 >>> 0)) + 24, toUint64(v6_2), true);
         var variant9 = v6_3;
         if (variant9 === null || variant9=== undefined) {
-          dataView(memory0).setInt8(arg4 + 32, 0, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 32, 0, true);
         } else {
           const e = variant9;
-          dataView(memory0).setInt8(arg4 + 32, 1, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 32, 1, true);
           var {seconds: v8_0, nanoseconds: v8_1 } = e;
-          dataView(memory0).setBigInt64(arg4 + 40, toUint64(v8_0), true);
-          dataView(memory0).setInt32(arg4 + 48, toUint32(v8_1), true);
+          dataView(memory0).setBigInt64(((arg4 >>> 0)) + 40, toUint64(v8_0), true);
+          dataView(memory0).setInt32(((arg4 >>> 0)) + 48, toUint32(v8_1), true);
         }
         var variant11 = v6_4;
         if (variant11 === null || variant11=== undefined) {
-          dataView(memory0).setInt8(arg4 + 56, 0, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 56, 0, true);
         } else {
           const e = variant11;
-          dataView(memory0).setInt8(arg4 + 56, 1, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 56, 1, true);
           var {seconds: v10_0, nanoseconds: v10_1 } = e;
-          dataView(memory0).setBigInt64(arg4 + 64, toUint64(v10_0), true);
-          dataView(memory0).setInt32(arg4 + 72, toUint32(v10_1), true);
+          dataView(memory0).setBigInt64(((arg4 >>> 0)) + 64, toUint64(v10_0), true);
+          dataView(memory0).setInt32(((arg4 >>> 0)) + 72, toUint32(v10_1), true);
         }
         var variant13 = v6_5;
         if (variant13 === null || variant13=== undefined) {
-          dataView(memory0).setInt8(arg4 + 80, 0, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 80, 0, true);
         } else {
           const e = variant13;
-          dataView(memory0).setInt8(arg4 + 80, 1, true);
+          dataView(memory0).setInt8(((arg4 >>> 0)) + 80, 1, true);
           var {seconds: v12_0, nanoseconds: v12_1 } = e;
-          dataView(memory0).setBigInt64(arg4 + 88, toUint64(v12_0), true);
-          dataView(memory0).setInt32(arg4 + 96, toUint32(v12_1), true);
+          dataView(memory0).setBigInt64(((arg4 >>> 0)) + 88, toUint64(v12_0), true);
+          dataView(memory0).setInt32(((arg4 >>> 0)) + 96, toUint32(v12_1), true);
         }
         
         break;
       }
       case 'err': {
         const e = variant15.val;
-        dataView(memory0).setInt8(arg4 + 0, 1, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 0, 1, true);
         var val14 = e;
         let enum14;
         switch (val14) {
@@ -13671,7 +14300,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val14}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg4 + 8, enum14, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 8, enum14, true);
         
         break;
       }
@@ -13710,7 +14339,7 @@ let gen = (function* _initGenerator () {
     var flags3 = {
       symlinkFollow: Boolean(arg1 & 1),
     };
-    var ptr4 = arg2;
+    var ptr4 = (arg2 >>> 0) >>> 0;
     var len4 = arg3;
     var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
     if ((arg4 & 4294967280) !== 0) {
@@ -13785,13 +14414,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet7 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.openAt(flags3, result4, flags5, flags6),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.openAt(flags3, result4, flags5, flags6);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet7 !== null && typeof hostRet7 === 'object' && (hostRet7.tag === 'ok' || hostRet7.tag === 'err')
@@ -13816,7 +14449,7 @@ let gen = (function* _initGenerator () {
     switch (variant10.tag) {
       case 'ok': {
         const e = variant10.val;
-        dataView(memory0).setInt8(arg6 + 0, 0, true);
+        dataView(memory0).setInt8(((arg6 >>> 0)) + 0, 0, true);
         
         if (!(e instanceof Descriptor)) {
           throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
@@ -13828,13 +14461,13 @@ let gen = (function* _initGenerator () {
           handle8 = rscTableCreateOwn(handleTable14, rep);
         }
         
-        dataView(memory0).setInt32(arg6 + 4, handle8, true);
+        dataView(memory0).setInt32(((arg6 >>> 0)) + 4, handle8, true);
         
         break;
       }
       case 'err': {
         const e = variant10.val;
-        dataView(memory0).setInt8(arg6 + 0, 1, true);
+        dataView(memory0).setInt8(((arg6 >>> 0)) + 0, 1, true);
         var val9 = e;
         let enum9;
         switch (val9) {
@@ -13994,7 +14627,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val9}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg6 + 4, enum9, true);
+        dataView(memory0).setInt8(((arg6 >>> 0)) + 4, enum9, true);
         
         break;
       }
@@ -14027,7 +14660,7 @@ let gen = (function* _initGenerator () {
     }
     
     curResourceBorrows.push(rsc0);
-    var ptr3 = arg1;
+    var ptr3 = (arg1 >>> 0) >>> 0;
     var len3 = arg2;
     var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.unlink-file-at"] [Instruction::CallInterface] (sync, @ enter)');
@@ -14082,13 +14715,17 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
-    
     let ret;
+    
     try {
       const hostRet4 = await  _withGlobalCurrentTaskMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.unlinkFileAt(result3),
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.unlinkFileAt(result3);
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
       })
       ;
       ret = hostRet4 !== null && typeof hostRet4 === 'object' && (hostRet4.tag === 'ok' || hostRet4.tag === 'err')
@@ -14113,13 +14750,13 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg3 + 0, 0, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg3 + 0, 1, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -14279,7 +14916,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg3 + 1, enum5, true);
+        dataView(memory0).setInt8(((arg3 >>> 0)) + 1, enum5, true);
         
         break;
       }
@@ -14355,13 +14992,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.metadataHash(),
+        fn: () => _trackHostOperation(() => rsc0.metadataHash()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -14386,16 +15023,16 @@ let gen = (function* _initGenerator () {
     switch (variant6.tag) {
       case 'ok': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         var {lower: v4_0, upper: v4_1 } = e;
-        dataView(memory0).setBigInt64(arg1 + 8, toUint64(v4_0), true);
-        dataView(memory0).setBigInt64(arg1 + 16, toUint64(v4_1), true);
+        dataView(memory0).setBigInt64(((arg1 >>> 0)) + 8, toUint64(v4_0), true);
+        dataView(memory0).setBigInt64(((arg1 >>> 0)) + 16, toUint64(v4_1), true);
         
         break;
       }
       case 'err': {
         const e = variant6.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val5 = e;
         let enum5;
         switch (val5) {
@@ -14555,7 +15192,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val5}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 8, enum5, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 8, enum5, true);
         
         break;
       }
@@ -14593,7 +15230,7 @@ let gen = (function* _initGenerator () {
     var flags3 = {
       symlinkFollow: Boolean(arg1 & 1),
     };
-    var ptr4 = arg2;
+    var ptr4 = (arg2 >>> 0) >>> 0;
     var len4 = arg3;
     var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.metadata-hash-at"] [Instruction::CallInterface] (sync, @ enter)');
@@ -14639,13 +15276,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet5 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.metadataHashAt(flags3, result4),
+        fn: () => _trackHostOperation(() => rsc0.metadataHashAt(flags3, result4)),
       })
       ;
       ret = hostRet5 !== null && typeof hostRet5 === 'object' && (hostRet5.tag === 'ok' || hostRet5.tag === 'err')
@@ -14670,16 +15307,16 @@ let gen = (function* _initGenerator () {
     switch (variant8.tag) {
       case 'ok': {
         const e = variant8.val;
-        dataView(memory0).setInt8(arg4 + 0, 0, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 0, 0, true);
         var {lower: v6_0, upper: v6_1 } = e;
-        dataView(memory0).setBigInt64(arg4 + 8, toUint64(v6_0), true);
-        dataView(memory0).setBigInt64(arg4 + 16, toUint64(v6_1), true);
+        dataView(memory0).setBigInt64(((arg4 >>> 0)) + 8, toUint64(v6_0), true);
+        dataView(memory0).setBigInt64(((arg4 >>> 0)) + 16, toUint64(v6_1), true);
         
         break;
       }
       case 'err': {
         const e = variant8.val;
-        dataView(memory0).setInt8(arg4 + 0, 1, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 0, 1, true);
         var val7 = e;
         let enum7;
         switch (val7) {
@@ -14839,7 +15476,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val7}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg4 + 8, enum7, true);
+        dataView(memory0).setInt8(((arg4 >>> 0)) + 8, enum7, true);
         
         break;
       }
@@ -14914,13 +15551,13 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     try {
       const hostRet3 = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => rsc0.readDirectoryEntry(),
+        fn: () => _trackHostOperation(() => rsc0.readDirectoryEntry()),
       })
       ;
       ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
@@ -14945,13 +15582,13 @@ let gen = (function* _initGenerator () {
     switch (variant9.tag) {
       case 'ok': {
         const e = variant9.val;
-        dataView(memory0).setInt8(arg1 + 0, 0, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
         var variant7 = e;
         if (variant7 === null || variant7=== undefined) {
-          dataView(memory0).setInt8(arg1 + 4, 0, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 0, true);
         } else {
           const e = variant7;
-          dataView(memory0).setInt8(arg1 + 4, 1, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 1, true);
           var {type: v4_0, name: v4_1 } = e;
           var val5 = v4_0;
           let enum5;
@@ -14996,21 +15633,21 @@ let gen = (function* _initGenerator () {
               throw new TypeError(`"${val5}" is not one of the cases of descriptor-type`);
             }
           }
-          dataView(memory0).setInt8(arg1 + 8, enum5, true);
+          dataView(memory0).setInt8(((arg1 >>> 0)) + 8, enum5, true);
           
           var encodeRes = _utf8AllocateAndEncode(v4_1, realloc0, memory0);
           var ptr6= encodeRes.ptr;
           var len6 = encodeRes.len;
           
-          dataView(memory0).setUint32(arg1 + 16, len6, true);
-          dataView(memory0).setUint32(arg1 + 12, ptr6, true);
+          dataView(memory0).setUint32(((arg1 >>> 0)) + 16, len6, true);
+          dataView(memory0).setUint32(((arg1 >>> 0)) + 12, ptr6, true);
         }
         
         break;
       }
       case 'err': {
         const e = variant9.val;
-        dataView(memory0).setInt8(arg1 + 0, 1, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
         var val8 = e;
         let enum8;
         switch (val8) {
@@ -15170,7 +15807,7 @@ let gen = (function* _initGenerator () {
             throw new TypeError(`"${val8}" is not one of the cases of error-code`);
           }
         }
-        dataView(memory0).setInt8(arg1 + 4, enum8, true);
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 4, enum8, true);
         
         break;
       }
@@ -15234,14 +15871,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getEnvironment(),
+        fn: () => _trackHostOperation(() => getEnvironment()),
       })
       ;
     } catch (err) {
@@ -15262,6 +15899,7 @@ let gen = (function* _initGenerator () {
     var vec3 = ret;
     var len3 = vec3.length;
     var result3 = realloc0(0, 0, 4, len3 * 16);
+    if (result3 < 0 || len3 < 0 || len3 > 16777215 || result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec3.length; i++) {
       const e = vec3[i];
       const base = result3 + i * 16;var [tuple0_0, tuple0_1] = e;
@@ -15270,18 +15908,18 @@ let gen = (function* _initGenerator () {
       var ptr1= encodeRes.ptr;
       var len1 = encodeRes.len;
       
-      dataView(memory0).setUint32(base + 4, len1, true);
-      dataView(memory0).setUint32(base + 0, ptr1, true);
+      dataView(memory0).setUint32((base) + 4, len1, true);
+      dataView(memory0).setUint32((base) + 0, ptr1, true);
       
       var encodeRes = _utf8AllocateAndEncode(tuple0_1, realloc0, memory0);
       var ptr2= encodeRes.ptr;
       var len2 = encodeRes.len;
       
-      dataView(memory0).setUint32(base + 12, len2, true);
-      dataView(memory0).setUint32(base + 8, ptr2, true);
+      dataView(memory0).setUint32((base) + 12, len2, true);
+      dataView(memory0).setUint32((base) + 8, ptr2, true);
     }
-    dataView(memory0).setUint32(arg0 + 4, len3, true);
-    dataView(memory0).setUint32(arg0 + 0, result3, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 4, len3, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 0, result3, true);
     _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-environment"][Instruction::Return]', {
       funcName: 'get-environment',
       paramCount: 0,
@@ -15295,6 +15933,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable12 = [T_FLAG, 0];
   handleTable12._createdReps = new Set();
+  handleTable12._componentIdx = 0;
   
   
   const captureTable12= new Map();
@@ -15346,14 +15985,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getTerminalStdin(),
+        fn: () => _trackHostOperation(() => getTerminalStdin()),
       })
       ;
     } catch (err) {
@@ -15373,10 +16012,10 @@ let gen = (function* _initGenerator () {
     
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
-      dataView(memory0).setInt8(arg0 + 0, 0, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
     } else {
       const e = variant1;
-      dataView(memory0).setInt8(arg0 + 0, 1, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 1, true);
       
       if (!(e instanceof TerminalInput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalInput\" resource.');
@@ -15388,7 +16027,7 @@ let gen = (function* _initGenerator () {
         handle0 = rscTableCreateOwn(handleTable12, rep);
       }
       
-      dataView(memory0).setInt32(arg0 + 4, handle0, true);
+      dataView(memory0).setInt32(((arg0 >>> 0)) + 4, handle0, true);
     }
     _debugLog('[iface="wasi:cli/terminal-stdin@0.2.12", function="get-terminal-stdin"][Instruction::Return]', {
       funcName: 'get-terminal-stdin',
@@ -15403,6 +16042,7 @@ let gen = (function* _initGenerator () {
   
   const handleTable13 = [T_FLAG, 0];
   handleTable13._createdReps = new Set();
+  handleTable13._componentIdx = 0;
   
   
   const captureTable13= new Map();
@@ -15454,14 +16094,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getTerminalStdout(),
+        fn: () => _trackHostOperation(() => getTerminalStdout()),
       })
       ;
     } catch (err) {
@@ -15481,10 +16121,10 @@ let gen = (function* _initGenerator () {
     
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
-      dataView(memory0).setInt8(arg0 + 0, 0, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
     } else {
       const e = variant1;
-      dataView(memory0).setInt8(arg0 + 0, 1, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 1, true);
       
       if (!(e instanceof TerminalOutput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
@@ -15496,7 +16136,7 @@ let gen = (function* _initGenerator () {
         handle0 = rscTableCreateOwn(handleTable13, rep);
       }
       
-      dataView(memory0).setInt32(arg0 + 4, handle0, true);
+      dataView(memory0).setInt32(((arg0 >>> 0)) + 4, handle0, true);
     }
     _debugLog('[iface="wasi:cli/terminal-stdout@0.2.12", function="get-terminal-stdout"][Instruction::Return]', {
       funcName: 'get-terminal-stdout',
@@ -15553,14 +16193,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getTerminalStderr(),
+        fn: () => _trackHostOperation(() => getTerminalStderr()),
       })
       ;
     } catch (err) {
@@ -15580,10 +16220,10 @@ let gen = (function* _initGenerator () {
     
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
-      dataView(memory0).setInt8(arg0 + 0, 0, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
     } else {
       const e = variant1;
-      dataView(memory0).setInt8(arg0 + 0, 1, true);
+      dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 1, true);
       
       if (!(e instanceof TerminalOutput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
@@ -15595,7 +16235,7 @@ let gen = (function* _initGenerator () {
         handle0 = rscTableCreateOwn(handleTable13, rep);
       }
       
-      dataView(memory0).setInt32(arg0 + 4, handle0, true);
+      dataView(memory0).setInt32(((arg0 >>> 0)) + 4, handle0, true);
     }
     _debugLog('[iface="wasi:cli/terminal-stderr@0.2.12", function="get-terminal-stderr"][Instruction::Return]', {
       funcName: 'get-terminal-stderr',
@@ -15652,14 +16292,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => now$1(),
+        fn: () => _trackHostOperation(() => now$1()),
       })
       ;
     } catch (err) {
@@ -15678,8 +16318,8 @@ let gen = (function* _initGenerator () {
     }
     
     var {seconds: v0_0, nanoseconds: v0_1 } = ret;
-    dataView(memory0).setBigInt64(arg0 + 0, toUint64(v0_0), true);
-    dataView(memory0).setInt32(arg0 + 8, toUint32(v0_1), true);
+    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 0, toUint64(v0_0), true);
+    dataView(memory0).setInt32(((arg0 >>> 0)) + 8, toUint32(v0_1), true);
     _debugLog('[iface="wasi:clocks/wall-clock@0.2.12", function="now"][Instruction::Return]', {
       funcName: 'now',
       paramCount: 0,
@@ -15735,14 +16375,14 @@ let gen = (function* _initGenerator () {
     }
     
     const started = task.enterSync();
-    
     let ret;
+    
     
     try {
       ret = _withGlobalCurrentTaskMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
-        fn: () => getDirectories(),
+        fn: () => _trackHostOperation(() => getDirectories()),
       })
       ;
     } catch (err) {
@@ -15763,6 +16403,7 @@ let gen = (function* _initGenerator () {
     var vec3 = ret;
     var len3 = vec3.length;
     var result3 = realloc0(0, 0, 4, len3 * 12);
+    if (result3 < 0 || len3 < 0 || len3 > 22369621 || result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 12)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec3.length; i++) {
       const e = vec3[i];
       const base = result3 + i * 12;var [tuple0_0, tuple0_1] = e;
@@ -15777,17 +16418,17 @@ let gen = (function* _initGenerator () {
         handle1 = rscTableCreateOwn(handleTable14, rep);
       }
       
-      dataView(memory0).setInt32(base + 0, handle1, true);
+      dataView(memory0).setInt32((base) + 0, handle1, true);
       
       var encodeRes = _utf8AllocateAndEncode(tuple0_1, realloc0, memory0);
       var ptr2= encodeRes.ptr;
       var len2 = encodeRes.len;
       
-      dataView(memory0).setUint32(base + 8, len2, true);
-      dataView(memory0).setUint32(base + 4, ptr2, true);
+      dataView(memory0).setUint32((base) + 8, len2, true);
+      dataView(memory0).setUint32((base) + 4, ptr2, true);
     }
-    dataView(memory0).setUint32(arg0 + 4, len3, true);
-    dataView(memory0).setUint32(arg0 + 0, result3, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 4, len3, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 0, result3, true);
     _debugLog('[iface="wasi:filesystem/preopens@0.2.12", function="get-directories"][Instruction::Return]', {
       funcName: 'get-directories',
       paramCount: 0,
@@ -15817,6 +16458,7 @@ let gen = (function* _initGenerator () {
       errHandling: 'throw-result-err',
       callingWasmExport: true,
     });
+    task.setCalleeIsAsync(false);
     
     
     const started = await task.enter();
@@ -15828,10 +16470,11 @@ let gen = (function* _initGenerator () {
       throw new Error("failed to enter task");
     }
     
+    CURRENT_TASK_MAY_BLOCK.value = task.mayBlock() ? 1 : 0;
     
     if (null!== null) {
       task.setReturnMemoryIdx(null);
-      task.setReturnMemory(() => null());
+      task.setReturnMemory((() => null)());
     }
     
     
@@ -15851,7 +16494,11 @@ let gen = (function* _initGenerator () {
           let ret;
           
           try {
-            ret =  await run0212Run();
+            ret =  await _withGlobalCurrentTaskMeta({
+              taskID: task.id(),
+              componentIdx: task.componentIdx(),
+              fn: () => run0212Run(),
+            });
           } catch (err) {
             
             _debugLog('[Instruction::CallWasm] error during async call', {
@@ -15949,6 +16596,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline2.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 5,
       classNameFn: () => IncomingBody,
       createResourceFn: 
       (handle) => {
@@ -15969,6 +16617,7 @@ let gen = (function* _initGenerator () {
     ],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 6,
       lowerFn: 
       function lowerImportedOwnedHost_FutureTrailers(obj) {
         if (!(obj instanceof FutureTrailers)) {
@@ -16004,6 +16653,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline2.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 5,
       classNameFn: () => IncomingBody,
       createResourceFn: 
       (handle) => {
@@ -16024,6 +16674,7 @@ let gen = (function* _initGenerator () {
     ],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 6,
       lowerFn: 
       function lowerImportedOwnedHost_FutureTrailers(obj) {
         if (!(obj instanceof FutureTrailers)) {
@@ -16074,6 +16725,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 6)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16110,6 +16762,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 6)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16186,6 +16839,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 8)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16222,6 +16876,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 8)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16272,6 +16927,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       lowerFn: 
       function lowerImportedOwnedHost_Fields(obj) {
         if (!(obj instanceof Fields)) {
@@ -16308,6 +16964,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       lowerFn: 
       function lowerImportedOwnedHost_Fields(obj) {
         if (!(obj instanceof Fields)) {
@@ -16412,6 +17069,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatU64],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16448,6 +17106,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatU64],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -16525,6 +17184,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline16.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       classNameFn: () => Fields,
       createResourceFn: 
       (handle) => {
@@ -16545,6 +17205,7 @@ let gen = (function* _initGenerator () {
     ],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 10,
       lowerFn: 
       function lowerImportedOwnedHost_OutgoingRequest(obj) {
         if (!(obj instanceof OutgoingRequest)) {
@@ -16580,6 +17241,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline16.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       classNameFn: () => Fields,
       createResourceFn: 
       (handle) => {
@@ -16600,6 +17262,7 @@ let gen = (function* _initGenerator () {
     ],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 10,
       lowerFn: 
       function lowerImportedOwnedHost_OutgoingRequest(obj) {
         if (!(obj instanceof OutgoingRequest)) {
@@ -16650,6 +17313,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 11,
       lowerFn: 
       function lowerImportedOwnedHost_RequestOptions(obj) {
         if (!(obj instanceof RequestOptions)) {
@@ -16686,6 +17350,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 11,
       lowerFn: 
       function lowerImportedOwnedHost_RequestOptions(obj) {
         if (!(obj instanceof RequestOptions)) {
@@ -16731,6 +17396,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16774,6 +17440,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16818,6 +17485,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16861,6 +17529,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16905,6 +17574,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16948,6 +17618,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 8,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i64'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -16997,6 +17668,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -17033,6 +17705,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -17070,6 +17743,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -17106,6 +17780,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 0,
       lowerFn: 
       function lowerImportedOwnedHost_Pollable(obj) {
         if (!(obj instanceof Pollable)) {
@@ -17197,6 +17872,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       lowerFn: 
       function lowerImportedOwnedHost_Fields(obj) {
         if (!(obj instanceof Fields)) {
@@ -17233,6 +17909,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 7,
       lowerFn: 
       function lowerImportedOwnedHost_Fields(obj) {
         if (!(obj instanceof Fields)) {
@@ -17422,6 +18099,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 3,
       lowerFn: 
       function lowerImportedOwnedHost_InputStream(obj) {
         if (!(obj instanceof InputStream)) {
@@ -17458,6 +18136,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 3,
       lowerFn: 
       function lowerImportedOwnedHost_InputStream(obj) {
         if (!(obj instanceof InputStream)) {
@@ -17495,6 +18174,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 2,
       lowerFn: 
       function lowerImportedOwnedHost_OutputStream(obj) {
         if (!(obj instanceof OutputStream)) {
@@ -17531,6 +18211,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 2,
       lowerFn: 
       function lowerImportedOwnedHost_OutputStream(obj) {
         if (!(obj instanceof OutputStream)) {
@@ -17568,6 +18249,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 2,
       lowerFn: 
       function lowerImportedOwnedHost_OutputStream(obj) {
         if (!(obj instanceof OutputStream)) {
@@ -17604,6 +18286,7 @@ let gen = (function* _initGenerator () {
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
+      tableIdx: 2,
       lowerFn: 
       function lowerImportedOwnedHost_OutputStream(obj) {
         if (!(obj instanceof OutputStream)) {
@@ -17638,31 +18321,8 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline37.manuallyAsync,
-    paramLiftFns: [
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', _lowerFlatStringAny, 8, 4, 2],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
+    paramLiftFns: [],
+    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17671,7 +18331,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
+    getReallocFn: undefined,
     importFn: _trampoline37,
   },
   ))) : _lowerImportBackwardsCompat.bind(
@@ -17681,31 +18341,8 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline37.manuallyAsync,
-    paramLiftFns: [
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', _lowerFlatStringAny, 8, 4, 2],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
+    paramLiftFns: [],
+    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17714,7 +18351,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
+    getReallocFn: undefined,
     importFn: _trampoline37,
   },
   );
@@ -17736,6 +18373,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -17751,6 +18389,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 12, 4 ],['expiresAfter', 
       _lowerFlatOption({
@@ -17762,6 +18401,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 2,
+        payloadMaybeNull: false,
       })
       , 16, 8 ],['accountId', 
       _lowerFlatOption({
@@ -17773,6 +18413,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 12, 4 ],], size32: 64, align32: 8 }), 72, 8, 8 ],
       [ 'err', _lowerFlatVariant({
@@ -17818,6 +18459,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -17833,6 +18475,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 12, 4 ],['expiresAfter', 
       _lowerFlatOption({
@@ -17844,6 +18487,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 2,
+        payloadMaybeNull: false,
       })
       , 16, 8 ],['accountId', 
       _lowerFlatOption({
@@ -17855,6 +18499,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 12, 4 ],], size32: 64, align32: 8 }), 72, 8, 8 ],
       [ 'err', _lowerFlatVariant({
@@ -17890,12 +18535,33 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline39.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatStringAny,
-      elemSize32: 8,
-      elemAlign32: 4,
-    })],
+    paramLiftFns: [
+    _liftFlatOption({
+      caseMetas: [
+      ['none', null, 0, 0, 0, [] ],
+      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
+    })
+    ],
+    resultLowerFns: [
+    _lowerFlatOption({
+      caseMetas: [
+      [ 'none', null, 0, 0, 0 ],
+      [ 'some', _lowerFlatStringAny, 8, 4, 2],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      payloadMaybeNull: false,
+    })
+    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17914,12 +18580,33 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline39.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatStringAny,
-      elemSize32: 8,
-      elemAlign32: 4,
-    })],
+    paramLiftFns: [
+    _liftFlatOption({
+      caseMetas: [
+      ['none', null, 0, 0, 0, [] ],
+      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
+    })
+    ],
+    resultLowerFns: [
+    _lowerFlatOption({
+      caseMetas: [
+      [ 'none', null, 0, 0, 0 ],
+      [ 'some', _lowerFlatStringAny, 8, 4, 2],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      payloadMaybeNull: false,
+    })
+    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17940,7 +18627,11 @@ let gen = (function* _initGenerator () {
     isAsync: false,
     isManualAsync: _trampoline40.manuallyAsync,
     paramLiftFns: [],
-    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
+    resultLowerFns: [_lowerFlatList({
+      elemLowerFn: _lowerFlatStringAny,
+      elemSize32: 8,
+      elemAlign32: 4,
+    })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17949,7 +18640,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: undefined,
+    getReallocFn: () => realloc0,
     importFn: _trampoline40,
   },
   ))) : _lowerImportBackwardsCompat.bind(
@@ -17960,7 +18651,11 @@ let gen = (function* _initGenerator () {
     isAsync: false,
     isManualAsync: _trampoline40.manuallyAsync,
     paramLiftFns: [],
-    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
+    resultLowerFns: [_lowerFlatList({
+      elemLowerFn: _lowerFlatStringAny,
+      elemSize32: 8,
+      elemAlign32: 4,
+    })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17969,7 +18664,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: undefined,
+    getReallocFn: () => realloc0,
     importFn: _trampoline40,
   },
   );
@@ -17986,6 +18681,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -18033,6 +18729,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -18081,6 +18778,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 3,
         lowerFn: 
         function lowerImportedOwnedHost_InputStream(obj) {
           if (!(obj instanceof InputStream)) {
@@ -18128,6 +18826,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 3,
         lowerFn: 
         function lowerImportedOwnedHost_InputStream(obj) {
           if (!(obj instanceof InputStream)) {
@@ -18183,6 +18882,7 @@ let gen = (function* _initGenerator () {
           caseMetas: [
           [ 'ok', _lowerFlatOwn({
             componentIdx: 0,
+            tableIdx: 9,
             lowerFn: 
             function lowerImportedOwnedHost_IncomingResponse(obj) {
               if (!(obj instanceof IncomingResponse)) {
@@ -18209,6 +18909,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['infoCode', 
             _lowerFlatOption({
@@ -18220,6 +18921,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 2,
               variantPayloadOffset32: 2,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
@@ -18231,6 +18933,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 1,
               variantPayloadOffset32: 1,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 2, 1 ],['alertMessage', 
             _lowerFlatOption({
@@ -18242,6 +18945,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
             _lowerFlatOption({
@@ -18253,6 +18957,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
             _lowerFlatOption({
@@ -18264,6 +18969,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-header-size', 
             _lowerFlatOption({
@@ -18279,6 +18985,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 3,
+                payloadMaybeNull: false,
               })
               , 12, 4 ],['fieldSize', 
               _lowerFlatOption({
@@ -18290,6 +18997,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 2,
+                payloadMaybeNull: false,
               })
               , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
               ],
@@ -18297,6 +19005,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 6,
+              payloadMaybeNull: false,
             })
             , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
             _lowerFlatOption({
@@ -18308,6 +19017,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18319,6 +19029,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18330,6 +19041,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
             _lowerFlatOption({
@@ -18341,6 +19053,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18352,6 +19065,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18363,6 +19077,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
             _lowerFlatOption({
@@ -18374,6 +19089,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
             _lowerFlatOption({
@@ -18385,6 +19101,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18396,6 +19113,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18407,6 +19125,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
             _lowerFlatOption({
@@ -18418,6 +19137,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
             _lowerFlatOption({
@@ -18429,6 +19149,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
             _lowerFlatOption({
@@ -18440,6 +19161,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],],
             variantSize32: 32,
@@ -18467,6 +19189,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 8,
       variantPayloadOffset32: 8,
       variantFlatCount: 10,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -18500,6 +19223,7 @@ let gen = (function* _initGenerator () {
           caseMetas: [
           [ 'ok', _lowerFlatOwn({
             componentIdx: 0,
+            tableIdx: 9,
             lowerFn: 
             function lowerImportedOwnedHost_IncomingResponse(obj) {
               if (!(obj instanceof IncomingResponse)) {
@@ -18526,6 +19250,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['infoCode', 
             _lowerFlatOption({
@@ -18537,6 +19262,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 2,
               variantPayloadOffset32: 2,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
@@ -18548,6 +19274,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 1,
               variantPayloadOffset32: 1,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 2, 1 ],['alertMessage', 
             _lowerFlatOption({
@@ -18559,6 +19286,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
             _lowerFlatOption({
@@ -18570,6 +19298,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
             _lowerFlatOption({
@@ -18581,6 +19310,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-header-size', 
             _lowerFlatOption({
@@ -18596,6 +19326,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 3,
+                payloadMaybeNull: false,
               })
               , 12, 4 ],['fieldSize', 
               _lowerFlatOption({
@@ -18607,6 +19338,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 2,
+                payloadMaybeNull: false,
               })
               , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
               ],
@@ -18614,6 +19346,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 6,
+              payloadMaybeNull: false,
             })
             , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
             _lowerFlatOption({
@@ -18625,6 +19358,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18636,6 +19370,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18647,6 +19382,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
             _lowerFlatOption({
@@ -18658,6 +19394,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18669,6 +19406,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18680,6 +19418,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
             _lowerFlatOption({
@@ -18691,6 +19430,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
             _lowerFlatOption({
@@ -18702,6 +19442,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -18713,6 +19454,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -18724,6 +19466,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
             _lowerFlatOption({
@@ -18735,6 +19478,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
             _lowerFlatOption({
@@ -18746,6 +19490,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
             _lowerFlatOption({
@@ -18757,6 +19502,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],],
             variantSize32: 32,
@@ -18784,6 +19530,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 8,
       variantPayloadOffset32: 8,
       variantFlatCount: 10,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -18811,6 +19558,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 5,
         lowerFn: 
         function lowerImportedOwnedHost_IncomingBody(obj) {
           if (!(obj instanceof IncomingBody)) {
@@ -18858,6 +19606,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 5,
         lowerFn: 
         function lowerImportedOwnedHost_IncomingBody(obj) {
           if (!(obj instanceof IncomingBody)) {
@@ -18995,6 +19744,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 4,
       variantPayloadFlatTypes: ['i32','i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19045,6 +19795,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 4,
       variantPayloadFlatTypes: ['i32','i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19089,6 +19840,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19132,6 +19884,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19176,6 +19929,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19219,6 +19973,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 3,
       variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -19258,6 +20013,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 4,
         lowerFn: 
         function lowerImportedOwnedHost_OutgoingBody(obj) {
           if (!(obj instanceof OutgoingBody)) {
@@ -19305,6 +20061,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 4,
         lowerFn: 
         function lowerImportedOwnedHost_OutgoingBody(obj) {
           if (!(obj instanceof OutgoingBody)) {
@@ -19364,6 +20121,7 @@ let gen = (function* _initGenerator () {
             [ 'none', null, 0, 0, 0 ],
             [ 'some', _lowerFlatOwn({
               componentIdx: 0,
+              tableIdx: 7,
               lowerFn: 
               function lowerImportedOwnedHost_Fields(obj) {
                 if (!(obj instanceof Fields)) {
@@ -19384,6 +20142,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 40, 8, 8 ],
           [ 'err', _lowerFlatVariant({
@@ -19397,6 +20156,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['infoCode', 
             _lowerFlatOption({
@@ -19408,6 +20168,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 2,
               variantPayloadOffset32: 2,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
@@ -19419,6 +20180,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 1,
               variantPayloadOffset32: 1,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 2, 1 ],['alertMessage', 
             _lowerFlatOption({
@@ -19430,6 +20192,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
             _lowerFlatOption({
@@ -19441,6 +20204,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
             _lowerFlatOption({
@@ -19452,6 +20216,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-header-size', 
             _lowerFlatOption({
@@ -19467,6 +20232,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 3,
+                payloadMaybeNull: false,
               })
               , 12, 4 ],['fieldSize', 
               _lowerFlatOption({
@@ -19478,6 +20244,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 2,
+                payloadMaybeNull: false,
               })
               , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
               ],
@@ -19485,6 +20252,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 6,
+              payloadMaybeNull: false,
             })
             , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
             _lowerFlatOption({
@@ -19496,6 +20264,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19507,6 +20276,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19518,6 +20288,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
             _lowerFlatOption({
@@ -19529,6 +20300,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19540,6 +20312,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19551,6 +20324,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
             _lowerFlatOption({
@@ -19562,6 +20336,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
             _lowerFlatOption({
@@ -19573,6 +20348,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19584,6 +20360,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19595,6 +20372,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
             _lowerFlatOption({
@@ -19606,6 +20384,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
             _lowerFlatOption({
@@ -19617,6 +20396,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
             _lowerFlatOption({
@@ -19628,6 +20408,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],],
             variantSize32: 32,
@@ -19655,6 +20436,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 8,
       variantPayloadOffset32: 8,
       variantFlatCount: 10,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -19692,6 +20474,7 @@ let gen = (function* _initGenerator () {
             [ 'none', null, 0, 0, 0 ],
             [ 'some', _lowerFlatOwn({
               componentIdx: 0,
+              tableIdx: 7,
               lowerFn: 
               function lowerImportedOwnedHost_Fields(obj) {
                 if (!(obj instanceof Fields)) {
@@ -19712,6 +20495,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 40, 8, 8 ],
           [ 'err', _lowerFlatVariant({
@@ -19725,6 +20509,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['infoCode', 
             _lowerFlatOption({
@@ -19736,6 +20521,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 2,
               variantPayloadOffset32: 2,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
@@ -19747,6 +20533,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 1,
               variantPayloadOffset32: 1,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 2, 1 ],['alertMessage', 
             _lowerFlatOption({
@@ -19758,6 +20545,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
             _lowerFlatOption({
@@ -19769,6 +20557,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
             _lowerFlatOption({
@@ -19780,6 +20569,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-header-size', 
             _lowerFlatOption({
@@ -19795,6 +20585,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 3,
+                payloadMaybeNull: false,
               })
               , 12, 4 ],['fieldSize', 
               _lowerFlatOption({
@@ -19806,6 +20597,7 @@ let gen = (function* _initGenerator () {
                 variantAlign32: 4,
                 variantPayloadOffset32: 4,
                 variantFlatCount: 2,
+                payloadMaybeNull: false,
               })
               , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
               ],
@@ -19813,6 +20605,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 6,
+              payloadMaybeNull: false,
             })
             , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
             _lowerFlatOption({
@@ -19824,6 +20617,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19835,6 +20629,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19846,6 +20641,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
             _lowerFlatOption({
@@ -19857,6 +20653,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19868,6 +20665,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19879,6 +20677,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
             _lowerFlatOption({
@@ -19890,6 +20689,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 8,
               variantPayloadOffset32: 8,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
             _lowerFlatOption({
@@ -19901,6 +20701,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
@@ -19912,6 +20713,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4 ],['fieldSize', 
             _lowerFlatOption({
@@ -19923,6 +20725,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 2,
+              payloadMaybeNull: false,
             })
             , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
             _lowerFlatOption({
@@ -19934,6 +20737,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
             _lowerFlatOption({
@@ -19945,6 +20749,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
             _lowerFlatOption({
@@ -19956,6 +20761,7 @@ let gen = (function* _initGenerator () {
               variantAlign32: 4,
               variantPayloadOffset32: 4,
               variantFlatCount: 3,
+              payloadMaybeNull: false,
             })
             , 12, 4, 3 ],],
             variantSize32: 32,
@@ -19983,6 +20789,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 8,
       variantPayloadOffset32: 8,
       variantFlatCount: 10,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -20006,6 +20813,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline51.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 4,
       classNameFn: () => OutgoingBody,
       createResourceFn: 
       (handle) => {
@@ -20029,6 +20837,7 @@ let gen = (function* _initGenerator () {
       ['none', null, 0, 0, 0, [] ],
       ['some', _liftFlatOwn({
         componentIdx: 0,
+        tableIdx: 7,
         classNameFn: () => Fields,
         createResourceFn: 
         (handle) => {
@@ -20053,6 +20862,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -20070,6 +20880,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['infoCode', 
         _lowerFlatOption({
@@ -20081,6 +20892,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 2,
           variantPayloadOffset32: 2,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
@@ -20092,6 +20904,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 1,
           variantPayloadOffset32: 1,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 2, 1 ],['alertMessage', 
         _lowerFlatOption({
@@ -20103,6 +20916,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
         _lowerFlatOption({
@@ -20114,6 +20928,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
         _lowerFlatOption({
@@ -20125,6 +20940,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-header-size', 
         _lowerFlatOption({
@@ -20140,6 +20956,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 3,
+            payloadMaybeNull: false,
           })
           , 12, 4 ],['fieldSize', 
           _lowerFlatOption({
@@ -20151,6 +20968,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
           ],
@@ -20158,6 +20976,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 6,
+          payloadMaybeNull: false,
         })
         , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
         _lowerFlatOption({
@@ -20169,6 +20988,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20180,6 +21000,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20191,6 +21012,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
         _lowerFlatOption({
@@ -20202,6 +21024,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20213,6 +21036,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20224,6 +21048,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
         _lowerFlatOption({
@@ -20235,6 +21060,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
         _lowerFlatOption({
@@ -20246,6 +21072,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20257,6 +21084,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20268,6 +21096,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
         _lowerFlatOption({
@@ -20279,6 +21108,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
         _lowerFlatOption({
@@ -20290,6 +21120,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
         _lowerFlatOption({
@@ -20301,6 +21132,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],],
         variantSize32: 32,
@@ -20335,6 +21167,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline51.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 4,
       classNameFn: () => OutgoingBody,
       createResourceFn: 
       (handle) => {
@@ -20358,6 +21191,7 @@ let gen = (function* _initGenerator () {
       ['none', null, 0, 0, 0, [] ],
       ['some', _liftFlatOwn({
         componentIdx: 0,
+        tableIdx: 7,
         classNameFn: () => Fields,
         createResourceFn: 
         (handle) => {
@@ -20382,6 +21216,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -20399,6 +21234,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['infoCode', 
         _lowerFlatOption({
@@ -20410,6 +21246,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 2,
           variantPayloadOffset32: 2,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
@@ -20421,6 +21258,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 1,
           variantPayloadOffset32: 1,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 2, 1 ],['alertMessage', 
         _lowerFlatOption({
@@ -20432,6 +21270,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
         _lowerFlatOption({
@@ -20443,6 +21282,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
         _lowerFlatOption({
@@ -20454,6 +21294,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-header-size', 
         _lowerFlatOption({
@@ -20469,6 +21310,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 3,
+            payloadMaybeNull: false,
           })
           , 12, 4 ],['fieldSize', 
           _lowerFlatOption({
@@ -20480,6 +21322,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
           ],
@@ -20487,6 +21330,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 6,
+          payloadMaybeNull: false,
         })
         , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
         _lowerFlatOption({
@@ -20498,6 +21342,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20509,6 +21354,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20520,6 +21366,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
         _lowerFlatOption({
@@ -20531,6 +21378,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20542,6 +21390,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20553,6 +21402,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
         _lowerFlatOption({
@@ -20564,6 +21414,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
         _lowerFlatOption({
@@ -20575,6 +21426,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -20586,6 +21438,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -20597,6 +21450,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
         _lowerFlatOption({
@@ -20608,6 +21462,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
         _lowerFlatOption({
@@ -20619,6 +21474,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
         _lowerFlatOption({
@@ -20630,6 +21486,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],],
         variantSize32: 32,
@@ -20663,30 +21520,16 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline52.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
-      elemLiftFn: _liftFlatU8,
-      elemAlign32: 1,
-      elemSize32: 1,
-      typedArray: Uint8Array,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
+    resultLowerFns: [_lowerFlatList({
+      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
+        elemLowerFn: _lowerFlatU8,
+        elemSize32: 1,
+        elemAlign32: 1,
+      }), 8, 4],], size32: 16, align32: 4 }),
+      elemSize32: 16,
+      elemAlign32: 4,
     })],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 2, 1, 1 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      } ), 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -20695,7 +21538,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: undefined,
+    getReallocFn: () => realloc0,
     importFn: _trampoline52,
   },
   ))) : _lowerImportBackwardsCompat.bind(
@@ -20705,30 +21548,16 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline52.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
-      elemLiftFn: _liftFlatU8,
-      elemAlign32: 1,
-      elemSize32: 1,
-      typedArray: Uint8Array,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
+    resultLowerFns: [_lowerFlatList({
+      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
+        elemLowerFn: _lowerFlatU8,
+        elemSize32: 1,
+        elemAlign32: 1,
+      }), 8, 4],], size32: 16, align32: 4 }),
+      elemSize32: 16,
+      elemAlign32: 4,
     })],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 2, 1, 1 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      } ), 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -20737,7 +21566,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: undefined,
+    getReallocFn: () => realloc0,
     importFn: _trampoline52,
   },
   );
@@ -20748,16 +21577,30 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline53.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
+      elemLiftFn: _liftFlatU8,
+      elemAlign32: 1,
+      elemSize32: 1,
+      typedArray: Uint8Array,
     })],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 2, 1, 1 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      } ), 2, 1, 1 ],
+      ],
+      variantSize32: 2,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 2,
+    })
+    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -20766,7 +21609,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
+    getReallocFn: undefined,
     importFn: _trampoline53,
   },
   ))) : _lowerImportBackwardsCompat.bind(
@@ -20776,16 +21619,30 @@ let gen = (function* _initGenerator () {
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline53.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
+      elemLiftFn: _liftFlatU8,
+      elemAlign32: 1,
+      elemSize32: 1,
+      typedArray: Uint8Array,
     })],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 2, 1, 1 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      } ), 2, 1, 1 ],
+      ],
+      variantSize32: 2,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 2,
+    })
+    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -20794,7 +21651,7 @@ let gen = (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
+    getReallocFn: undefined,
     importFn: _trampoline53,
   },
   );
@@ -20813,6 +21670,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -20866,6 +21724,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -20920,6 +21779,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -20973,6 +21833,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -21032,6 +21893,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -21090,6 +21952,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -21148,6 +22011,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -21205,6 +22069,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -21294,6 +22159,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline59.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 10,
       classNameFn: () => OutgoingRequest,
       createResourceFn: 
       (handle) => {
@@ -21317,6 +22183,7 @@ let gen = (function* _initGenerator () {
       ['none', null, 0, 0, 0, [] ],
       ['some', _liftFlatOwn({
         componentIdx: 0,
+        tableIdx: 11,
         classNameFn: () => RequestOptions,
         createResourceFn: 
         (handle) => {
@@ -21341,6 +22208,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -21348,6 +22216,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 8,
         lowerFn: 
         function lowerImportedOwnedHost_FutureIncomingResponse(obj) {
           if (!(obj instanceof FutureIncomingResponse)) {
@@ -21374,6 +22243,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['infoCode', 
         _lowerFlatOption({
@@ -21385,6 +22255,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 2,
           variantPayloadOffset32: 2,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
@@ -21396,6 +22267,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 1,
           variantPayloadOffset32: 1,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 2, 1 ],['alertMessage', 
         _lowerFlatOption({
@@ -21407,6 +22279,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
         _lowerFlatOption({
@@ -21418,6 +22291,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
         _lowerFlatOption({
@@ -21429,6 +22303,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-header-size', 
         _lowerFlatOption({
@@ -21444,6 +22319,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 3,
+            payloadMaybeNull: false,
           })
           , 12, 4 ],['fieldSize', 
           _lowerFlatOption({
@@ -21455,6 +22331,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
           ],
@@ -21462,6 +22339,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 6,
+          payloadMaybeNull: false,
         })
         , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
         _lowerFlatOption({
@@ -21473,6 +22351,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21484,6 +22363,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21495,6 +22375,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
         _lowerFlatOption({
@@ -21506,6 +22387,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21517,6 +22399,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21528,6 +22411,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
         _lowerFlatOption({
@@ -21539,6 +22423,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
         _lowerFlatOption({
@@ -21550,6 +22435,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21561,6 +22447,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21572,6 +22459,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
         _lowerFlatOption({
@@ -21583,6 +22471,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
         _lowerFlatOption({
@@ -21594,6 +22483,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
         _lowerFlatOption({
@@ -21605,6 +22495,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],],
         variantSize32: 32,
@@ -21639,6 +22530,7 @@ let gen = (function* _initGenerator () {
     isManualAsync: _trampoline59.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
+      tableIdx: 10,
       classNameFn: () => OutgoingRequest,
       createResourceFn: 
       (handle) => {
@@ -21662,6 +22554,7 @@ let gen = (function* _initGenerator () {
       ['none', null, 0, 0, 0, [] ],
       ['some', _liftFlatOwn({
         componentIdx: 0,
+        tableIdx: 11,
         classNameFn: () => RequestOptions,
         createResourceFn: 
         (handle) => {
@@ -21686,6 +22579,7 @@ let gen = (function* _initGenerator () {
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
       variantPayloadFlatTypes: ['i32'],
+      payloadMaybeNull: false,
     })
     ],
     resultLowerFns: [
@@ -21693,6 +22587,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 8,
         lowerFn: 
         function lowerImportedOwnedHost_FutureIncomingResponse(obj) {
           if (!(obj instanceof FutureIncomingResponse)) {
@@ -21719,6 +22614,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['infoCode', 
         _lowerFlatOption({
@@ -21730,6 +22626,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 2,
           variantPayloadOffset32: 2,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
@@ -21741,6 +22638,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 1,
           variantPayloadOffset32: 1,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 2, 1 ],['alertMessage', 
         _lowerFlatOption({
@@ -21752,6 +22650,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
         _lowerFlatOption({
@@ -21763,6 +22662,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
         _lowerFlatOption({
@@ -21774,6 +22674,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-header-size', 
         _lowerFlatOption({
@@ -21789,6 +22690,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 3,
+            payloadMaybeNull: false,
           })
           , 12, 4 ],['fieldSize', 
           _lowerFlatOption({
@@ -21800,6 +22702,7 @@ let gen = (function* _initGenerator () {
             variantAlign32: 4,
             variantPayloadOffset32: 4,
             variantFlatCount: 2,
+            payloadMaybeNull: false,
           })
           , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
           ],
@@ -21807,6 +22710,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 6,
+          payloadMaybeNull: false,
         })
         , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
         _lowerFlatOption({
@@ -21818,6 +22722,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21829,6 +22734,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21840,6 +22746,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
         _lowerFlatOption({
@@ -21851,6 +22758,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21862,6 +22770,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21873,6 +22782,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
         _lowerFlatOption({
@@ -21884,6 +22794,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 8,
           variantPayloadOffset32: 8,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
         _lowerFlatOption({
@@ -21895,6 +22806,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
@@ -21906,6 +22818,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4 ],['fieldSize', 
         _lowerFlatOption({
@@ -21917,6 +22830,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 2,
+          payloadMaybeNull: false,
         })
         , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
         _lowerFlatOption({
@@ -21928,6 +22842,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
         _lowerFlatOption({
@@ -21939,6 +22854,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
         _lowerFlatOption({
@@ -21950,6 +22866,7 @@ let gen = (function* _initGenerator () {
           variantAlign32: 4,
           variantPayloadOffset32: 4,
           variantFlatCount: 3,
+          payloadMaybeNull: false,
         })
         , 12, 4, 3 ],],
         variantSize32: 32,
@@ -22050,6 +22967,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -22103,6 +23021,7 @@ let gen = (function* _initGenerator () {
       [ 'err', _lowerFlatVariant({
         caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
           componentIdx: 0,
+          tableIdx: 1,
           lowerFn: 
           function lowerImportedOwnedHost_Error$1(obj) {
             if (!(obj instanceof Error$1)) {
@@ -22155,6 +23074,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 3,
         lowerFn: 
         function lowerImportedOwnedHost_InputStream(obj) {
           if (!(obj instanceof InputStream)) {
@@ -22210,6 +23130,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 3,
         lowerFn: 
         function lowerImportedOwnedHost_InputStream(obj) {
           if (!(obj instanceof InputStream)) {
@@ -22266,6 +23187,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -22321,6 +23243,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -22377,6 +23300,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -22432,6 +23356,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 2,
         lowerFn: 
         function lowerImportedOwnedHost_OutputStream(obj) {
           if (!(obj instanceof OutputStream)) {
@@ -22567,6 +23492,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 15,
         lowerFn: 
         function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
           if (!(obj instanceof DirectoryEntryStream)) {
@@ -22622,6 +23548,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 15,
         lowerFn: 
         function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
           if (!(obj instanceof DirectoryEntryStream)) {
@@ -22773,6 +23700,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['dataModificationTimestamp', 
       _lowerFlatOption({
@@ -22784,6 +23712,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['statusChangeTimestamp', 
       _lowerFlatOption({
@@ -22795,6 +23724,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
       [ 'err', 
@@ -22853,6 +23783,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['dataModificationTimestamp', 
       _lowerFlatOption({
@@ -22864,6 +23795,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['statusChangeTimestamp', 
       _lowerFlatOption({
@@ -22875,6 +23807,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
       [ 'err', 
@@ -22934,6 +23867,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['dataModificationTimestamp', 
       _lowerFlatOption({
@@ -22945,6 +23879,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['statusChangeTimestamp', 
       _lowerFlatOption({
@@ -22956,6 +23891,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
       [ 'err', 
@@ -23014,6 +23950,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['dataModificationTimestamp', 
       _lowerFlatOption({
@@ -23025,6 +23962,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],['statusChangeTimestamp', 
       _lowerFlatOption({
@@ -23036,6 +23974,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 8,
         variantPayloadOffset32: 8,
         variantFlatCount: 3,
+        payloadMaybeNull: false,
       })
       , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
       [ 'err', 
@@ -23079,6 +24018,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 14,
         lowerFn: 
         function lowerImportedOwnedHost_Descriptor(obj) {
           if (!(obj instanceof Descriptor)) {
@@ -23134,6 +24074,7 @@ let gen = (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 14,
         lowerFn: 
         function lowerImportedOwnedHost_Descriptor(obj) {
           if (!(obj instanceof Descriptor)) {
@@ -23443,6 +24384,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 4,
+        payloadMaybeNull: false,
       })
       , 20, 4, 4 ],
       [ 'err', 
@@ -23501,6 +24443,7 @@ let gen = (function* _initGenerator () {
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 4,
+        payloadMaybeNull: false,
       })
       , 20, 4, 4 ],
       [ 'err', 
@@ -23594,6 +24537,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 12,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalInput(obj) {
           if (!(obj instanceof TerminalInput)) {
@@ -23614,6 +24558,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23641,6 +24586,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 12,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalInput(obj) {
           if (!(obj instanceof TerminalInput)) {
@@ -23661,6 +24607,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23689,6 +24636,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 13,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalOutput(obj) {
           if (!(obj instanceof TerminalOutput)) {
@@ -23709,6 +24657,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23736,6 +24685,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 13,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalOutput(obj) {
           if (!(obj instanceof TerminalOutput)) {
@@ -23756,6 +24706,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23784,6 +24735,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 13,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalOutput(obj) {
           if (!(obj instanceof TerminalOutput)) {
@@ -23804,6 +24756,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23831,6 +24784,7 @@ let gen = (function* _initGenerator () {
       [ 'none', null, 0, 0, 0 ],
       [ 'some', _lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 13,
         lowerFn: 
         function lowerImportedOwnedHost_TerminalOutput(obj) {
           if (!(obj instanceof TerminalOutput)) {
@@ -23851,6 +24805,7 @@ let gen = (function* _initGenerator () {
       variantAlign32: 4,
       variantPayloadOffset32: 4,
       variantFlatCount: 2,
+      payloadMaybeNull: false,
     })
     ],
     hasResultPointer: true,
@@ -23917,6 +24872,7 @@ let gen = (function* _initGenerator () {
     resultLowerFns: [_lowerFlatList({
       elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 14,
         lowerFn: 
         function lowerImportedOwnedHost_Descriptor(obj) {
           if (!(obj instanceof Descriptor)) {
@@ -23957,6 +24913,7 @@ let gen = (function* _initGenerator () {
     resultLowerFns: [_lowerFlatList({
       elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatOwn({
         componentIdx: 0,
+        tableIdx: 14,
         lowerFn: 
         function lowerImportedOwnedHost_Descriptor(obj) {
           if (!(obj instanceof Descriptor)) {
@@ -23991,207 +24948,208 @@ let gen = (function* _initGenerator () {
   ({ exports: exports0 } = yield instantiateCore(yield module1));
   ({ exports: exports1 } = yield instantiateCore(yield module0, {
     'component:aws-cli/providers': {
-      'provide-credentials': exports0['1'],
-      'provide-region': exports0['0'],
+      'provide-credentials': Object.assign(exports0['1'], { _jcoMaySuspend: false }),
+      'provide-region': Object.assign(exports0['2'], { _jcoMaySuspend: false }),
     },
     'wasi:cli/environment@0.2.0': {
-      'get-environment': exports0['38'],
+      'get-environment': Object.assign(exports0['38'], { _jcoMaySuspend: false }),
     },
-    'wasi:cli/environment@0.2.9': {
-      'get-arguments': exports0['2'],
+    'wasi:cli/environment@0.2.12': {
+      'get-arguments': Object.assign(exports0['3'], { _jcoMaySuspend: false }),
     },
     'wasi:cli/exit@0.2.0': {
-      exit: trampoline32,
+      exit: Object.assign(trampoline32, { _jcoMaySuspend: false }),
     },
     'wasi:cli/stderr@0.2.0': {
-      'get-stderr': trampoline36,
+      'get-stderr': Object.assign(trampoline36, { _jcoMaySuspend: false }),
     },
     'wasi:cli/stdin@0.2.0': {
-      'get-stdin': trampoline34,
+      'get-stdin': Object.assign(trampoline34, { _jcoMaySuspend: false }),
     },
     'wasi:cli/stdout@0.2.0': {
-      'get-stdout': trampoline35,
+      'get-stdout': Object.assign(trampoline35, { _jcoMaySuspend: false }),
     },
     'wasi:cli/terminal-input@0.2.0': {
-      '[resource-drop]terminal-input': _guardMayLeave(0, trampoline28),
+      '[resource-drop]terminal-input': Object.assign(_guardMayLeave(0, trampoline28), { _jcoMaySuspend: false }),
     },
     'wasi:cli/terminal-output@0.2.0': {
-      '[resource-drop]terminal-output': _guardMayLeave(0, trampoline29),
+      '[resource-drop]terminal-output': Object.assign(_guardMayLeave(0, trampoline29), { _jcoMaySuspend: false }),
     },
     'wasi:cli/terminal-stderr@0.2.0': {
-      'get-terminal-stderr': exports0['41'],
+      'get-terminal-stderr': Object.assign(exports0['41'], { _jcoMaySuspend: false }),
     },
     'wasi:cli/terminal-stdin@0.2.0': {
-      'get-terminal-stdin': exports0['39'],
+      'get-terminal-stdin': Object.assign(exports0['39'], { _jcoMaySuspend: false }),
     },
     'wasi:cli/terminal-stdout@0.2.0': {
-      'get-terminal-stdout': exports0['40'],
+      'get-terminal-stdout': Object.assign(exports0['40'], { _jcoMaySuspend: false }),
     },
     'wasi:clocks/monotonic-clock@0.2.0': {
-      now: trampoline15,
+      now: Object.assign(trampoline15, { _jcoMaySuspend: false }),
       'subscribe-duration': trampoline14,
     },
     'wasi:clocks/monotonic-clock@0.2.12': {
-      now: trampoline15,
+      now: Object.assign(trampoline15, { _jcoMaySuspend: false }),
       'subscribe-duration': trampoline14,
     },
     'wasi:clocks/wall-clock@0.2.0': {
-      now: exports0['42'],
+      now: Object.assign(exports0['42'], { _jcoMaySuspend: false }),
     },
     'wasi:filesystem/preopens@0.2.0': {
-      'get-directories': exports0['43'],
+      'get-directories': Object.assign(exports0['43'], { _jcoMaySuspend: false }),
     },
     'wasi:filesystem/types@0.2.0': {
-      '[method]descriptor.append-via-stream': exports0['27'],
-      '[method]descriptor.create-directory-at': exports0['30'],
-      '[method]descriptor.get-flags': exports0['28'],
-      '[method]descriptor.metadata-hash': exports0['35'],
-      '[method]descriptor.metadata-hash-at': exports0['36'],
-      '[method]descriptor.open-at': exports0['33'],
-      '[method]descriptor.read-directory': exports0['29'],
-      '[method]descriptor.read-via-stream': exports0['25'],
-      '[method]descriptor.stat': exports0['31'],
-      '[method]descriptor.stat-at': exports0['32'],
-      '[method]descriptor.unlink-file-at': exports0['34'],
-      '[method]descriptor.write-via-stream': exports0['26'],
-      '[method]directory-entry-stream.read-directory-entry': exports0['37'],
-      '[resource-drop]descriptor': _guardMayLeave(0, trampoline30),
-      '[resource-drop]directory-entry-stream': _guardMayLeave(0, trampoline31),
+      '[method]descriptor.append-via-stream': Object.assign(exports0['27'], { _jcoMaySuspend: false }),
+      '[method]descriptor.create-directory-at': Object.assign(exports0['30'], { _jcoMaySuspend: false }),
+      '[method]descriptor.get-flags': Object.assign(exports0['28'], { _jcoMaySuspend: false }),
+      '[method]descriptor.metadata-hash': Object.assign(exports0['35'], { _jcoMaySuspend: false }),
+      '[method]descriptor.metadata-hash-at': Object.assign(exports0['36'], { _jcoMaySuspend: false }),
+      '[method]descriptor.open-at': Object.assign(exports0['33'], { _jcoMaySuspend: false }),
+      '[method]descriptor.read-directory': Object.assign(exports0['29'], { _jcoMaySuspend: false }),
+      '[method]descriptor.read-via-stream': Object.assign(exports0['25'], { _jcoMaySuspend: false }),
+      '[method]descriptor.stat': Object.assign(exports0['31'], { _jcoMaySuspend: false }),
+      '[method]descriptor.stat-at': Object.assign(exports0['32'], { _jcoMaySuspend: false }),
+      '[method]descriptor.unlink-file-at': Object.assign(exports0['34'], { _jcoMaySuspend: false }),
+      '[method]descriptor.write-via-stream': Object.assign(exports0['26'], { _jcoMaySuspend: false }),
+      '[method]directory-entry-stream.read-directory-entry': Object.assign(exports0['37'], { _jcoMaySuspend: false }),
+      '[resource-drop]descriptor': Object.assign(_guardMayLeave(0, trampoline30), { _jcoMaySuspend: false }),
+      '[resource-drop]directory-entry-stream': Object.assign(_guardMayLeave(0, trampoline31), { _jcoMaySuspend: false }),
     },
     'wasi:http/outgoing-handler@0.2.12': {
-      handle: exports0['22'],
+      handle: Object.assign(exports0['22'], { _jcoMaySuspend: false }),
     },
     'wasi:http/types@0.2.12': {
-      '[constructor]fields': trampoline27,
-      '[constructor]outgoing-request': trampoline16,
-      '[constructor]request-options': trampoline18,
-      '[method]fields.append': exports0['15'],
-      '[method]fields.entries': exports0['16'],
-      '[method]future-incoming-response.get': exports0['6'],
-      '[method]future-incoming-response.subscribe': trampoline8,
-      '[method]future-trailers.get': exports0['13'],
-      '[method]future-trailers.subscribe': trampoline4,
-      '[method]incoming-body.stream': exports0['5'],
-      '[method]incoming-response.consume': exports0['7'],
-      '[method]incoming-response.headers': trampoline10,
-      '[method]incoming-response.status': trampoline11,
-      '[method]outgoing-body.write': exports0['4'],
-      '[method]outgoing-request.body': exports0['12'],
-      '[method]outgoing-request.set-authority': exports0['10'],
-      '[method]outgoing-request.set-method': exports0['8'],
-      '[method]outgoing-request.set-path-with-query': exports0['11'],
-      '[method]outgoing-request.set-scheme': exports0['9'],
-      '[method]request-options.set-between-bytes-timeout': trampoline21,
-      '[method]request-options.set-connect-timeout': trampoline19,
-      '[method]request-options.set-first-byte-timeout': trampoline20,
-      '[resource-drop]fields': _guardMayLeave(0, trampoline5),
-      '[resource-drop]future-incoming-response': _guardMayLeave(0, trampoline9),
-      '[resource-drop]future-trailers': _guardMayLeave(0, trampoline7),
-      '[resource-drop]incoming-body': _guardMayLeave(0, trampoline3),
-      '[resource-drop]incoming-response': _guardMayLeave(0, trampoline12),
-      '[resource-drop]outgoing-body': _guardMayLeave(0, trampoline6),
-      '[resource-drop]outgoing-request': _guardMayLeave(0, trampoline17),
-      '[resource-drop]request-options': _guardMayLeave(0, trampoline22),
-      '[static]incoming-body.finish': trampoline2,
-      '[static]outgoing-body.finish': exports0['14'],
+      '[constructor]fields': Object.assign(trampoline27, { _jcoMaySuspend: false }),
+      '[constructor]outgoing-request': Object.assign(trampoline16, { _jcoMaySuspend: false }),
+      '[constructor]request-options': Object.assign(trampoline18, { _jcoMaySuspend: false }),
+      '[method]fields.append': Object.assign(exports0['16'], { _jcoMaySuspend: false }),
+      '[method]fields.entries': Object.assign(exports0['15'], { _jcoMaySuspend: false }),
+      '[method]future-incoming-response.get': Object.assign(exports0['6'], { _jcoMaySuspend: false }),
+      '[method]future-incoming-response.subscribe': Object.assign(trampoline8, { _jcoMaySuspend: false }),
+      '[method]future-trailers.get': Object.assign(exports0['13'], { _jcoMaySuspend: false }),
+      '[method]future-trailers.subscribe': Object.assign(trampoline4, { _jcoMaySuspend: false }),
+      '[method]incoming-body.stream': Object.assign(exports0['5'], { _jcoMaySuspend: false }),
+      '[method]incoming-response.consume': Object.assign(exports0['7'], { _jcoMaySuspend: false }),
+      '[method]incoming-response.headers': Object.assign(trampoline10, { _jcoMaySuspend: false }),
+      '[method]incoming-response.status': Object.assign(trampoline11, { _jcoMaySuspend: false }),
+      '[method]outgoing-body.write': Object.assign(exports0['4'], { _jcoMaySuspend: false }),
+      '[method]outgoing-request.body': Object.assign(exports0['12'], { _jcoMaySuspend: false }),
+      '[method]outgoing-request.set-authority': Object.assign(exports0['10'], { _jcoMaySuspend: false }),
+      '[method]outgoing-request.set-method': Object.assign(exports0['8'], { _jcoMaySuspend: false }),
+      '[method]outgoing-request.set-path-with-query': Object.assign(exports0['11'], { _jcoMaySuspend: false }),
+      '[method]outgoing-request.set-scheme': Object.assign(exports0['9'], { _jcoMaySuspend: false }),
+      '[method]request-options.set-between-bytes-timeout': Object.assign(trampoline21, { _jcoMaySuspend: false }),
+      '[method]request-options.set-connect-timeout': Object.assign(trampoline19, { _jcoMaySuspend: false }),
+      '[method]request-options.set-first-byte-timeout': Object.assign(trampoline20, { _jcoMaySuspend: false }),
+      '[resource-drop]fields': Object.assign(_guardMayLeave(0, trampoline5), { _jcoMaySuspend: false }),
+      '[resource-drop]future-incoming-response': Object.assign(_guardMayLeave(0, trampoline9), { _jcoMaySuspend: false }),
+      '[resource-drop]future-trailers': Object.assign(_guardMayLeave(0, trampoline7), { _jcoMaySuspend: false }),
+      '[resource-drop]incoming-body': Object.assign(_guardMayLeave(0, trampoline3), { _jcoMaySuspend: false }),
+      '[resource-drop]incoming-response': Object.assign(_guardMayLeave(0, trampoline12), { _jcoMaySuspend: false }),
+      '[resource-drop]outgoing-body': Object.assign(_guardMayLeave(0, trampoline6), { _jcoMaySuspend: false }),
+      '[resource-drop]outgoing-request': Object.assign(_guardMayLeave(0, trampoline17), { _jcoMaySuspend: false }),
+      '[resource-drop]request-options': Object.assign(_guardMayLeave(0, trampoline22), { _jcoMaySuspend: false }),
+      '[static]incoming-body.finish': Object.assign(trampoline2, { _jcoMaySuspend: false }),
+      '[static]outgoing-body.finish': Object.assign(exports0['14'], { _jcoMaySuspend: false }),
     },
     'wasi:io/error@0.2.0': {
-      '[resource-drop]error': _guardMayLeave(0, trampoline1),
+      '[resource-drop]error': Object.assign(_guardMayLeave(0, trampoline1), { _jcoMaySuspend: false }),
     },
     'wasi:io/error@0.2.12': {
-      '[method]error.to-debug-string': exports0['21'],
-      '[resource-drop]error': _guardMayLeave(0, trampoline1),
+      '[method]error.to-debug-string': Object.assign(exports0['21'], { _jcoMaySuspend: false }),
+      '[resource-drop]error': Object.assign(_guardMayLeave(0, trampoline1), { _jcoMaySuspend: false }),
     },
     'wasi:io/poll@0.2.0': {
       '[method]pollable.block': trampoline33,
-      '[resource-drop]pollable': _guardMayLeave(0, trampoline25),
-      poll: exports0['23'],
+      '[resource-drop]pollable': Object.assign(_guardMayLeave(0, trampoline25), { _jcoMaySuspend: false }),
+      poll: Object.assign(exports0['23'], { _jcoMaySuspend: false }),
     },
     'wasi:io/poll@0.2.12': {
-      '[method]pollable.ready': trampoline26,
-      '[resource-drop]pollable': _guardMayLeave(0, trampoline25),
-      poll: exports0['23'],
+      '[method]pollable.ready': Object.assign(trampoline26, { _jcoMaySuspend: false }),
+      '[resource-drop]pollable': Object.assign(_guardMayLeave(0, trampoline25), { _jcoMaySuspend: false }),
+      poll: Object.assign(exports0['23'], { _jcoMaySuspend: false }),
     },
     'wasi:io/streams@0.2.0': {
-      '[method]input-stream.read': exports0['20'],
-      '[method]input-stream.subscribe': trampoline24,
-      '[method]output-stream.blocking-flush': exports0['24'],
-      '[method]output-stream.check-write': exports0['18'],
-      '[method]output-stream.subscribe': trampoline23,
-      '[method]output-stream.write': exports0['19'],
-      '[resource-drop]input-stream': _guardMayLeave(0, trampoline13),
-      '[resource-drop]output-stream': _guardMayLeave(0, trampoline0),
+      '[method]input-stream.read': Object.assign(exports0['20'], { _jcoMaySuspend: false }),
+      '[method]input-stream.subscribe': Object.assign(trampoline24, { _jcoMaySuspend: false }),
+      '[method]output-stream.blocking-flush': Object.assign(exports0['24'], { _jcoMaySuspend: false }),
+      '[method]output-stream.check-write': Object.assign(exports0['18'], { _jcoMaySuspend: false }),
+      '[method]output-stream.subscribe': Object.assign(trampoline23, { _jcoMaySuspend: false }),
+      '[method]output-stream.write': Object.assign(exports0['19'], { _jcoMaySuspend: false }),
+      '[resource-drop]input-stream': Object.assign(_guardMayLeave(0, trampoline13), { _jcoMaySuspend: false }),
+      '[resource-drop]output-stream': Object.assign(_guardMayLeave(0, trampoline0), { _jcoMaySuspend: false }),
     },
     'wasi:io/streams@0.2.12': {
-      '[method]input-stream.read': exports0['20'],
-      '[method]input-stream.subscribe': trampoline24,
-      '[method]output-stream.check-write': exports0['18'],
-      '[method]output-stream.splice': exports0['17'],
-      '[method]output-stream.subscribe': trampoline23,
-      '[method]output-stream.write': exports0['19'],
-      '[resource-drop]input-stream': _guardMayLeave(0, trampoline13),
-      '[resource-drop]output-stream': _guardMayLeave(0, trampoline0),
+      '[method]input-stream.read': Object.assign(exports0['20'], { _jcoMaySuspend: false }),
+      '[method]input-stream.subscribe': Object.assign(trampoline24, { _jcoMaySuspend: false }),
+      '[method]output-stream.check-write': Object.assign(exports0['18'], { _jcoMaySuspend: false }),
+      '[method]output-stream.splice': Object.assign(exports0['17'], { _jcoMaySuspend: false }),
+      '[method]output-stream.subscribe': Object.assign(trampoline23, { _jcoMaySuspend: false }),
+      '[method]output-stream.write': Object.assign(exports0['19'], { _jcoMaySuspend: false }),
+      '[resource-drop]input-stream': Object.assign(_guardMayLeave(0, trampoline13), { _jcoMaySuspend: false }),
+      '[resource-drop]output-stream': Object.assign(_guardMayLeave(0, trampoline0), { _jcoMaySuspend: false }),
     },
-    'wasi:random/insecure-seed@0.2.9': {
-      'insecure-seed': exports0['3'],
+    'wasi:random/insecure-seed@0.2.12': {
+      'insecure-seed': Object.assign(exports0['0'], { _jcoMaySuspend: false }),
     },
   }));
   memory0 = exports1.memory;
-  realloc0 = exports1.cabi_realloc;
+  realloc0 = (oldPtr, oldSize, align, newSize) => exports1.cabi_realloc(oldPtr, oldSize, align, newSize) >>> 0;
   
   try {
-    realloc0Async = WebAssembly.promising(exports1.cabi_realloc);
+    const realloc0Promising = WebAssembly.promising(exports1.cabi_realloc);
+    realloc0Async = async (oldPtr, oldSize, align, newSize) => (await realloc0Promising(oldPtr, oldSize, align, newSize)) >>> 0;
   } catch(err) {
-    realloc0Async = exports1.cabi_realloc;
+    realloc0Async = realloc0;
   }
   
   ({ exports: exports2 } = yield instantiateCore(yield module2, {
     '': {
       $imports: exports0.$imports,
-      '0': trampoline37,
+      '0': Object.assign(trampoline37, { _jcoMaySuspend: false }),
       '1': trampoline38,
-      '10': trampoline47,
-      '11': trampoline48,
-      '12': trampoline49,
-      '13': trampoline50,
-      '14': trampoline51,
-      '15': trampoline52,
-      '16': trampoline53,
-      '17': trampoline54,
-      '18': trampoline55,
-      '19': trampoline56,
+      '10': Object.assign(trampoline47, { _jcoMaySuspend: false }),
+      '11': Object.assign(trampoline48, { _jcoMaySuspend: false }),
+      '12': Object.assign(trampoline49, { _jcoMaySuspend: false }),
+      '13': Object.assign(trampoline50, { _jcoMaySuspend: false }),
+      '14': Object.assign(trampoline51, { _jcoMaySuspend: false }),
+      '15': Object.assign(trampoline52, { _jcoMaySuspend: false }),
+      '16': Object.assign(trampoline53, { _jcoMaySuspend: false }),
+      '17': Object.assign(trampoline54, { _jcoMaySuspend: false }),
+      '18': Object.assign(trampoline55, { _jcoMaySuspend: false }),
+      '19': Object.assign(trampoline56, { _jcoMaySuspend: false }),
       '2': trampoline39,
-      '20': trampoline57,
-      '21': trampoline58,
-      '22': trampoline59,
+      '20': Object.assign(trampoline57, { _jcoMaySuspend: false }),
+      '21': Object.assign(trampoline58, { _jcoMaySuspend: false }),
+      '22': Object.assign(trampoline59, { _jcoMaySuspend: false }),
       '23': trampoline60,
       '24': trampoline61,
-      '25': trampoline62,
-      '26': trampoline63,
+      '25': Object.assign(trampoline62, { _jcoMaySuspend: false }),
+      '26': Object.assign(trampoline63, { _jcoMaySuspend: false }),
       '27': trampoline64,
-      '28': trampoline65,
+      '28': Object.assign(trampoline65, { _jcoMaySuspend: false }),
       '29': trampoline66,
-      '3': trampoline40,
+      '3': Object.assign(trampoline40, { _jcoMaySuspend: false }),
       '30': trampoline67,
       '31': trampoline68,
       '32': trampoline69,
       '33': trampoline70,
       '34': trampoline71,
-      '35': trampoline72,
-      '36': trampoline73,
-      '37': trampoline74,
-      '38': trampoline75,
-      '39': trampoline76,
-      '4': trampoline41,
-      '40': trampoline77,
-      '41': trampoline78,
-      '42': trampoline79,
-      '43': trampoline80,
-      '5': trampoline42,
-      '6': trampoline43,
-      '7': trampoline44,
-      '8': trampoline45,
-      '9': trampoline46,
+      '35': Object.assign(trampoline72, { _jcoMaySuspend: false }),
+      '36': Object.assign(trampoline73, { _jcoMaySuspend: false }),
+      '37': Object.assign(trampoline74, { _jcoMaySuspend: false }),
+      '38': Object.assign(trampoline75, { _jcoMaySuspend: false }),
+      '39': Object.assign(trampoline76, { _jcoMaySuspend: false }),
+      '4': Object.assign(trampoline41, { _jcoMaySuspend: false }),
+      '40': Object.assign(trampoline77, { _jcoMaySuspend: false }),
+      '41': Object.assign(trampoline78, { _jcoMaySuspend: false }),
+      '42': Object.assign(trampoline79, { _jcoMaySuspend: false }),
+      '43': Object.assign(trampoline80, { _jcoMaySuspend: false }),
+      '5': Object.assign(trampoline42, { _jcoMaySuspend: false }),
+      '6': Object.assign(trampoline43, { _jcoMaySuspend: false }),
+      '7': Object.assign(trampoline44, { _jcoMaySuspend: false }),
+      '8': Object.assign(trampoline45, { _jcoMaySuspend: false }),
+      '9': Object.assign(trampoline46, { _jcoMaySuspend: false }),
     },
   }));
   run0212Run = WebAssembly.promising(exports1['wasi:cli/run@0.2.12#run']);
@@ -24203,7 +25161,17 @@ let gen = (function* _initGenerator () {
   return { run: run0212, 'wasi:cli/run@0.2.12': run0212,  };
 })();
 let promise, resolve, reject;
-function runNext (value) {
+function normalizeInstantiationError(e) {
+  // Native JSPI rejects a suspending import called from a
+  // core start function before entering its JS wrapper.
+  // At component instantiation time that always means the
+  // implicit synchronous task attempted to block.
+  if (typeof WebAssembly.SuspendError === 'function' && e instanceof WebAssembly.SuspendError) {
+    return new WebAssembly.RuntimeError('cannot block a synchronous task before returning');
+  }
+  return e;
+}
+function runNext(value) {
   try {
     let done;
     do {
@@ -24213,10 +25181,11 @@ function runNext (value) {
       if (resolve) return resolve(value);
       else return value;
     }
-    if (!promise) promise = new Promise((_resolve, _reject) => (resolve = _resolve, reject = _reject));
-    value.then(nextVal => done ? resolve() : runNext(nextVal), reject);
+    if (!promise) promise = new Promise((_resolve, _reject) => (resolve = _resolve, reject= _reject));
+    value.then(nextVal => done ? resolve() : runNext(nextVal), e => reject(normalizeInstantiationError(e)));
   }
   catch (e) {
+    e = normalizeInstantiationError(e);
     if (reject) reject(e);
     else throw e;
   }

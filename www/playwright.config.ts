@@ -13,13 +13,22 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:8080',
     trace: 'on-first-retry',
-    permissions: ['clipboard-read', 'clipboard-write'],
   },
 
   projects: [
     {
+      // Clipboard permissions are a Chromium-only concept - granting them
+      // on Firefox/WebKit throws "Unknown permission" at context creation.
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], permissions: ['clipboard-read', 'clipboard-write'] },
+    },
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
     },
   ],
 
