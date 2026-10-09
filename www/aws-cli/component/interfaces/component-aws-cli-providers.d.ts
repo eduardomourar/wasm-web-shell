@@ -1,7 +1,6 @@
 /** @module Interface component:aws-cli/providers **/
 export function provideCredentials(serviceId: string | undefined): Promise<Credentials>;
 export function provideRegion(region: Region | undefined): Promise<Region | undefined>;
-export type Region = string;
 export interface Credentials {
   accessKeyId: string,
   secretAccessKey: string,
@@ -29,3 +28,4 @@ export interface CredentialsErrorProviderError {
 export interface CredentialsErrorUnhandled {
   tag: 'unhandled',
 }
+export type Region = string;

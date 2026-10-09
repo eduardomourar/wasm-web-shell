@@ -64,6 +64,11 @@ export default {
     },
     compress: false,
     static: false,
+    // The overlay iframe stays in the DOM (src="about:blank") even with no
+    // errors, and WebKit lets it intercept pointer events over the page
+    // underneath, blocking Playwright's terminal clicks. Chromium/Firefox
+    // don't exhibit this, but there's nothing useful the overlay adds here.
+    client: { overlay: false },
   },
   experiments: {
     asyncWebAssembly: true,

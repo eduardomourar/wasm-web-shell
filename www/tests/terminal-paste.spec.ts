@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test.describe('Terminal paste behavior', () => {
   test('should not duplicate prompt when pasting long command', async ({ page }) => {
