@@ -7,7 +7,12 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }

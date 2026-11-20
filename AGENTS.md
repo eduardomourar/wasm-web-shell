@@ -419,3 +419,13 @@ GitHub Actions workflows:
 - **Deploy** (`.github/workflows/deploy.yml`): Build web app and deploy to GitHub Pages
 
 Caching strategy includes cargo registry, target directory, and cargo-run-bin tools.
+
+## Integration Tests
+
+`packages/aws-cli-integration-tests/tests/integration_test.rs` runs the composed CLI against the
+[AWS emulator](https://xsavikx.github.io/aws-emulator-docker/).
+
+- Locally: `make test-integration` starts the Docker image, runs the tests, and stops the container.
+- CI: the `integration-tests` job runs after `build` and starts the emulator with `xSAVIKx/run-aws-emulator@v1`.
+- The tests read `AWS_ENDPOINT_URL`, `AWS_CA_BUNDLE`, and `AWS_SHARED_CREDENTIALS_FILE`, and need the host `aws` CLI to create resources.
+- `wasi-engine` forwards `AWS_*` variables and trusts `AWS_CA_BUNDLE` only when `WASI_ENGINE_FORWARD_AWS_ENV` is set.
