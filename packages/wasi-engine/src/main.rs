@@ -1,3 +1,5 @@
+mod custom_ca;
+use custom_ca::CustomCaHooks;
 use std::env;
 
 use wasmtime::{
@@ -14,7 +16,20 @@ pub struct Host {
 
     ctx: WasiCtx,
     http: WasiHttpCtx,
+    hooks: Option<CustomCaHooks>,
 }
+
+/// Host variables passed to the guest when `WASI_ENGINE_FORWARD_AWS_ENV` is set.
+const FORWARDED_AWS_ENV: [&str; 8] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ENDPOINT_URL",
+    "AWS_DISABLE_HOST_PREFIX_INJECTION",
+    "AWS_EC2_METADATA_DISABLED",
+];
 
 impl WasiView for Host {
     fn ctx(&mut self) -> WasiCtxView<'_> {
@@ -30,7 +45,10 @@ impl WasiHttpView for Host {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: match self.hooks.as_mut() {
+                Some(hooks) => hooks,
+                None => Default::default(),
+            },
         }
     }
 }
@@ -41,6 +59,7 @@ async fn main() {
         Ok(_) => {}
         Err(err) => {
             eprintln!("{:?}", err);
+            std::process::exit(1);
         }
     };
 }
@@ -51,15 +70,34 @@ async fn run() -> anyhow::Result<()> {
 
     let table = ResourceTable::new();
     let http = WasiHttpCtx::new();
-    let ctx = WasiCtxBuilder::new()
-        .inherit_stdio()
-        .env("RUST_BACKTRACE", "full")
-        .env("AWS_ACCESS_KEY_ID", "access_key_id")
-        .env("AWS_SECRET_ACCESS_KEY", "secret_access_key")
+    let forward_env = env::var_os("WASI_ENGINE_FORWARD_AWS_ENV").is_some();
+    let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdio().env("RUST_BACKTRACE", "full");
+    if forward_env {
+        for name in FORWARDED_AWS_ENV {
+            if let Ok(value) = env::var(name) {
+                builder.env(name, &value);
+            }
+        }
+    } else {
+        builder
+            .env("AWS_ACCESS_KEY_ID", "access_key_id")
+            .env("AWS_SECRET_ACCESS_KEY", "secret_access_key");
+    }
+    let ctx = builder
         .args(&wasi_args)
         .preopened_dir("/tmp", "/tmp", FsPerms::ReadWrite)?
         .build();
-    let host = Host { table, ctx, http };
+    let hooks = match env::var_os("AWS_CA_BUNDLE").filter(|_| forward_env) {
+        Some(path) => Some(CustomCaHooks::from_pem_file(path.as_ref())?),
+        None => None,
+    };
+    let host = Host {
+        table,
+        ctx,
+        http,
+        hooks,
+    };
     let mut config = Config::new();
     config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
     // Each CLI invocation is a fresh process, and the composed component (28 AWS SDK
