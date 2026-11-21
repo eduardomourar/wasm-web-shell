@@ -83,7 +83,7 @@ const parseConsoleUrl = (url: string) => {
 /**
  * Check if a cookie is valid: exists, has a value, and is not expired.
  */
-function isCookieValid(cookie: chrome.cookies.Cookie | null) {
+function isCookieValid(cookie: chrome.cookies.Cookie | null | undefined) {
   if (!cookie?.value) {
     console.debug(`[background:isCookieValid] Cookie missing or empty value`);
     return false;

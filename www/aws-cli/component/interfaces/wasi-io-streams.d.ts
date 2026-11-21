@@ -15,6 +15,9 @@ export class InputStream {
    * This type does not have a public constructor.
    */
   private constructor();
+  /**
+  * @throws {StreamError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   read(len: bigint): Uint8Array;
   subscribe(): Pollable;
 }
@@ -24,9 +27,21 @@ export class OutputStream {
    * This type does not have a public constructor.
    */
   private constructor();
+  /**
+  * @throws {StreamError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   checkWrite(): bigint;
+  /**
+  * @throws {StreamError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   write(contents: Uint8Array): void;
+  /**
+  * @throws {StreamError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   blockingFlush(): void;
   subscribe(): Pollable;
+  /**
+  * @throws {StreamError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   splice(src: InputStream, len: bigint): bigint;
 }

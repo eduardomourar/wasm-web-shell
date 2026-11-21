@@ -1,246 +1,60 @@
 "use components";
-export function instantiate(getCoreModule, imports, instantiateCore = WebAssembly.instantiate) {
+export function instantiate(getCoreModule, imports, instantiateCore, options) {
+  const WebAssembly = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;
+  if (typeof instantiateCore === 'undefined') {
+    if (typeof WebAssembly === 'undefined') throw new Error('no WebAssembly implementation is available: pass instantiateCore or options.shim.globals.WebAssembly');
+    instantiateCore = (module, importObject) => WebAssembly.instantiate(module, importObject);
+  }
   
   const emptyFunc = () => {};
   
   let dv = new DataView(new ArrayBuffer());
   const dataView = mem => dv.buffer === mem.buffer ? dv : dv = new DataView(mem.buffer);
   
-  function toUint64(val) {
-    const converted = BigInt(val)
-    
-    return BigInt.asUintN(64, converted);
-  }
-  
-  
-  function toUint16(val) {
-    
-    val >>>= 0;
-    val %= 2 ** 16;
-    return val;
-  }
-  
-  
-  function toUint32(val) {
-    
-    return val >>> 0;
-  }
-  
-  
-  function toUint8(val) {
-    
-    val >>>= 0;
-    val %= 2 ** 8;
-    return val;
-  }
-  
-  
-  function _isValidNumericPrimitive(ty, v) {
-    if (v === undefined || v === null) { return false; }
-    switch (ty) {
-      case 'bool':
-      return v === 0 || v === 1;
-      break;
-      case 'u8':
-      return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 255;
-      break;
-      case 's8':
-      return typeof v === 'number' && Number.isInteger(v) && v >= -128 && v <= 127;
-      break;
-      case 'u16':
-      return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 65535;
-      break;
-      case 's16':
-      return typeof v === 'number' && Number.isInteger(v) && v >= -32768 && v <= 32767;
-      case 'u32':
-      return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 4_294_967_295;
-      case 's32':
-      return typeof v === 'number' && Number.isInteger(v) && v >= -2_147_483_648 && v <= 2_147_483_647;
-      case 'u64':
-      return typeof v === 'bigint' && v >= 0 && v <= 18_446_744_073_709_551_615n;
-      case 's64':
-      return typeof v === 'bigint' && v >= -9223372036854775808n && v <= 9223372036854775807n;
-      break;
-      case 'f32':
-      case 'f64': return typeof v === 'number';
-      default:
-      return false;
-    }
-    return true;
-  }
-  
-  function _requireValidNumericPrimitive(ty, v) {
-    if (v === undefined  || v === null || !_isValidNumericPrimitive(ty, v)) {
-      throw new TypeError(`invalid ${ty} value [${v}]`);
-    }
-    return true;
-  }
-  const utf16Decoder = new TextDecoder('utf-16', { fatal: true, ignoreBOM: true });
-  
-  const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
-  
-  function _utf16AllocateAndEncode(str, realloc, memory) {
-    if (typeof str !== 'string') {
-      throw new TypeError('expected a string, received [' + typeof str + ']');
-    }
-    const len = str.length;
-    const ptr = realloc(0, 0, 2, len * 2);
-    const out = new Uint16Array(memory.buffer, ptr, len);
-    const put = isLE
-    ? (i, ch) => { out[i] = ch; }
-    : (i, ch) => { out[i] = (ch & 0xff) << 8 | ch >>> 8; };
-    for (let i = 0; i < len; i++) {
-      let ch = str.charCodeAt(i);
-      if ((ch & 0xf800) === 0xd800) {
-        if (ch < 0xdc00 && i + 1 < len && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-          put(i++, ch);
-          ch = str.charCodeAt(i);
-        } else {
-          // Unpaired surrogates are replaced, as when converting to a `USVString`
-          ch = 0xfffd;
+  function _maybeSyncGenerator(genFn) {
+    return function (...args) {
+      const gen = genFn.apply(this, args);
+      const step = (method, value) => {
+        while (true) {
+          const { value: yielded, done } = gen[method](value);
+          if (done) { return yielded; }
+          if (yielded === null ||
+          (typeof yielded !== 'object' && typeof yielded !== 'function') ||
+          typeof yielded.then !== 'function') {
+            method = 'next';
+            value = yielded;
+            continue;
+          }
+          return Promise.resolve(yielded).then(
+          res => step('next', res),
+          err => step('throw', err),
+          );
         }
-      }
-      put(i, ch);
-    }
-    return { ptr, len, codepoints: [...str].length };
-  }
-  
-  const TEXT_DECODER_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-  const TEXT_ENCODER_UTF8 = new TextEncoder();
-  
-  function _utf8AllocateAndEncode(s, realloc, memory) {
-    if (typeof s !== 'string') {
-      throw new TypeError('expected a string, received [' + typeof s + ']');
-    }
-    if (s.length === 0) { return { ptr: 1, len: 0 }; }
-    // Compute the exact allocation size up front. Some older preview1
-    // adapters only support an initial allocation, not a subsequent shrink.
-    let len = 0;
-    let codepoints = 0;
-    for (let i = 0; i < s.length; i++) {
-      const ch = s.charCodeAt(i);
-      codepoints++;
-      if (ch < 0x80) { len += 1; }
-      else if (ch < 0x800) { len += 2; }
-      else if (ch >= 0xd800 && ch <= 0xdbff &&
-      i + 1 < s.length &&
-      (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-        len += 4;
-        i++;
-      } else { len += 3; }
-    }
-    const ptr = realloc(0, 0, 1, len);
-    const { read, written } = TEXT_ENCODER_UTF8.encodeInto(
-    s,
-    new Uint8Array(memory.buffer, ptr, len),
-    );
-    if (read !== s.length || written !== len) {
-      throw new Error('failed to encode whole string');
-    }
-    const res = { ptr, len, codepoints };
-    return res;
-  }
-  
-  const T_FLAG = 1 << 30;
-  
-  function rscTableCreateOwn(table, rep) {
-    const free = table[0] & ~T_FLAG;
-    table._createdReps.add(rep);
-    if (free === 0) {
-      table.push(0);
-      table.push(rep | T_FLAG);
-      return (table.length >> 1) - 1;
-    }
-    table[0] = table[free << 1];
-    table[free << 1] = 0;
-    table[(free << 1) + 1] = rep | T_FLAG;
-    return free;
-  }
-  
-  const RESOURCE_SCOPE_TASKS = new Map();
-  const WebAssemblyRuntimeError = WebAssembly.RuntimeError;
-  
-  function rscTableRemove(table, handle) {
-    const scope = table[handle << 1];
-    const val = table[(handle << 1) + 1];
-    const own = (val & T_FLAG) !== 0;
-    const rep = val & ~T_FLAG;
-    if (val === 0 || (scope & T_FLAG) !== 0) {
-      // Resource entries occupy scope/rep pairs after the table sentinel.
-      throw new WebAssemblyRuntimeError(`unknown handle index ${(handle << 1) + 1}`);
-    }
-    if (own && scope !== 0) {
-      throw new WebAssemblyRuntimeError('cannot remove owned resource while borrowed');
-    }
-    const borrowTask = own ? undefined : RESOURCE_SCOPE_TASKS.get(scope);
-    table[handle << 1] = table[0] | T_FLAG;
-    table[0] = handle | T_FLAG;
-    borrowTask?.removeBorrowedHandle();
-    return { rep, scope, own };
-  }
-  
-  let RESOURCE_SCOPE_ID = 0;
-  
-  let curResourceBorrows = [];
-  const ASYNC_TASKS_BY_COMPONENT_IDX = new Map();
-  const ASYNC_CURRENT_COMPONENT_IDXS = [];
-  
-  function getCurrentTask(componentIdx, taskID) {
-    let usedGlobal = false;
-    if (componentIdx === undefined || componentIdx === null) {
-      throw new Error('missing component idx'); // TODO(fix)
-      // componentIdx = ASYNC_CURRENT_COMPONENT_IDXS.at(-1);
-      // usedGlobal = true;
-    }
-    
-    const taskMetas = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
-    if (taskMetas === undefined || taskMetas.length === 0) { return undefined; }
-    
-    if (taskID) {
-      return taskMetas.find(meta => meta.task.id() === taskID);
-    }
-    
-    const taskMeta = taskMetas[taskMetas.length - 1];
-    if (!taskMeta || !taskMeta.task) { return undefined; }
-    
-    return taskMeta;
-  }
-  const ASYNC_CURRENT_TASK_IDS = [];
-  
-  const _debugLog = (...args) => {
-    if (!globalThis?.process?.env?.JCO_DEBUG) { return; }
-    console.debug(...args);
-  };
-  
-  function clearCurrentTask(componentIdx, taskID) {
-    _debugLog('[clearCurrentTask()] args', { componentIdx, taskID });
-    
-    if (componentIdx === undefined || componentIdx === null) {
-      throw new Error('missing/invalid component instance index while ending current task');
-    }
-    
-    const tasks = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
-    if (!tasks || !Array.isArray(tasks)) {
-      throw new Error('missing/invalid tasks for component instance while ending task');
-    }
-    if (tasks.length == 0) {
-      throw new Error(`no current tasks for component instance [${componentIdx}] while ending task`);
-    }
-    
-    const taskIdx = taskID === undefined
-    ? tasks.length - 1
-    : tasks.findIndex(meta => meta.id === taskID);
-    if (taskIdx === -1) { return; }
-    
-    const taskMeta = tasks.splice(taskIdx, 1)[0];
-    const globalTaskIdx = ASYNC_CURRENT_TASK_IDS.lastIndexOf(taskMeta.id);
-    if (globalTaskIdx !== -1) {
-      ASYNC_CURRENT_TASK_IDS.splice(globalTaskIdx, 1);
-      ASYNC_CURRENT_COMPONENT_IDXS.splice(globalTaskIdx, 1);
-    }
-    return taskMeta.task;
+      };
+      return step('next', undefined);
+    };
   }
   const ASYNC_STATE = new Map();
+  const HANDLE_INDEX_SPACES = new Map();
+  
+  function getHandleIndexSpace(key) {
+    let space = HANDLE_INDEX_SPACES.get(key);
+    if (space === undefined) {
+      // One index space per component instance (Canonical ABI
+      // `inst.handles`): resource handles, waitables, waitable sets and
+      // error contexts share it. Freed indices are reused LIFO, as
+      // `Table.add` does. Index 0 is never a handle.
+      space = {
+        next: 1,
+        free: [],
+        alloc() { return this.free.length > 0 ? this.free.pop() : this.next++; },
+        release(idx) { this.free.push(idx); },
+      };
+      HANDLE_INDEX_SPACES.set(key, space);
+    }
+    return space;
+  }
+  
   
   function promiseWithResolvers() {
     if (Promise.withResolvers) {
@@ -255,6 +69,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       return { promise, resolve, reject };
     }
   }
+  
+  const _debugLog = (...args) => {
+    if (!globalThis?.process?.env?.JCO_DEBUG) { return; }
+    console.debug(...args);
+  };
   
   class Waitable {
     #componentIdx;
@@ -341,7 +160,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           isRemoval: waitableSet === null,
         });
         
-        if (this.#waitableSet === undefined) {
+        if (waitableSet === undefined) {
           throw new TypeError('waitable set must be not be undefined');
         }
         
@@ -372,17 +191,65 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           throw new Error("waitable is already in a set/has a sync waiter");
         }
         this.#hasSyncWaiter = true;
-        await cstate.waitUntil({
-          cancellable: false,
-          readyFn: () => this.hasPendingEvent(),
-        });
-        this.#hasSyncWaiter = false;
+        try {
+          await cstate.waitUntil({
+            cancellable: false,
+            readyFn: () => this.hasPendingEvent(),
+          });
+        } finally {
+          this.#hasSyncWaiter = false;
+        }
       }
       
     }
     const INSTANCE_FLAGS = new Map();
-    const STORE_TRAP = { error: null };
-    const STORE_ASYNC_STATE = { deadlockCheck: null, pendingHostOperations: 0 };
+    const STORE_TRAP = { error: null, stopped: false, resourceTables: [], stopWaiters: new Set(), disposed: new WeakSet(), onTrap: options?.onTrap ?? null, trapsReported: new WeakSet() };
+    const ASYNC_TASKS_BY_COMPONENT_IDX = new Map();
+    const STORE_ASYNC_STATE = { deadlockCheck: null, pendingHostOperations: 0, idleWaiters: new Set() };
+    
+    function _isIdle() {
+      if (STORE_TRAP.error !== null) { return true; }
+      for (const [componentIdx, metas] of ASYNC_TASKS_BY_COMPONENT_IDX) {
+        if (componentIdx !== -1 && metas.length > 0) { return false; }
+      }
+      return true;
+    }
+    function _checkIdle() {
+      
+      if (STORE_ASYNC_STATE.idleWaiters.size === 0 || !_isIdle()) { return; }
+      const waiters = [...STORE_ASYNC_STATE.idleWaiters];
+      STORE_ASYNC_STATE.idleWaiters.clear();
+      for (const resolve of waiters) { resolve(); }
+    }
+    const WebAssemblyRuntimeError = WebAssembly.RuntimeError;
+    
+    const CORE_TRAP_MESSAGES = new Map([
+    ['unreachable', "wasm trap: wasm `unreachable` instruction executed"],
+    ['memory access out of bounds', "wasm trap: out of bounds memory access"],
+    ['divide by zero', "wasm trap: integer divide by zero"],
+    ['remainder by zero', "wasm trap: integer divide by zero"],
+    ['divide result unrepresentable', "wasm trap: integer overflow"],
+    ['float unrepresentable in integer range', "wasm trap: invalid conversion to integer"],
+    ['table index is out of bounds', "wasm trap: undefined element: out of bounds table access"],
+    ['function signature mismatch', "wasm trap: indirect call type mismatch"],
+    ['call stack exhausted', "wasm trap: call stack exhausted"],
+    ]);
+    function _normalizeCoreTrap(err) {
+      if (!(err instanceof WebAssemblyRuntimeError)) { return err; }
+      const message = CORE_TRAP_MESSAGES.get(err.message);
+      if (message !== undefined) { err.message = message; }
+      return err;
+    }
+    
+    function _reportTrap(err) {
+      // Stopping an instance goes through the same path as a trap
+      if (STORE_TRAP.onTrap === null || STORE_TRAP.stopped) { return; }
+      if (!(err instanceof WebAssemblyRuntimeError) || STORE_TRAP.trapsReported.has(err)) { return; }
+      STORE_TRAP.trapsReported.add(err);
+      err = _normalizeCoreTrap(err);
+      // Not the runtime's to handle, whose own unwinding is under way
+      try { STORE_TRAP.onTrap(err); } catch (e) { queueMicrotask(() => { throw e; }); }
+    }
     
     function _checkForDeadlock() {
       if (STORE_ASYNC_STATE.deadlockCheck !== null || STORE_TRAP.error !== null) { return; }
@@ -435,26 +302,12 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
             task.reject(err);
           }
         }
+        // A deadlock is a trap of the whole store: no instance may be entered again.
+        for (const state of ASYNC_STATE.values()) { state.markTrapped(err); }
+        for (const state of ASYNC_STATE.values()) { state.abandonLockWaiters(); }
+        for (const state of ASYNC_STATE.values()) { state.abandonAdmissionWaiters(); }
         for (const state of ASYNC_STATE.values()) { state.runTickLoop(); }
       }, 0);
-    }
-    
-    const CORE_TRAP_MESSAGES = new Map([
-    ['unreachable', "wasm trap: wasm `unreachable` instruction executed"],
-    ['memory access out of bounds', "wasm trap: out of bounds memory access"],
-    ['divide by zero', "wasm trap: integer divide by zero"],
-    ['remainder by zero', "wasm trap: integer divide by zero"],
-    ['divide result unrepresentable', "wasm trap: integer overflow"],
-    ['float unrepresentable in integer range', "wasm trap: invalid conversion to integer"],
-    ['table index is out of bounds', "wasm trap: undefined element: out of bounds table access"],
-    ['function signature mismatch', "wasm trap: indirect call type mismatch"],
-    ['call stack exhausted', "wasm trap: call stack exhausted"],
-    ]);
-    function _normalizeCoreTrap(err) {
-      if (!(err instanceof WebAssemblyRuntimeError)) { return err; }
-      const message = CORE_TRAP_MESSAGES.get(err.message);
-      if (message !== undefined) { err.message = message; }
-      return err;
     }
     
     class RepTable {
@@ -466,14 +319,26 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #data = [0, null];
       #size = 0;
       #target;
+      // An index space shared with the other handle kinds of a component
+      // instance (see `getHandleIndexSpace`); without one, this table keeps
+      // its own free list.
+      #space = null;
       
       constructor(args) {
         this.target = args?.target;
+        this.#space = args?.space ?? null;
       }
       
       data() { return this.#data; }
       
       insert(val) {
+        if (this.#space !== null) {
+          const rep = this.#space.alloc();
+          this.#data[rep << 1] = val;
+          this.#data[(rep << 1) + 1] = null;
+          this.#size += 1;
+          return rep;
+        }
         _debugLog('[RepTable#insert()] args', { val, target: this.target });
         const freeIdx = this.#data[0];
         if (freeIdx === 0) {
@@ -498,7 +363,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       get(rep) {
         _debugLog('[RepTable#get()] args', { rep, target: this.target });
-        if (rep === 0) { throw new Error('invalid resource rep during get, (cannot be 0)'); }
+        if (rep === 0) { throw new WebAssemblyRuntimeError('invalid resource rep during get, (cannot be 0)'); }
         
         const baseIdx = rep << 1;
         const val = this.#data[baseIdx];
@@ -518,6 +383,18 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       remove(rep) {
         _debugLog('[RepTable#remove()] args', { rep, target: this.target });
         if (rep === 0) { throw new Error('invalid resource rep during remove, (cannot be 0)'); }
+        if (this.#space !== null) {
+          const baseIdx = rep << 1;
+          const val = this.#data[baseIdx];
+          if (val === undefined || val === RepTable.FREE) {
+            throw new WebAssemblyRuntimeError(`unknown handle index ${rep}`);
+          }
+          this.#data[baseIdx] = RepTable.FREE;
+          this.#data[baseIdx + 1] = null;
+          this.#size -= 1;
+          this.#space.release(rep);
+          return val;
+        }
         if (this.#data.length === 2) { throw new Error('invalid'); }
         
         const baseIdx = rep << 1;
@@ -526,7 +403,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
         const val = this.#data[baseIdx];
         if (val === RepTable.FREE) {
-          throw new Error(`double removal of rep [${rep}] (already freed)`);
+          throw new WebAssemblyRuntimeError(`double removal of rep [${rep}] (already freed)`);
         }
         
         this.#data[baseIdx] = RepTable.FREE;
@@ -540,7 +417,15 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       size() { return this.#size; }
       
       clear() {
-        _debugLog('[RepTable#clear()] args', { rep, target: this.target });
+        _debugLog('[RepTable#clear()] args', { target: this.target });
+        if (this.#space) {
+          for (let rep = 1; rep < this.#data.length / 2; rep++) {
+            if (this.#data[(rep << 1) + 1] === null && this.#data[rep << 1] !== RepTable.FREE) {
+              this.#space.release(rep);
+            }
+          }
+        }
+        this.#size = 0;
         this.#data = [0, null];
       }
     }
@@ -562,21 +447,52 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #syncImportWait = promiseWithResolvers();
       #lockHolderTaskID = null;
       #lockWaiters = [];
+      #admissionQueue = [];
       #lockHandoffScheduled = false;
       #pendingTaskStarts = 0;
       #parkedTasks = new Map();
-      #suspendedTasksByTaskID = new Map();
-      #suspendedTaskIDs = [];
+      // Suspended threads, oldest first (a Map iterates in insertion
+      // order, so no separate queue is kept for them).
+      #suspendedThreadsByRef = new Map();
       #errored = null;
       #trapped = false;
+      #trapError = null;
       #backpressure = 0;
       #backpressureWaiters = 0n;
       
       #handlerMap = new Map();
       #nextHandlerID = 0n;
       
+      // Cancels the scheduled tick while the tick loop runs.
       #tickLoop = null;
-      #tickLoopInterval = null;
+      
+      // Runs the callback on the next macrotask, after the current microtasks have
+      // drained, as setTimeout(callback, 0) would, but without its minimum delay:
+      // Node.js clamps it to 1 ms and browsers to 4 ms once timers nest, which a
+      // guest that yields often pays on every yield. Returns a cancel function.
+      static #onNextMacrotask(callback) {
+        if (typeof setImmediate === 'function') {
+          const handle = setImmediate(callback);
+          return () => clearImmediate(handle);
+        }
+        if (typeof MessageChannel === 'function') {
+          const channel = new MessageChannel();
+          let cancelled = false;
+          channel.port1.onmessage = () => {
+            channel.port1.close();
+            if (!cancelled) { callback(); }
+          };
+          channel.port2.postMessage(null);
+          return () => { cancelled = true; channel.port1.close(); };
+        }
+        const handle = setTimeout(callback, 0);
+        return () => clearTimeout(handle);
+      }
+      
+      static #afterDelay(callback, ms) {
+        const handle = setTimeout(callback, ms);
+        return () => clearTimeout(handle);
+      }
       
       #onExclusiveReleaseHandlers = [];
       
@@ -584,11 +500,16 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       handles;
       subtasks;
+      threads;
       
       constructor(args) {
         this.#componentIdx = args.componentIdx;
-        this.handles = new RepTable({ target: `component [${this.#componentIdx}] handles (waitable objects)` });
+        this.handles = new RepTable({
+          target: `component [${this.#componentIdx}] handles (waitable objects)`,
+          space: getHandleIndexSpace(this.#componentIdx),
+        });
         this.subtasks = new RepTable({ target: `component [${this.#componentIdx}] subtasks` });
+        this.threads = new RepTable({ target: `component [${this.#componentIdx}] threads` });
       };
       
       componentIdx() { return this.#componentIdx; }
@@ -621,12 +542,25 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
         err = _normalizeCoreTrap(err);
         this.#trapped = true;
+        if (this.#trapError === null) { this.#trapError = err; }
         _debugLog('[ComponentAsyncState#markTrapped()] component trapped', { err, componentIdx: this.#componentIdx });
         if (STORE_TRAP.error === null) { STORE_TRAP.error = err; }
+        _reportTrap(err);
+        _checkIdle();
         return true;
       }
       
+      isTrapped() { return this.#trapped; }
+      // For work that was already under way or queued when the instance
+      // trapped: it fails with that trap (nothing runs after a trap).
+      throwIfInterrupted() {
+        if (STORE_TRAP.stopped) { throw STORE_TRAP.error; }
+        if (this.#trapped) {
+          throw this.#trapError ?? new WebAssemblyRuntimeError("wasm trap: cannot enter component instance");
+        }
+      }
       throwIfTrapped() {
+        if (STORE_TRAP.stopped) { throw STORE_TRAP.error; }
         if (this.#trapped) {
           throw new WebAssemblyRuntimeError("wasm trap: cannot enter component instance");
         }
@@ -654,7 +588,10 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       setBackpressure(v) {
         this.#backpressure = v;
-        return this.#backpressure
+        for (const handler of [...(this.#handlerMap.get('backpressure-change') ?? [])]) {
+          handler.fn(v);
+        }
+        return this.#backpressure;
       }
       getBackpressure() { return this.#backpressure; }
       
@@ -675,34 +612,31 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         if (current < 0 || current > 2**16) {
           throw new Error(`invalid current backpressure value [${current}]`);
         }
-        const newValue = Math.max(0, current - 1);
+        // Canonical ABI `backpressure.dec`: trap if the counter would go
+        // below zero.
+        const newValue = current - 1;
         if (newValue < 0) {
-          throw new Error(`invalid new backpressure value [${newValue}], underflow`);
+          throw new WebAssemblyRuntimeError('backpressure counter underflow');
         }
         return this.setBackpressure(newValue);
       }
       hasBackpressure() { return this.#backpressure > 0; }
       
       waitForBackpressure() {
-        let backpressureCleared = false;
-        const cstate = this;
-        cstate.addBackpressureWaiter();
-        const handlerID = this.registerHandler({
-          event: 'backpressure-change',
-          fn: (bp) => {
-            if (bp === 0) {
-              cstate.removeHandler(handlerID);
-              backpressureCleared = true;
-            }
-          }
-        });
+        if (!this.hasBackpressure()) { return Promise.resolve(null); }
+        this.addBackpressureWaiter();
         return new Promise((resolve) => {
-          const interval = setInterval(() => {
-            if (backpressureCleared) { return; }
-            clearInterval(interval);
-            cstate.removeBackpressureWaiter();
-            resolve(null);
-          }, 0);
+          let pending = true;
+          const handlerID = this.registerHandler({
+            event: 'backpressure-change',
+            fn: (bp) => {
+              if (bp !== 0 || !pending) { return; }
+              pending = false;
+              this.removeHandler({ event: 'backpressure-change', handlerID });
+              this.removeBackpressureWaiter();
+              resolve(null);
+            },
+          });
         });
       }
       
@@ -804,6 +738,42 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         });
       }
       
+      // Release every queued entry without granting ownership, so that
+      // calls waiting to enter a trapped store fail instead of hanging.
+      // FIFO admission of tasks entering this instance (Canonical ABI
+      // `inst.pending`): a task enters only after every task that asked to
+      // enter before it has entered or given up, so calls enter in the order
+      // they were made, whatever each waits for on the way.
+      takeAdmissionTicket(taskID) {
+        const ticket = { taskID, ...promiseWithResolvers() };
+        this.#admissionQueue.push(ticket);
+        return ticket;
+      }
+      hasPendingAdmissions() { return this.#admissionQueue.length > 0; }
+      waitForAdmissionTurn(ticket) {
+        if (this.#admissionQueue[0] === ticket) { return; }
+        return ticket.promise;
+      }
+      releaseAdmissionTicket(ticket) {
+        const idx = this.#admissionQueue.indexOf(ticket);
+        if (idx === -1) { return; }
+        this.#admissionQueue.splice(idx, 1);
+        if (idx === 0 && this.#admissionQueue.length > 0) {
+          this.#admissionQueue[0].resolve();
+        }
+      }
+      // Release every queued entry (the instance trapped): each then fails
+      // in `enter()` instead of waiting forever.
+      abandonAdmissionWaiters() {
+        const tickets = this.#admissionQueue.splice(0);
+        for (const ticket of tickets) { ticket.resolve(); }
+      }
+      
+      abandonLockWaiters() {
+        const waiters = this.#lockWaiters.splice(0);
+        for (const waiter of waiters) { waiter.resolve(); }
+      }
+      
       cancelExclusiveLockWaiter(taskID) {
         const idx = this.#lockWaiters.findIndex(waiter => waiter.taskID === taskID);
         if (idx === -1) { return false; }
@@ -861,13 +831,12 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         queueMicrotask(() => {
           this.#lockHandoffScheduled = false;
           // A synchronous call triggered by a release handler gets the
-          // first opportunity to use the unlocked component.
-          //
-          // Its release will leave this queued handoff in place.
-          if (this.#lockHolderTaskID !== null) {
-            this.#scheduleLockHandoff();
-            return;
-          }
+          // first opportunity to use the unlocked component. Its own
+          // release schedules the next handoff; re-queueing one here
+          // would spin the microtask queue for as long as the holder
+          // stays blocked (e.g. in a synchronous wait), starving every
+          // timer, the deadlock detector included.
+          if (this.#lockHolderTaskID !== null) { return; }
           const next = this.#lockWaiters.shift();
           if (!next) { return; }
           this.#lockHolderTaskID = next.taskID;
@@ -886,106 +855,27 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
       }
       
+      // Callback drivers refer to the implicit thread by task ID.
+      // Stackful built-ins pass their current thread directly.
       #getSuspendedTaskMeta(taskID) {
-        return this.#suspendedTasksByTaskID.get(taskID);
+        const metas = [...this.#suspendedThreadsByRef.values()].filter(meta => meta.thread.taskID() === taskID);
+        return metas.find(meta => meta.cancellable && this.suspendedThreadReady(meta.thread)) ?? metas[0];
       }
       
-      #removeSuspendedTaskMeta(taskID) {
-        _debugLog('[ComponentAsyncState#removeSuspendedTaskMeta()] removing suspended task', {
-          taskID,
-          componentIdx: this.#componentIdx,
-        });
-        const idx = this.#suspendedTaskIDs.findIndex(t => t === taskID);
-        const meta = this.#suspendedTasksByTaskID.get(taskID);
-        this.#suspendedTaskIDs[idx] = null;
-        this.#suspendedTasksByTaskID.delete(taskID);
-        return meta;
-      }
-      
-      #addSuspendedTaskMeta(meta) {
-        if (!meta) { throw new Error('missing task meta'); }
-        const taskID = meta.taskID;
-        this.#suspendedTasksByTaskID.set(taskID, meta);
-        this.#suspendedTaskIDs.push(taskID);
-        if (this.#suspendedTasksByTaskID.size < this.#suspendedTaskIDs.length - 10) {
-          this.#suspendedTaskIDs = this.#suspendedTaskIDs.filter(t => t !== null);
-        }
-      }
-      
-      // TODO(threads): readyFn is normally on the thread
       suspendTask(args) {
-        const { task, readyFn, cancellable, onResume } = args;
-        const taskID = task.id();
-        const componentIdx = task.componentIdx();
-        _debugLog('[ComponentAsyncState#suspendTask()]', {
-          taskID,
-          componentIdx: this.#componentIdx,
-          taskEntryFnName: task.entryFnName(),
-          subtask: task.getParentSubtask(),
-        });
-        
-        if (componentIdx !== this.#componentIdx) {
-          throw new Error('assert: task component idx should match async state');
-        }
-        
-        if (this.#getSuspendedTaskMeta(taskID)) {
-          throw new Error(`task [${taskID}] already suspended`);
-        }
-        
-        let promise;
-        let resume;
-        if (onResume) {
-          resume = () => onResume(!task.isCancelled());
-        } else {
-          const resolvers = promiseWithResolvers();
-          promise = resolvers.promise;
-          resume = () => resolvers.resolve(!task.isCancelled());
-        }
-        this.#addSuspendedTaskMeta({
-          task,
-          taskID,
-          cancellable,
-          readyFn,
-          resume: () => {
-            _debugLog('[ComponentAsyncState] resuming suspended task', {
-              taskID,
-              componentIdx: this.#componentIdx,
-            });
-            // TODO(threads): it's thread cancellation we should be checking for below, not task
-            resume();
-          },
-        });
-        
-        // A caller synchronously driving one task quantum (for
-        // example, subtask.cancel) waits for the resumed task to
-        // either resolve or suspend again.
-        task.notifyProgress();
-        
-        this.runTickLoop();
-        _checkForDeadlock();
-        
-        return promise;
+        const { task, ...opts } = args;
+        task.endFirstSlice();
+        return this.suspendThread({ thread: task.defaultThread(), ...opts });
       }
       
       resumeTaskByID(taskID) {
-        const meta = this.#removeSuspendedTaskMeta(taskID);
-        if (!meta) { return false; }
-        if (meta.taskID !== taskID) { throw new Error('task ID does not match'); }
-        meta.resume();
-        return true;
+        const meta = this.#getSuspendedTaskMeta(taskID);
+        return meta ? this.resumeThread(meta.thread) : false;
       }
       
       suspendedTaskReady(taskID) {
         const meta = this.#getSuspendedTaskMeta(taskID);
-        if (!meta) { return false; }
-        if (!meta.readyFn) {
-          throw new Error(`suspended task [${taskID}] is missing a readiness function`);
-        }
-        if (meta.task.isRejected()) { return true; }
-        if (!meta.readyFn()) { return false; }
-        return !meta.task.needsExclusiveLock()
-        || !this.isExclusivelyLocked()
-        || this.exclusivelyLockedBy(taskID);
+        return meta ? this.suspendedThreadReady(meta.thread) : false;
       }
       
       suspendedTaskCancellable(taskID) {
@@ -993,11 +883,97 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       }
       
       isTaskSuspended(taskID) {
-        return this.#suspendedTasksByTaskID.has(taskID);
+        return !!this.#getSuspendedTaskMeta(taskID);
       }
       
-      suspendedTaskMetas() {
-        return this.#suspendedTasksByTaskID.values();
+      *suspendedTaskMetas() {
+        for (const meta of this.#suspendedThreadsByRef.values()) {
+          yield { ...meta, task: meta.thread.task() };
+        }
+      }
+      
+      #removeSuspendedThreadMeta(thread) {
+        const meta = this.#suspendedThreadsByRef.get(thread);
+        this.#suspendedThreadsByRef.delete(thread);
+        return meta;
+      }
+      
+      suspendThread(args) {
+        const { thread, readyFn, cancellable, onResume, suspended = false } = args;
+        _debugLog('[ComponentAsyncState#suspendThread()]', {
+          threadID: thread.id(),
+          taskID: thread.taskID(),
+          componentIdx: this.#componentIdx,
+        });
+        
+        if (thread.componentIdx() !== this.#componentIdx) {
+          throw new Error('assert: thread component idx should match async state');
+        }
+        if (this.#suspendedThreadsByRef.has(thread)) {
+          throw new Error(`thread [${thread.id()}] already suspended`);
+        }
+        
+        let promise;
+        let resume;
+        if (onResume) {
+          resume = () => onResume(!thread.isCancelled() && !thread.isRejected() && !this.isTrapped());
+        } else {
+          const resolvers = promiseWithResolvers();
+          promise = resolvers.promise;
+          resume = () => resolvers.resolve(!thread.isCancelled() && !thread.isRejected() && !this.isTrapped());
+        }
+        if (STORE_TRAP.stopped) {
+          this.markTrapped(STORE_TRAP.error);
+          resume();
+          return promise;
+        }
+        this.#suspendedThreadsByRef.set(thread, { thread, cancellable, readyFn, resume, suspended });
+        
+        thread.notifyProgress();
+        
+        this.runTickLoop();
+        _checkForDeadlock();
+        
+        return promise;
+      }
+      
+      resumeThread(thread) {
+        const meta = this.#removeSuspendedThreadMeta(thread);
+        if (!meta) { return false; }
+        meta.resume();
+        return true;
+      }
+      
+      markThreadReady(thread) {
+        const meta = this.#suspendedThreadsByRef.get(thread);
+        if (!meta || !meta.suspended) { return false; }
+        meta.suspended = false;
+        meta.readyFn = () => true;
+        this.runTickLoop();
+        return true;
+      }
+      
+      isThreadSuspended(thread) {
+        return this.#suspendedThreadsByRef.get(thread)?.suspended ?? false;
+      }
+      
+      isThreadReady(thread) {
+        const meta = this.#suspendedThreadsByRef.get(thread);
+        return !!meta && !meta.suspended && (meta.thread.isRejected() || meta.readyFn());
+      }
+      
+      suspendedThreadReady(thread) {
+        const meta = this.#suspendedThreadsByRef.get(thread);
+        if (!meta) { return false; }
+        if (!meta.readyFn) {
+          throw new Error(`suspended thread [${thread.id()}] is missing a readiness function`);
+        }
+        if (this.isTrapped() || meta.thread.isRejected()) { return true; }
+        if (!meta.readyFn()) { return false; }
+        const task = meta.thread.task();
+        return !task.needsExclusiveLock()
+        || !this.isExclusivelyLocked()
+        || this.exclusivelyLockedBy(task.id());
       }
       
       addPendingTaskStart() { this.#pendingTaskStarts++; }
@@ -1006,77 +982,71 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       hasPendingSchedulerWork() {
         if (this.#pendingTaskStarts > 0) { return true; }
         if (this.#lockHandoffScheduled) { return true; }
-        for (const meta of this.#suspendedTasksByTaskID.values()) {
-          if (meta.task.isRejected() || meta.readyFn()) { return true; }
+        for (const meta of this.#suspendedThreadsByRef.values()) {
+          if (this.suspendedThreadReady(meta.thread)) { return true; }
         }
         return false;
       }
       
-      async runTickLoop() {
-        if (this.#tickLoop !== null) { return; }
-        this.#tickLoop = 1;
-        setTimeout(async () => {
-          let result = this.tick();
-          while (result !== ComponentAsyncState.TickResult.DONE) {
-            if (result === ComponentAsyncState.TickResult.IDLE) {
-              _checkForDeadlock();
-            }
-            // After resuming a task, re-tick as soon as the resumed
-            // slice's microtask continuations have drained (timeout 0)
-            // so queued sibling resumptions aren't charged the idle
-            // polling interval; otherwise poll at the idle cadence.
-            const delay = result === ComponentAsyncState.TickResult.RESUMED ? 0 : 10;
-            await new Promise((resolve) => setTimeout(resolve, delay));
-            result = this.tick();
+      stop() {
+        this.#tickLoop?.();
+        this.#tickLoop = null;
+        this.abandonLockWaiters();
+        this.abandonAdmissionWaiters();
+        for (const thread of [...this.#suspendedThreadsByRef.keys()]) {
+          this.resumeThread(thread);
+        }
+      }
+      
+      runTickLoop() {
+        if (STORE_TRAP.stopped || this.#tickLoop !== null) { return; }
+        const run = () => {
+          if (STORE_TRAP.stopped) { this.#tickLoop = null; return; }
+          const result = this.tick();
+          if (STORE_TRAP.stopped || result === ComponentAsyncState.TickResult.DONE) {
+            this.#tickLoop = null;
+            return;
           }
-          this.#tickLoop = null;
-        }, 10);
+          if (result === ComponentAsyncState.TickResult.IDLE) {
+            _checkForDeadlock();
+          }
+          // Let resumed microtasks drain before the next slice;
+          // otherwise poll at the idle cadence.
+          this.#tickLoop = result === ComponentAsyncState.TickResult.RESUMED
+          ? ComponentAsyncState.#onNextMacrotask(run)
+          : ComponentAsyncState.#afterDelay(run, 10);
+        };
+        this.#tickLoop = ComponentAsyncState.#onNextMacrotask(run);
       }
       
       tick() {
-        // _debugLog('[ComponentAsyncState#tick()]', { suspendedTaskIDs: this.#suspendedTaskIDs });
-        
-        const resumableTasks = this.#suspendedTaskIDs.filter(t => t !== null);
-        for (const taskID of resumableTasks) {
-          const meta = this.#suspendedTasksByTaskID.get(taskID);
+        // (resuming returns immediately below, so the map is never
+        // mutated while this loop is still iterating it)
+        for (const [thread, meta] of this.#suspendedThreadsByRef) {
           if (!meta || !meta.readyFn) {
-            throw new Error(`missing/invalid task despite ID [${taskID}] being present`);
+            throw new Error(`missing/invalid thread meta despite thread [${thread.id()}] being present`);
           }
           
-          // If the task failed via any means, allow the task to resume because
-          // it's been cancelled -- the callback should immediately exit as well
-          if (meta.task.isRejected()) {
-            _debugLog('[ComponentAsyncState#tick()] detected task rejection, leaving early', { meta });
-            this.resumeTaskByID(taskID);
+          if (this.isTrapped() || meta.thread.isRejected()) {
+            _debugLog('[ComponentAsyncState#tick()] detected thread rejection, leaving early', { meta });
+            this.resumeThread(thread);
             return ComponentAsyncState.TickResult.RESUMED;
           }
           
-          const isReady = this.suspendedTaskReady(taskID);
-          if (!isReady) { continue; }
+          if (!this.suspendedThreadReady(thread)) { continue; }
           
-          _debugLog('[ComponentAsyncState#tick()] resuming task via tick', {
-            taskID,
+          _debugLog('[ComponentAsyncState#tick()] resuming thread via tick', {
+            threadID: thread.id(),
             componentIdx: this.#componentIdx,
           });
-          this.resumeTaskByID(taskID);
+          this.resumeThread(thread);
           
-          // NOTE: during single-flight resumption, we should resume at most one task per
-          // tick so that the resumed slice (a microtask continuation)
-          // runs -- and its current-task register window opens and
-          // closes -- before any sibling task of this component is
-          // resumed.
-          //
-          // Resuming multiple suspended tasks in one synchronous
-          // cascade interleaves their register save/restore windows
-          // ([restoreA, restoreB, resumeA, resumeB]), re-entering wasm
-          // with the register naming the wrong task, and the
-          // 'known residual' of the JSPI current-task register
-          // fix); with concurrent task lifetimes per component this
-          // corrupts guest context-local storage.
+          // Resume only one thread per tick so its current-thread
+          // register window closes before another continuation runs.
           return ComponentAsyncState.TickResult.RESUMED;
         }
         
-        const idle = this.#suspendedTaskIDs.filter(t => t !== null).length > 0;
+        const idle = this.#suspendedThreadsByRef.size > 0;
         return idle
         ? ComponentAsyncState.TickResult.IDLE
         : ComponentAsyncState.TickResult.DONE;
@@ -1093,6 +1063,286 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         ASYNC_STATE.set(componentIdx, newState);
       }
       return ASYNC_STATE.get(componentIdx);
+    }
+    
+    function getCurrentThread(componentIdx, threadID, taskID) {
+      // Host (-1) tasks have no component instance, and so no thread table.
+      if (componentIdx === -1) { return undefined; }
+      if (threadID === undefined || threadID === null || threadID === 0) { return undefined; }
+      
+      const cstate = getOrCreateAsyncState(componentIdx);
+      const thread = cstate.threads.get(threadID);
+      if (!thread) { return undefined; }
+      
+      // Thread indices are recycled once a thread exits (the thread table
+      // reuses freed slots) but task ids never are. A register that still
+      // names an exited thread, e.g. during a post-return that runs after
+      // its task exited, must not resolve to whichever newer thread took
+      // the slot; callers then fall back as for a missing thread.
+      if (taskID !== undefined && thread.taskID() !== taskID) { return undefined; }
+      
+      return { id: threadID, componentIdx, taskID: thread.taskID(), task: thread.task(), thread };
+    }
+    const CURRENT_TASK_META = {};
+    
+    function _conditionalSuspendingHostImport(module, componentIdx, fn) {
+      return new WebAssembly.Instance(module, { '': {
+        mayBlock: () => {
+          const saved = CURRENT_TASK_META[componentIdx];
+          const thread = saved
+          ? getCurrentThread(saved.componentIdx, saved.threadID)
+          : null;
+          return thread?.task.mayBlock() ?? false;
+        },
+        fast: fn,
+        slow: new WebAssembly.Suspending(fn),
+      } }).exports.run;
+    }
+    
+    
+    function toUint64(val) {
+      const converted = BigInt(val)
+      
+      return BigInt.asUintN(64, converted);
+    }
+    
+    
+    function toUint16(val) {
+      
+      val >>>= 0;
+      val %= 2 ** 16;
+      return val;
+    }
+    
+    
+    function toUint32(val) {
+      
+      return val >>> 0;
+    }
+    
+    
+    function toUint8(val) {
+      
+      val >>>= 0;
+      val %= 2 ** 8;
+      return val;
+    }
+    
+    
+    function _isValidNumericPrimitive(ty, v) {
+      if (v === undefined || v === null) { return false; }
+      switch (ty) {
+        case 'bool':
+        return v === 0 || v === 1;
+        break;
+        case 'u8':
+        return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 255;
+        break;
+        case 's8':
+        return typeof v === 'number' && Number.isInteger(v) && v >= -128 && v <= 127;
+        break;
+        case 'u16':
+        return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 65535;
+        break;
+        case 's16':
+        return typeof v === 'number' && Number.isInteger(v) && v >= -32768 && v <= 32767;
+        case 'u32':
+        return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 4_294_967_295;
+        case 's32':
+        return typeof v === 'number' && Number.isInteger(v) && v >= -2_147_483_648 && v <= 2_147_483_647;
+        case 'u64':
+        return typeof v === 'bigint' && v >= 0 && v <= 18_446_744_073_709_551_615n;
+        case 's64':
+        return typeof v === 'bigint' && v >= -9223372036854775808n && v <= 9223372036854775807n;
+        break;
+        case 'f32':
+        case 'f64': return typeof v === 'number';
+        default:
+        return false;
+      }
+      return true;
+    }
+    
+    function _requireValidNumericPrimitive(ty, v) {
+      if (v === undefined  || v === null || !_isValidNumericPrimitive(ty, v)) {
+        throw new TypeError(`invalid ${ty} value [${v}]`);
+      }
+      return true;
+    }
+    const utf16Decoder = new TextDecoder('utf-16', { fatal: true, ignoreBOM: true });
+    
+    const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+    
+    function _utf16AllocateAndEncode(str, realloc, memory) {
+      if (typeof str !== 'string') {
+        throw new TypeError('expected a string, received [' + typeof str + ']');
+      }
+      const len = str.length;
+      const ptr = realloc(0, 0, 2, len * 2);
+      const out = new Uint16Array(memory.buffer, ptr, len);
+      const put = isLE
+      ? (i, ch) => { out[i] = ch; }
+      : (i, ch) => { out[i] = (ch & 0xff) << 8 | ch >>> 8; };
+      for (let i = 0; i < len; i++) {
+        let ch = str.charCodeAt(i);
+        if ((ch & 0xf800) === 0xd800) {
+          if (ch < 0xdc00 && i + 1 < len && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+            put(i++, ch);
+            ch = str.charCodeAt(i);
+          } else {
+            // Unpaired surrogates are replaced, as when converting to a `USVString`
+            ch = 0xfffd;
+          }
+        }
+        put(i, ch);
+      }
+      return { ptr, len, codepoints: [...str].length };
+    }
+    
+    
+    function _compactUtf16Decode(memory, ptr, taggedLength) {
+      ptr >>>= 0;
+      taggedLength >>>= 0;
+      if (ptr % 2 !== 0) { throw new RangeError('unaligned compact UTF-16 string'); }
+      if (taggedLength & 0x80000000) {
+        return utf16Decoder.decode(new Uint8Array(memory.buffer, ptr, (taggedLength & 0x7fffffff) * 2));
+      }
+      const bytes = new Uint8Array(memory.buffer, ptr, taggedLength);
+      let value = '';
+      // TextDecoder('latin1') uses Windows-1252, which changes
+      // bytes 0x80..0x9f. The ABI maps every byte directly.
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        value += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return value;
+    }
+    
+    
+    function _compactUtf16AllocateAndEncode(str, realloc, memory) {
+      if (typeof str !== 'string') { throw new TypeError('expected a string'); }
+      if (str.length >= 0x80000000) { throw new RangeError('compact UTF-16 string is too long'); }
+      for (let i = 0; i < str.length; i++) {
+        if (str.charCodeAt(i) > 0xff) {
+          const encoded = _utf16AllocateAndEncode(str, realloc, memory);
+          return { ...encoded, len: (encoded.len | 0x80000000) >>> 0 };
+        }
+      }
+      const ptr = realloc(0, 0, 2, str.length) >>> 0;
+      if (ptr % 2 !== 0) { throw new RangeError('unaligned compact UTF-16 allocation'); }
+      const bytes = new Uint8Array(memory.buffer, ptr, str.length);
+      for (let i = 0; i < str.length; i++) { bytes[i] = str.charCodeAt(i); }
+      return { ptr, len: str.length };
+    }
+    
+    const TEXT_DECODER_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+    const TEXT_ENCODER_UTF8 = new TextEncoder();
+    
+    function _utf8AllocateAndEncode(s, realloc, memory) {
+      if (typeof s !== 'string') {
+        throw new TypeError('expected a string, received [' + typeof s + ']');
+      }
+      if (s.length === 0) { return { ptr: 1, len: 0 }; }
+      // Compute the exact allocation size up front. Some older preview1
+      // adapters only support an initial allocation, not a subsequent shrink.
+      let len = 0;
+      let codepoints = 0;
+      for (let i = 0; i < s.length; i++) {
+        const ch = s.charCodeAt(i);
+        codepoints++;
+        if (ch < 0x80) { len += 1; }
+        else if (ch < 0x800) { len += 2; }
+        else if (ch >= 0xd800 && ch <= 0xdbff &&
+        i + 1 < s.length &&
+        (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+          len += 4;
+          i++;
+        } else { len += 3; }
+      }
+      const ptr = realloc(0, 0, 1, len);
+      const { read, written } = TEXT_ENCODER_UTF8.encodeInto(
+      s,
+      new Uint8Array(memory.buffer, ptr, len),
+      );
+      if (read !== s.length || written !== len) {
+        throw new Error('failed to encode whole string');
+      }
+      const res = { ptr, len, codepoints };
+      return res;
+    }
+    
+    const T_FLAG = 1 << 30;
+    const T_OWN = 2 ** 32;
+    
+    function rscTableCreateOwn(table, rep) {
+      // Reps are u32: one from a core function arrives as a signed i32
+      rep >>>= 0;
+      table._createdReps.add(rep);
+      const handle = getHandleIndexSpace(table._componentIdx ?? table).alloc();
+      table[handle << 1] = 0;
+      table[(handle << 1) + 1] = rep + T_OWN;
+      return handle;
+    }
+    
+    const RESOURCE_SCOPE_TASKS = new Map();
+    
+    function rscTableRemove(table, handle) {
+      const scope = table[handle << 1];
+      const val = table[(handle << 1) + 1];
+      const own = val >= T_OWN;
+      const rep = own ? val - T_OWN: val;
+      // A borrowed entry can store zero without being freed.
+      if (val === undefined || (scope & T_FLAG) !== 0) {
+        throw new WebAssemblyRuntimeError(`unknown handle index ${handle}`);
+      }
+      if (own && scope !== 0) {
+        throw new WebAssemblyRuntimeError('cannot remove owned resource while borrowed');
+      }
+      const borrowTask = own ? undefined : RESOURCE_SCOPE_TASKS.get(scope);
+      // Mark the slot freed and give its index back to the instance's space.
+      table[handle << 1] = T_FLAG;
+      table[(handle << 1) + 1] = 0;
+      getHandleIndexSpace(table._componentIdx ?? table).release(handle);
+      borrowTask?.removeBorrowedHandle();
+      return { rep, scope, own };
+    }
+    
+    let RESOURCE_SCOPE_ID = 0;
+    
+    let curResourceBorrows = [];
+    const ASYNC_CURRENT_TASK_IDS = [];
+    const ASYNC_CURRENT_COMPONENT_IDXS = [];
+    
+    function clearCurrentThread(componentIdx, taskID, opts = {}) {
+      _debugLog('[clearCurrentThread()] args', { componentIdx, taskID });
+      
+      if (componentIdx === undefined || componentIdx === null) {
+        throw new Error('missing/invalid component instance index while ending current task');
+      }
+      
+      const tasks = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
+      if (!tasks || !Array.isArray(tasks)) {
+        throw new Error('missing/invalid tasks for component instance while ending task');
+      }
+      if (tasks.length == 0) {
+        throw new Error(`no current tasks for component instance [${componentIdx}] while ending task`);
+      }
+      
+      const taskIdx = taskID === undefined
+      ? tasks.length - 1
+      : tasks.findIndex(meta => meta.id === taskID);
+      if (taskIdx === -1) { return; }
+      
+      const taskMeta = tasks[taskIdx];
+      if (!opts.preserveTask) {
+        tasks.splice(taskIdx, 1);
+        _checkIdle();
+      }
+      const globalTaskIdx = ASYNC_CURRENT_TASK_IDS.lastIndexOf(taskMeta.id);
+      if (globalTaskIdx !== -1) {
+        ASYNC_CURRENT_TASK_IDS.splice(globalTaskIdx, 1);
+        ASYNC_CURRENT_COMPONENT_IDXS.splice(globalTaskIdx, 1);
+      }
+      return taskMeta.task;
     }
     const symbolDispose = Symbol.dispose || Symbol.for('dispose');
     
@@ -1227,8 +1477,19 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       childTaskID() { return this.#childTask?.id(); }
       state() { return this.#state; }
       
-      waitable() { return this.#waitable; }
+      getWaitable() { return this.#waitable; }
       waitableRep() { return this.#waitable.idx(); }
+      // The handle index is allocated only when the guest gets to see the
+      // subtask (an async lower that did not complete at once), and after the
+      // lifted arguments have freed theirs (Canonical ABI `canon_lower`).
+      ensureHandle() {
+        const existing = this.#waitable.idx();
+        if (existing !== null && existing !== undefined) { return existing; }
+        const idx = this.#getComponentState().handles.insert(this);
+        this.#waitable.setIdx(idx);
+        this.#waitable.setTarget(`waitable for subtask (waitable id [${idx}], subtask internal ID [${this.id()}])`);
+        return idx;
+      }
       
       join() { return this.#waitable.join(...arguments); }
       getPendingEvent() { return this.#waitable.getPendingEvent(...arguments); }
@@ -1460,7 +1721,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         
         // TODO(fix): we should be able to easily have the caller's meomry
         // to lower into here, but it's not present in PrepareCall
-        const memory = callMetadata.memory ?? this.#parentTask?.getReturnMemory() ?? lookupMemoriesForComponent({ componentIdx: this.#parentTask?.componentIdx() })[0];
+        const memory = callMetadata.memory ?? this.#parentTask?.getReturnMemory() ?? lookupMemoriesForComponent({ componentIdx: this.#parentTask?.componentIdx() })[0]?.memory;
         // NOTE: cancelled resolutions carry no value, so nothing is lowered
         const returned = this.#state === AsyncSubtask.State.RETURNED;
         if (returned && callMetadata && !callMetadata.returnFn && (this.isAsync || callMetadata.funcTypeIsAsync) && callMetadata.resultPtr && memory) {
@@ -1518,9 +1779,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       addLender(handle) {
         _debugLog('[AsyncSubtask#addLender()] args', { handle });
-        if (!Number.isNumber(handle)) { throw new Error('missing/invalid lender handle [' + handle + ']'); }
+        if (!handle || typeof handle.lends !== 'number') { throw new Error('missing/invalid lender handle [' + handle + ']'); }
         
-        if (this.#lenders.length === 0 || this.isResolved()) {
+        if (this.#lenders === null || this.isResolved()) {
           throw new Error('subtask has no lendors or has already been resolved');
         }
         
@@ -1569,7 +1830,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         });
         if (!this.#waitable) { throw new Error('missing/invalid inner waitable'); }
         if (!this.resolveDelivered()) {
-          throw new Error('cannot drop a subtask which has not yet resolved');
+          throw new WebAssemblyRuntimeError('cannot drop a subtask which has not yet resolved');
         }
         if (this.#waitable) { this.#waitable.drop() }
         this.#dropped = true;
@@ -1578,7 +1839,7 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       #getComponentState() {
         const state = getOrCreateAsyncState(this.#componentIdx);
         if (!state) {
-          throw new Error('invalid/missing async state for component [' + componentIdx + ']');
+          throw new Error('invalid/missing async state for component [' + this.#componentIdx + ']');
         }
         return state;
       }
@@ -1592,15 +1853,19 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
     
     class FutureValue {
       #start;
+      #dropFn;
+      #dropped = false;
+      #delivered = false;
       #settled;
       #hideThen = 0;
       #thenFn;
       
-      constructor(start) {
+      constructor(start, dropFn) {
         if (typeof start !== 'function') {
           throw new TypeError('future start operation must be a function');
         }
         this.#start = start;
+        this.#dropFn = dropFn;
         this.#thenFn = this.#then.bind(this);
       }
       
@@ -1638,11 +1903,65 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       }
       
       #then(resolve, reject) {
-        return this.#read().then(
-        box => this.#deliver(resolve, box.value),
+        const droppedErr = () => new Error('future was dropped');
+        const read = this.#dropped
+        ? Promise.reject(droppedErr())
+        : this.#read();
+        return read.then(
+        box => {
+          // Check at delivery, so a drop after the copy but before
+          // this callback rejects the read and discards its value.
+          if (this.#dropped) {
+            if (typeof reject === 'function') { return reject(droppedErr()); }
+            throw droppedErr();
+          }
+          // The recipient owns the value even if its callback drops
+          // this future reentrantly or throws after receiving it.
+          this.#delivered = true;
+          return this.#deliver(resolve, box.value);
+        },
         reject,
         );
       }
+      
+      // Drops the readable end. Only a copied value that has not reached
+      // a recipient is discarded; delivered values belong to the host.
+      [symbolDispose]() {
+        if (this.#dropped) { return; }
+        this.#dropped = true;
+        this.#dropFn?.();
+        this.#settled?.then(box => {
+          if (!this.#delivered) { _disposeHostValue(box.value); }
+        }, () => {});
+      }
+    }
+    
+    function _postReturnTrap(componentIdx, err) {
+      // Core exceptions and stack exhaustion are fatal during cleanup.
+      if (!(err instanceof WebAssemblyRuntimeError)) {
+        const message = /call stack|stack overflow|too much recursion/i.test(err?.message ?? '')
+        ? "wasm trap: call stack exhausted" : "wasm trap: uncaught exception propagated out of component";
+        err = new WebAssemblyRuntimeError(message, { cause: err });
+      }
+      getOrCreateAsyncState(componentIdx).markTrapped(err);
+      return err;
+    }
+    
+    function _recordTrap(componentIdx, err, convertsRangeErrors = false) {
+      // A built-in reading or writing guest memory past its end fails with a
+      // DataView RangeError: that is the Canonical ABI's out-of-bounds trap.
+      if (convertsRangeErrors && err instanceof RangeError) {
+        err = new WebAssemblyRuntimeError('out of bounds memory access');
+      }
+      if (err instanceof WebAssemblyRuntimeError) {
+        // (a trampoline without a static instance records against the
+        // component whose guest code is running)
+        const idx = componentIdx ?? CURRENT_TASK_META.current?.componentIdx;
+        if (idx !== undefined && idx !== null) {
+          getOrCreateAsyncState(idx).markTrapped(err);
+        }
+      }
+      return err;
     }
     const ASYNC_DETERMINISM = 'random';
     const _coinFlip = () => { return Math.random() > 0.5; };
@@ -1656,21 +1975,32 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       FUTURE_WRITE: 5,
       TASK_CANCELLED: 6,
     };
-    const CURRENT_TASK_META = {};
     
-    function _withGlobalCurrentTaskMeta(args) {
-      _debugLog('[_withGlobalCurrentTaskMeta()] args', args);
+    function _getGlobalCurrentThreadMeta(componentIdx) {
+      const v = componentIdx === undefined || componentIdx === null
+      ? CURRENT_TASK_META.current
+      : CURRENT_TASK_META[componentIdx];
+      if (v === undefined || v === null) {
+        return undefined;
+      }
+      return { ...v };
+    }
+    
+    
+    function _withGlobalCurrentThreadMeta(args) {
+      _debugLog('[_withGlobalCurrentThreadMeta()] args', args);
       if (!args) { throw new TypeError('args missing'); }
       if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
+      if (args.threadID === undefined) { throw new TypeError('missing thread ID'); }
       if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
       if (!args.fn) { throw new TypeError('missing fn'); }
-      const { taskID, componentIdx, fn } = args;
+      const { taskID, threadID, componentIdx, fn } = args;
       const previous = CURRENT_TASK_META[componentIdx] ?? null;
       const previousCurrent = CURRENT_TASK_META.current ?? null;
       
       try {
         CURRENT_TASK_META.current =
-        CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
+        CURRENT_TASK_META[componentIdx] = { threadID, taskID, componentIdx };
         return fn();
       } catch (err) {
         _debugLog("error while executing sync callee/callback", {
@@ -1682,41 +2012,74 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         // Synchronous wrappers can nest without any intervening JS
         // scheduling. Restore the caller rather than clearing it so
         // helper core exports (for example fused return adapters) can
-        // temporarily run under a different task of the same component.
+        // temporarily run under a different thread of the same component.
         CURRENT_TASK_META[componentIdx] = previous;
         CURRENT_TASK_META.current = previousCurrent;
       }
     }
     
-    async function _withGlobalCurrentTaskMetaAsync(args) {
-      _debugLog('[_withGlobalCurrentTaskMetaAsync()] args', args);
+    function _withGlobalCurrentThreadMetaAsync(args) {
+      _debugLog('[_withGlobalCurrentThreadMetaAsync()] args', args);
       if (!args) { throw new TypeError('args missing'); }
       if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
+      if (args.threadID === undefined) { throw new TypeError('missing thread ID'); }
       if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
       if (!args.fn) { throw new TypeError('missing fn'); }
       
-      const { taskID, componentIdx, fn } = args;
+      const { taskID, threadID, componentIdx, fn } = args;
+      const previous = CURRENT_TASK_META[componentIdx] ?? null;
+      const previousCurrent = CURRENT_TASK_META.current ?? null;
       
+      let result;
       try {
         CURRENT_TASK_META.current =
-        CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
-        return await fn();
+        CURRENT_TASK_META[componentIdx] = { taskID, threadID, componentIdx };
+        result = fn();
       } catch (err) {
-        _debugLog("error while executing async callee/callback", {
+        _debugLog("error while executing sync callee/callback", {
           ...args,
           err,
         });
+        CURRENT_TASK_META[componentIdx] = previous;
+        CURRENT_TASK_META.current = previousCurrent;
         throw err;
-      } finally {
-        CURRENT_TASK_META[componentIdx] = null;
-        if (CURRENT_TASK_META.current?.taskID === taskID) {
-          CURRENT_TASK_META.current = null;
-        }
       }
+      
+      if (result === null ||
+      (typeof result !== 'object' && typeof result !== 'function') ||
+      typeof result.then !== 'function') {
+        CURRENT_TASK_META[componentIdx] = previous;
+        CURRENT_TASK_META.current = previousCurrent;
+        return result;
+      }
+      
+      return (async () => {
+        try {
+          return await result;
+        } catch (err) {
+          _debugLog("error while executing async callee/callback", {
+            ...args,
+            err,
+          });
+          throw err;
+        } finally {
+          if (CURRENT_TASK_META[componentIdx]?.threadID === threadID &&
+          CURRENT_TASK_META[componentIdx]?.taskID === taskID) {
+            CURRENT_TASK_META[componentIdx] = null;
+          }
+          if (CURRENT_TASK_META.current?.threadID === threadID &&
+          CURRENT_TASK_META.current?.taskID === taskID) {
+            CURRENT_TASK_META.current = null;
+          }
+        }
+      })();
     }
     
     class AsyncTask {
       static _ID = 0n;
+      // Ids for the implicit threads of host (-1) tasks, which have no
+      // component instance thread table (see `addThread`).
+      static _HOST_THREAD_ID = 0;
       
       static State = {
         INITIAL: 'initial',
@@ -1762,6 +2125,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       #getCalleeParamsFn = null;
       #calleeIsAsync = null;
+      #admissionTicket = null;
+      #funcTypeIsAsync = false;
+      #returnResultTypeIdx = null;
       
       #stringEncoding = null;
       
@@ -1781,6 +2147,11 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       #subtasks = [];
       
+      // Threads owned by this task, indexed by their task-scoped
+      // thread id (see AsyncThread -- index 0 is always the task's
+      // implicit thread, created alongside it).
+      #threads = [];
+      
       #entered = false;
       #exited = false;
       #errored = null;
@@ -1790,7 +2161,6 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       alwaysTaskReturn = false;
       
       returnCalls =  0;
-      storage = [0, 0];
       tmpRetI64HighBits = 0|0;
       
       constructor(opts) {
@@ -1823,8 +2193,9 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         // A nested rejection can reach the root task while its Wasm
         // entrypoint is still suspended, before the export wrapper awaits
         // this promise. Mark it handled immediately while preserving the
-        // original rejected promise for the eventual caller.
-        completionPromise.catch(() => {});
+        // original rejected promise for the eventual caller. (`catch` would pass
+        // the result on, and passing on a returned future reads it.)
+        completionPromise.then(() => {}, () => {});
         
         let completionSettled = false;
         const settleCompletionPromise = () => {
@@ -1912,6 +2283,14 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       validateResourceBorrowScope() {
         if (this.#resourceScopeExited) { return; }
+        // Stopping abandons guest stacks, including borrows they
+        // have not had a chance to drop. This is not a normal return.
+        if (STORE_TRAP.stopped) {
+          this.#resourceLenders = [];
+          this.#resourceScopeExited = true;
+          RESOURCE_SCOPE_TASKS.delete(this.#resourceScopeId);
+          return;
+        }
         if (this.#resourceBorrowCount !== 0) {
           throw new WebAssemblyRuntimeError('borrow handles still remain at the end of the call');
         }
@@ -1967,6 +2346,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       setReturnLowerFns(fns) { this.#returnLowerFns = fns; }
       getReturnLowerFns() { return this.#returnLowerFns; }
       
+      calleeIsAsync() { return this.#calleeIsAsync === true; }
+      
       setCalleeIsAsync(value) {
         if (typeof value !== 'boolean') { throw new TypeError('callee async state must be a boolean'); }
         this.#calleeIsAsync = value;
@@ -1979,6 +2360,55 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       }
       
       getParentSubtask() { return this.#parentSubtask; }
+      
+      // Registers a newly-created thread as belonging to this task
+      // and assigns it its real, *component-instance-scoped* id
+      // (`Task.register_thread` in the canonical ABI) -- threads
+      // are addressed instance-wide (not per-task) so that a
+      // thread of one task can target a thread of another, e.g.
+      // via `thread.resume-later`.
+      addThread(thread) {
+        // Host (-1) tasks model host-side import handling: there is no
+        // component instance behind them, so no instance thread table to
+        // register with (and none may be materialised on their behalf).
+        if (this.#componentIdx === -1) {
+          thread.setId(++AsyncTask._HOST_THREAD_ID);
+          this.#threads.push(thread);
+          return thread;
+        }
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        thread.setId(cstate.threads.insert(thread));
+        this.#threads.push(thread);
+        return thread;
+      }
+      
+      #checkThreadExit() {
+        if (this.#threads.length === 1 && !this.isResolvedState() && !this.isRejected()) {
+          const err = new WebAssemblyRuntimeError(`(component [${this.#componentIdx}]) task [${this.#id}] exited without resolution`);
+          throw this.#componentIdx === -1 ? err : _recordTrap(this.#componentIdx, err);
+        }
+      }
+      
+      // Unregisters a thread that has finished running
+      // (`Task.unregister_thread`), freeing its instance-scoped id.
+      removeThread(thread) {
+        this.#checkThreadExit();
+        this.settleCompletion();
+        if (this.#componentIdx !== -1) {
+          const cstate = getOrCreateAsyncState(this.#componentIdx);
+          cstate.threads.remove(thread.id());
+        }
+        this.#threads = this.#threads.filter(t => t !== thread);
+        if (this.#exited && this.#threads.length === 0) {
+          clearCurrentThread(this.#componentIdx, this.#id);
+        }
+      }
+      
+      // The thread created alongside this task (always the first
+      // one registered). Used by task-level callback dispatch and
+      // exit cleanup, which operate on the task rather than an
+      // explicitly identified thread.
+      defaultThread() { return this.#threads[0]; }
       
       // TODO(threads): this is very inefficient, we can pass along a root task,
       // and ideally do not need this once thread support is in place
@@ -2013,14 +2443,16 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       runCallbackFn(...args) {
         if (!this.#callbackFn) { throw new Error('no callback function has been set for task'); }
         if (this.#callbackFn._jcoMaySuspend === false) {
-          return _withGlobalCurrentTaskMeta({
+          return _withGlobalCurrentThreadMeta({
             taskID: this.#id,
+            threadID: this.defaultThread().id(),
             componentIdx: this.#componentIdx,
             fn: () => this.#callbackFn.apply(null, args),
           });
         }
-        return _withGlobalCurrentTaskMetaAsync({
+        return _withGlobalCurrentThreadMetaAsync({
           taskID: this.#id,
+          threadID: this.defaultThread().id(),
           componentIdx: this.#componentIdx,
           fn: () => { return this.#callbackFn.apply(null, args); }
         });
@@ -2033,7 +2465,14 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
       
       // Legacy manually-async exports are sync-typed in the component
       // but use JSPI precisely so their guest stack may suspend.
-      mayBlock() { return this.isAsync() || this.isManualAsync() || this.isResolvedState() }
+      // Canonical ABI: only sync-typed callees may not block (`canon_lift`);
+      // an async-lifted callee may, even when called through a sync lowering.
+      mayBlock() { return this.isAsync() || this.isManualAsync() || this.isResolvedState() || this.#funcTypeIsAsync }
+      // (an async-typed function may block however it was lifted)
+      setFuncTypeIsAsync(v) { this.#funcTypeIsAsync = v; }
+      // The interned result type of the task's function (checked by `task.return`)
+      setReturnResultTypeIdx(v) { this.#returnResultTypeIdx = v; }
+      returnResultTypeIdx() { return this.#returnResultTypeIdx; }
       
       mayEnter(task) {
         const cstate = getOrCreateAsyncState(this.#componentIdx);
@@ -2091,6 +2530,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           return true;
         }
         if (cstate.hasBackpressure()) { return null; }
+        // Entries already queued for this instance go first.
+        if (cstate.hasPendingAdmissions()) { return null; }
         if (this.needsExclusiveLock()) {
           if (cstate.isExclusivelyLocked()) { return null; }
           cstate.exclusiveLock(this.#id);
@@ -2106,6 +2547,35 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         return true;
       }
       
+      enterHost() {
+        if (this.#entered) {
+          throw new Error(`task with ID [${this.#id}] should not be entered twice`);
+        }
+        
+        // If cancellation was requested before the task was entered, resolve
+        // as cancelled without ever running host code
+        if (this.deliverPendingCancel({ cancellable: true })) {
+          this.cancel();
+          return false;
+        }
+        
+        getOrCreateAsyncState(this.#componentIdx);
+        
+        this.#entered = true;
+        // A guest task may be synchronously blocked in this
+        // host entry. Propagate that boundary so an async
+        // cancellation driver can yield BLOCKED while the host
+        // operation is outstanding.
+        const parentTask = this.#parentSubtask?.getParentTask();
+        if (
+        parentTask?.taskState() === AsyncTask.State.CANCEL_DELIVERED
+        || (parentTask && !parentTask.hasCallback())
+        ) {
+          parentTask.notifyProgress();
+        }
+        return this.#entered;
+      }
+      
       async enter(opts) {
         _debugLog('[AsyncTask#enter()] args', {
           taskID: this.#id,
@@ -2114,6 +2584,8 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           args: opts,
           entryFnName: this.#entryFnName,
         });
+        
+        if (opts?.isHost) { return this.enterHost(); }
         
         if (this.#entered) {
           throw new Error(`task with ID [${this.#id}] should not be entered twice`);
@@ -2127,22 +2599,6 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         }
         
         const cstate = getOrCreateAsyncState(this.#componentIdx);
-        
-        if (opts?.isHost) {
-          this.#entered = true;
-          // A guest task may be synchronously blocked in this
-          // host entry. Propagate that boundary so an async
-          // cancellation driver can yield BLOCKED while the host
-          // operation is outstanding.
-          const parentTask = this.#parentSubtask?.getParentTask();
-          if (
-          parentTask?.taskState() === AsyncTask.State.CANCEL_DELIVERED
-          || (parentTask && !parentTask.hasCallback())
-          ) {
-            parentTask.notifyProgress();
-          }
-          return this.#entered;
-        }
         
         // NOTE: concurrent task lifetimes within one component instance are
         // permitted by the Component Model: entry is governed by the
@@ -2168,30 +2624,84 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
           return this.#entered;
         }
         
-        // Perform intial backpressure check
-        if (cstate.hasBackpressure()) {
-          cstate.addBackpressureWaiter();
-          
-          const result = await this.waitUntil({
-            readyFn: () => {
-              return !cstate.hasBackpressure();
-            },
-            cancellable: true,
-          });
-          
-          cstate.removeBackpressureWaiter();
-          
-          if (!result || this.isCancelled()) {
-            if (!this.isResolvedState()) { this.cancel(); }
-            return false;
+        // Enter in the order the calls were made: queue behind every
+        // earlier entry into this instance, whatever it waits for.
+        const ticket = cstate.takeAdmissionTicket(this.#id);
+        this.#admissionTicket = ticket;
+        let entered = false;
+        try {
+          entered = await this.#enterQueued(cstate, ticket);
+          return entered;
+        } finally {
+          // An entered task keeps the slot until its first slice ends
+          // (`endFirstSlice`): the next call is admitted once this one
+          // returned, blocked or trapped, as `Store.invoke` runs a call.
+          if (!entered) { this.endFirstSlice(); }
+        }
+      }
+      
+      // The first slice of this task ended (it returned, blocked or trapped):
+      // the next entry into the instance may be admitted (Canonical ABI
+      // `Store.invoke` runs a call until it first blocks or returns).
+      endFirstSlice() {
+        const ticket = this.#admissionTicket;
+        if (ticket === null) { return; }
+        this.#admissionTicket = null;
+        getOrCreateAsyncState(this.#componentIdx).releaseAdmissionTicket(ticket);
+      }
+      
+      async #enterQueued(cstate, ticket) {
+        await cstate.waitForAdmissionTurn(ticket);
+        // Cancelled before it started while it was queued: the task was
+        // retired already and must not park in a wait as a dead entry.
+        if (this.isResolvedState() || this.isCancelled()) { return false; }
+        
+        // Wait until there is no backpressure *and* the exclusive lock (if
+        // needed) is ours. Backpressure can be set while we wait for the
+        // lock (by the task holding it), so it's checked again once the lock
+        // is acquired, as the Canonical ABI's `enter_implicit_thread` waits
+        // for both together.
+        while (true) {
+          if (cstate.hasBackpressure()) {
+            cstate.addBackpressureWaiter();
+            
+            const result = await this.waitUntil({
+              readyFn: () => {
+                return !cstate.hasBackpressure();
+              },
+              cancellable: true,
+            });
+            
+            cstate.removeBackpressureWaiter();
+            
+            if (!result || this.isCancelled()) {
+              if (!this.isResolvedState()) { this.cancel(); }
+              return false;
+            }
           }
+          
+          // Acquire the per-slice exclusive lock (FIFO-queued when
+          // contended); the first slice runs under this hold and the
+          // driver loop releases/re-acquires it per slice thereafter.
+          if (this.needsExclusiveLock()) {
+            await cstate.acquireExclusiveLock(this.#id);
+            if (cstate.hasBackpressure()) {
+              cstate.exclusiveRelease(this.#id);
+              continue;
+            }
+          }
+          break;
         }
         
-        // Acquire the per-slice exclusive lock (FIFO-queued when
-        // contended); the first slice runs under this hold and the
-        // driver loop releases/re-acquires it per slice thereafter.
-        if (this.needsExclusiveLock()) {
-          await cstate.acquireExclusiveLock(this.#id);
+        // The store may have trapped (e.g. a deadlock was detected) while
+        // this task waited to enter: it must not run, and its call fails
+        // with that trap.
+        try {
+          cstate.throwIfInterrupted();
+        } catch (err) {
+          cstate.exclusiveRelease(this.#id);
+          this.setErrored(err);
+          return false;
         }
         
         // Cancellation-before-start may resolve this task while its
@@ -2226,7 +2736,6 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         
         // TODO(fix): check for cancel
         // TODO(fix): determinism
-        // TODO(threads): add this thread to waiting list
         
         const keepGoing = await this.suspendUntil({
           readyFn,
@@ -2330,1114 +2839,1411 @@ export function instantiate(getCoreModule, imports, instantiateCore = WebAssembl
         return keepGoing;
       }
       
-      async immediateSuspend(opts) { // NOTE: equivalent to thread.suspend()
-      // TODO(threads): store readyFn on the thread
-      const { cancellable, readyFn } = opts;
-      _debugLog('[AsyncTask#immediateSuspend()] args', { cancellable, readyFn });
-      
-      const pendingCancelled = this.deliverPendingCancel({ cancellable });
-      if (pendingCancelled) { return false; }
-      
-      const cstate = getOrCreateAsyncState(this.#componentIdx);
-      const keepGoing = await cstate.suspendTask({
-        task: this,
-        cancellable,
-        readyFn: () => {
-          // A pending cancellation request wakes cancellable waits
-          if (cancellable && this.#state === AsyncTask.State.CANCEL_PENDING) {
-            return true;
-          }
-          return readyFn();
-        },
-      });
-      if (keepGoing && this.deliverPendingCancel({ cancellable })) { return false; }
-      return keepGoing;
-    }
-    
-    deliverPendingCancel(opts) {
-      const { cancellable } = opts;
-      _debugLog('[AsyncTask#deliverPendingCancel()]', {
-        args: { cancellable },
-        taskID: this.#id,
-        componentIdx: this.#componentIdx,
-      });
-      
-      if (cancellable && this.#state === AsyncTask.State.CANCEL_PENDING) {
-        this.#state = AsyncTask.State.CANCEL_DELIVERED;
-        return true;
+      async immediateSuspend(opts) {
+        // Entry can wait on backpressure before a guest register window exists.
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        const thread = this.#entered
+        ? cstate.threads.get(_getGlobalCurrentThreadMeta(this.#componentIdx).threadID)
+        : this.defaultThread();
+        if (!thread || thread.task() !== this) { throw new Error('invalid current thread for wait'); }
+        // Suspending a core Wasm stack retains the task's exclusive
+        // lock. Only a callback return releases it between slices.
+        return thread.suspend({ ...opts, releaseLock: false });
       }
       
-      return false;
-    }
-    
-    isCancelled() { return this.cancelled }
-    cancellationRequested() { return this.cancelRequested; }
-    
-    // Request cooperative cancellation of this task, called on behalf of a
-    // supertask performing `subtask.cancel` on the subtask this task backs.
-    //
-    // The request is delivered at this task's next cancellable wait
-    // (see suspendUntil/immediateSuspend), at which point the task is
-    // expected to acknowledge via `task.cancel` or still resolve via
-    // `task.return`.
-    requestCancellation() {
-      _debugLog('[AsyncTask#requestCancellation()] args', {
-        taskID: this.#id,
-        componentIdx: this.#componentIdx,
-        state: this.#state,
-      });
-      if (this.isResolvedState() || this.cancelRequested) { return; }
-      this.cancelRequested = true;
-      if (this.#state === AsyncTask.State.INITIAL) {
-        this.#state = AsyncTask.State.CANCEL_PENDING;
-        // A task still waiting for backpressure or its
-        // initial instance lock has no guest thread to
-        // resume. Cancellation is therefore delivered
-        // and acknowledged eagerly as
-        // CANCELLED_BEFORE_STARTED.
-        if (!this.#entered) {
-          this.deliverPendingCancel({ cancellable: true });
-          this.cancel();
-          
-          const cstate = getOrCreateAsyncState(this.#componentIdx);
-          // `enter()` may already be parked either in the scheduler's
-          // explicit-backpressure wait or in the exclusive-lock FIFO.
-          // Wake/remove that entry work now so it cannot retain a timer,
-          // waiter count, or lock-queue slot after cancellation.
-          cstate.resumeTaskByID(this.#id);
-          cstate.cancelExclusiveLockWaiter(this.#id);
-          
-          // No guest thread was registered, so no driver loop will call
-          // `exit()`. Retire the task's JS bookkeeping explicitly.
-          this.exit({ skipExclusiveLockCheck: true });
+      deliverPendingCancel(opts) {
+        const { cancellable } = opts;
+        _debugLog('[AsyncTask#deliverPendingCancel()]', {
+          args: { cancellable },
+          taskID: this.#id,
+          componentIdx: this.#componentIdx,
+        });
+        
+        if (cancellable && this.#state === AsyncTask.State.CANCEL_PENDING) {
+          this.#state = AsyncTask.State.CANCEL_DELIVERED;
+          return true;
+        }
+        
+        return false;
+      }
+      
+      isCancelled() { return this.cancelled }
+      cancellationRequested() { return this.cancelRequested; }
+      cancellationPending() { return this.#state === AsyncTask.State.CANCEL_PENDING; }
+      
+      // Request cooperative cancellation of this task, called on behalf of a
+      // supertask performing `subtask.cancel` on the subtask this task backs.
+      //
+      // The request is delivered at this task's next cancellable wait
+      // (see suspendUntil/immediateSuspend), at which point the task is
+      // expected to acknowledge via `task.cancel` or still resolve via
+      // `task.return`.
+      requestCancellation() {
+        _debugLog('[AsyncTask#requestCancellation()] args', {
+          taskID: this.#id,
+          componentIdx: this.#componentIdx,
+          state: this.#state,
+        });
+        if (this.isResolvedState() || this.cancelRequested) { return; }
+        this.cancelRequested = true;
+        if (this.#state === AsyncTask.State.INITIAL) {
+          this.#state = AsyncTask.State.CANCEL_PENDING;
+          // A task still waiting for backpressure or its
+          // initial instance lock has no guest thread to
+          // resume. Cancellation is therefore delivered
+          // and acknowledged eagerly as
+          // CANCELLED_BEFORE_STARTED.
+          if (!this.#entered) {
+            this.deliverPendingCancel({ cancellable: true });
+            this.cancel();
+            
+            const cstate = getOrCreateAsyncState(this.#componentIdx);
+            // `enter()` may already be parked either in the scheduler's
+            // explicit-backpressure wait or in the exclusive-lock FIFO.
+            // Wake/remove that entry work now so it cannot retain a timer,
+            // waiter count, or lock-queue slot after cancellation.
+            cstate.resumeTaskByID(this.#id);
+            cstate.cancelExclusiveLockWaiter(this.#id);
+            
+            // No guest thread was registered, so no driver loop will call
+            // `exit()`. Retire the task's JS bookkeeping explicitly.
+            this.exit({ skipExclusiveLockCheck: true });
+            return;
+          }
+        }
+        // Nudge the component's tick loop so that any suspended cancellable
+        // wait observes the pending cancellation promptly
+        getOrCreateAsyncState(this.#componentIdx).runTickLoop();
+      }
+      
+      cancel(args) {
+        _debugLog('[AsyncTask#cancel()] args', { });
+        if (this.taskState() !== AsyncTask.State.CANCEL_DELIVERED) {
+          throw new Error('`task.cancel` called by task which has not been cancelled');
+        }
+        this.validateResourceBorrowScope();
+        this.cancelled = true;
+        // Cancelled tasks resolve with no value (spec: `Task.cancel` calls
+        // `on_resolve(None)`); an explicit error is only present on the
+        // host-driven rejection path (see `reject()`).
+        this.onResolve(args?.error ?? null);
+        this.#state = AsyncTask.State.RESOLVED;
+        // A task cancelled before entry has no driver loop that can
+        // report its exit. Entered tasks notify after releasing their
+        // component slice in `exit()`.
+        if (!this.#entered) { this.notifyProgress(); }
+      }
+      
+      onResolve(taskValue) {
+        const handlers = this.#onResolveHandlers;
+        this.#onResolveHandlers = [];
+        for (const f of handlers) {
+          try {
+            f(taskValue);
+          } catch (err) {
+            _debugLog("[AsyncTask#onResolve] error during task resolve handler", err);
+            throw err;
+          }
+        }
+        
+        // Rejections are control-flow failures, not canonical ABI results.
+        // Propagate them through the subtask chain without running return
+        // lowering or post-return hooks for a successful result.
+        if (this.#rejected) {
+          this.#parentSubtask?.reject(taskValue);
           return;
         }
-      }
-      // Nudge the component's tick loop so that any suspended cancellable
-      // wait observes the pending cancellation promptly
-      getOrCreateAsyncState(this.#componentIdx).runTickLoop();
-    }
-    
-    cancel(args) {
-      _debugLog('[AsyncTask#cancel()] args', { });
-      if (this.taskState() !== AsyncTask.State.CANCEL_DELIVERED) {
-        throw new Error('`task.cancel` called by task which has not been cancelled');
-      }
-      this.validateResourceBorrowScope();
-      this.cancelled = true;
-      // Cancelled tasks resolve with no value (spec: `Task.cancel` calls
-      // `on_resolve(None)`); an explicit error is only present on the
-      // host-driven rejection path (see `reject()`).
-      this.onResolve(args?.error ?? null);
-      this.#state = AsyncTask.State.RESOLVED;
-      // A task cancelled before entry has no driver loop that can
-      // report its exit. Entered tasks notify after releasing their
-      // component slice in `exit()`.
-      if (!this.#entered) { this.notifyProgress(); }
-    }
-    
-    onResolve(taskValue) {
-      const handlers = this.#onResolveHandlers;
-      this.#onResolveHandlers = [];
-      for (const f of handlers) {
-        try {
-          f(taskValue);
-        } catch (err) {
-          _debugLog("[AsyncTask#onResolve] error during task resolve handler", err);
-          throw err;
+        
+        // NOTE: if the parent subtask has already been resolved (e.g. it was
+        // cancelled via `subtask.cancel` while this task was still pending),
+        // this task's resolution must be discarded rather than delivered.
+        const parentSubtaskPending = this.#parentSubtask && !this.#parentSubtask.isResolved();
+        const taskReturned = !this.isCancelled();
+        
+        if (parentSubtaskPending && taskReturned) {
+          const meta = this.#parentSubtask.getCallMetadata();
+          // Run the rturn fn if it has not already been called -- this *should* have happened in
+          // `task.return`, but some paths do not go through task.return (e.g. async lower of sync fn
+          // which goes through prepare + async-start-call)
+          if (meta.returnFn && !meta.returnFnCalled) {
+            _debugLog('[AsyncTask#onResolve()] running returnFn', {
+              componentIdx: this.#componentIdx,
+              taskID: this.#id,
+              subtaskID: this.#parentSubtask.id(),
+            });
+            const callerTask = this.#parentSubtask.getParentTask();
+            _withGlobalCurrentThreadMeta({
+              taskID: callerTask.id(),
+              threadID: meta.callerThreadID,
+              componentIdx: callerTask.componentIdx(),
+              fn: () => meta.returnFn.apply(null, [taskValue, meta.resultPtr]),
+            });
+            meta.returnFnCalled = true;
+          }
         }
-      }
-      
-      // Rejections are control-flow failures, not canonical ABI results.
-      // Propagate them through the subtask chain without running return
-      // lowering or post-return hooks for a successful result.
-      if (this.#rejected) {
-        this.#parentSubtask?.reject(taskValue);
-        return;
-      }
-      
-      // NOTE: if the parent subtask has already been resolved (e.g. it was
-      // cancelled via `subtask.cancel` while this task was still pending),
-      // this task's resolution must be discarded rather than delivered.
-      const parentSubtaskPending = this.#parentSubtask && !this.#parentSubtask.isResolved();
-      const taskReturned = !this.isCancelled();
-      
-      if (parentSubtaskPending && taskReturned) {
-        const meta = this.#parentSubtask.getCallMetadata();
-        // Run the rturn fn if it has not already been called -- this *should* have happened in
-        // `task.return`, but some paths do not go through task.return (e.g. async lower of sync fn
-        // which goes through prepare + async-start-call)
-        if (meta.returnFn && !meta.returnFnCalled) {
-          _debugLog('[AsyncTask#onResolve()] running returnFn', {
+        
+        if (this.#postReturnFn && taskReturned) {
+          _debugLog('[AsyncTask#onResolve()] running post return ', {
             componentIdx: this.#componentIdx,
             taskID: this.#id,
-            subtaskID: this.#parentSubtask.id(),
           });
-          const callerTask = this.#parentSubtask.getParentTask();
-          _withGlobalCurrentTaskMeta({
-            taskID: callerTask.id(),
-            componentIdx: callerTask.componentIdx(),
-            fn: () => meta.returnFn.apply(null, [taskValue, meta.resultPtr]),
-          });
-          meta.returnFnCalled = true;
+          try {
+            _withGlobalCurrentThreadMeta({
+              taskID: this.#id,
+              threadID: this.defaultThread().id(),
+              componentIdx: this.#componentIdx,
+              fn: () => this.#postReturnFn(taskValue),
+            });
+          } catch (err) {
+            err = _postReturnTrap(this.#componentIdx, err);
+            this.reject(err);
+            throw err;
+          }
+        }
+        
+        if (parentSubtaskPending) {
+          this.#parentSubtask.onResolve(taskValue);
         }
       }
       
-      if (this.#postReturnFn && taskReturned) {
-        _debugLog('[AsyncTask#onResolve()] running post return ', {
+      registerOnResolveHandler(f) {
+        this.#onResolveHandlers.push(f);
+      }
+      
+      isRejected() { return this.#rejected; }
+      
+      isErrored() { return this.#errored; }
+      setErrored(err) {
+        // Preserve the originating trap when unwinding through
+        // additional guest frames produces secondary traps (often
+        // an `unreachable` after a call which was expected to trap).
+        if (this.#errored === null) { this.#errored = err; }
+      }
+      
+      stop(err) {
+        this.reject(err);
+        // A JSPI stack may still be awaiting a host import. Publish
+        // rejection now, including for nested host tasks whose normal
+        // completion is delivered through their parent subtask.
+        this.#completionReady = true;
+        this.#settleCompletionPromise();
+      }
+      
+      reject(taskErr) {
+        _debugLog('[AsyncTask#reject()] args', {
           componentIdx: this.#componentIdx,
           taskID: this.#id,
+          parentSubtask: this.#parentSubtask,
+          parentSubtaskID: this.#parentSubtask?.id(),
+          entryFnName: this.entryFnName(),
+          callbackFnName: this.#callbackFnName,
+          errMsg: taskErr.message,
         });
-        try {
-          _withGlobalCurrentTaskMeta({
-            taskID: this.#id,
-            componentIdx: this.#componentIdx,
-            fn: () => this.#postReturnFn(taskValue),
-          });
-        } catch (err) {
-          _debugLog("[AsyncTask#onResolve] error during task resolve handler", err);
-          throw err;
+        
+        this.setErrored(taskErr);
+        if (this.#rejected) { return; }
+        
+        // A task may call `task.return` before its callback exits.
+        // A trap in cleanup or spawned work must still reject the
+        // host call and poison the enclosing task chain.
+        if (this.isResolvedState()) {
+          this.#rejected = true;
+          this.#errored = taskErr;
+          const parentTask = this.#parentSubtask?.getParentTask();
+          if (parentTask) { parentTask.reject(taskErr); }
+          return;
         }
-      }
-      
-      if (parentSubtaskPending) {
-        this.#parentSubtask.onResolve(taskValue);
-      }
-    }
-    
-    registerOnResolveHandler(f) {
-      this.#onResolveHandlers.push(f);
-    }
-    
-    isRejected() { return this.#rejected; }
-    
-    isErrored() { return this.#errored; }
-    setErrored(err) {
-      // Preserve the originating trap when unwinding through
-      // additional guest frames produces secondary traps (often
-      // an `unreachable` after a call which was expected to trap).
-      if (this.#errored === null) { this.#errored = err; }
-    }
-    
-    reject(taskErr) {
-      _debugLog('[AsyncTask#reject()] args', {
-        componentIdx: this.#componentIdx,
-        taskID: this.#id,
-        parentSubtask: this.#parentSubtask,
-        parentSubtaskID: this.#parentSubtask?.id(),
-        entryFnName: this.entryFnName(),
-        callbackFnName: this.#callbackFnName,
-        errMsg: taskErr.message,
-      });
-      
-      this.setErrored(taskErr);
-      if (this.#rejected) { return; }
-      
-      // A task may call `task.return` before its callback exits.
-      // A trap in cleanup or spawned work must still reject the
-      // host call and poison the enclosing task chain.
-      if (this.isResolvedState()) {
+        
         this.#rejected = true;
-        this.#errored = taskErr;
-        const parentTask = this.#parentSubtask?.getParentTask();
-        if (parentTask) { parentTask.reject(taskErr); }
-        return;
+        this.cancelRequested = true;
+        this.#state = AsyncTask.State.CANCEL_PENDING;
+        const cancelled = this.deliverPendingCancel({ cancellable: true });
+        
+        // TODO: do cleanup here to reset the machinery so we can run again?
+        
+        this.cancel({ error: taskErr });
       }
       
-      this.#rejected = true;
-      this.cancelRequested = true;
-      this.#state = AsyncTask.State.CANCEL_PENDING;
-      const cancelled = this.deliverPendingCancel({ cancellable: true });
-      
-      // TODO: do cleanup here to reset the machinery so we can run again?
-      
-      this.cancel({ error: taskErr });
-    }
-    
-    resolve(results) {
-      _debugLog('[AsyncTask#resolve()] args', {
-        componentIdx: this.#componentIdx,
-        taskID: this.#id,
-        entryFnName: this.entryFnName(),
-        callbackFnName: this.#callbackFnName,
-      });
-      
-      if (this.#state === AsyncTask.State.RESOLVED) {
-        if (this.#errored !== null) { throw this.#errored; }
-        throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}]  is already resolved (did you forget to wait for an import?)`);
-      }
-      
-      this.validateResourceBorrowScope();
-      
-      this.#state = AsyncTask.State.RESOLVED;
-      
-      switch (results.length) {
-        case 0:
-        this.onResolve(undefined);
-        break;
-        case 1:
-        this.onResolve(results[0]);
-        break;
-        default:
-        _debugLog('[AsyncTask#resolve()] unexpected number of results', {
+      resolve(results) {
+        _debugLog('[AsyncTask#resolve()] args', {
           componentIdx: this.#componentIdx,
-          results,
           taskID: this.#id,
-          subtaskID: this.#parentSubtask?.id(),
-          entryFnName: this.#entryFnName,
+          entryFnName: this.entryFnName(),
           callbackFnName: this.#callbackFnName,
         });
-        throw new Error('unexpected number of results');
-      }
-    }
-    
-    exit(args) {
-      _debugLog('[AsyncTask#exit()]', {
-        componentIdx: this.#componentIdx,
-        taskID: this.#id,
-      });
-      
-      if (this.#exited)  { throw new Error("task has already exited"); }
-      
-      if (this.#state !== AsyncTask.State.RESOLVED) {
-        throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}] exited without resolution`);
-      }
-      
-      this.validateResourceBorrowScope();
-      
-      const state = getOrCreateAsyncState(this.#componentIdx);
-      if (!state) { throw new Error('missing async state for component [' + this.#componentIdx + ']'); }
-      
-      // Exempt the host from exclusive lock check
-      if (this.#componentIdx !== -1 && !args?.skipExclusiveLockCheck && !this.#lockFreeEntry) {
-        if (this.needsExclusiveLock() && !state.exclusivelyLockedBy(this.#id)) {
-          throw new Error(`task [${this.#id}] exit: component [${this.#componentIdx}] should have been exclusively locked by it`);
+        
+        if (this.#state === AsyncTask.State.RESOLVED) {
+          if (this.#errored !== null) { throw this.#errored; }
+          throw new Error(`(component [${this.#componentIdx}]) task [${this.#id}]  is already resolved (did you forget to wait for an import?)`);
+        }
+        
+        this.validateResourceBorrowScope();
+        
+        this.#state = AsyncTask.State.RESOLVED;
+        
+        switch (results.length) {
+          case 0:
+          this.onResolve(undefined);
+          break;
+          case 1:
+          this.onResolve(results[0]);
+          break;
+          default:
+          _debugLog('[AsyncTask#resolve()] unexpected number of results', {
+            componentIdx: this.#componentIdx,
+            results,
+            taskID: this.#id,
+            subtaskID: this.#parentSubtask?.id(),
+            entryFnName: this.#entryFnName,
+            callbackFnName: this.#callbackFnName,
+          });
+          throw new Error('unexpected number of results');
         }
       }
       
-      // Ownership-checked: releases only this task's own hold (a
-      // task exiting while another task's slice holds the lock no
-      // longer clears the foreign hold).
-      state.exclusiveRelease(this.#id);
-      this.notifyProgress();
+      exit(args) {
+        _debugLog('[AsyncTask#exit()]', {
+          componentIdx: this.#componentIdx,
+          taskID: this.#id,
+        });
+        
+        this.endFirstSlice();
+        if (this.#exited)  { throw new Error("task has already exited"); }
+        
+        // Validate before publishing exit or running its handlers.
+        // Otherwise a failed exit leaves #exited true, so the driver
+        // cannot finish rejection cleanup and settle the host call.
+        this.#checkThreadExit();
+        this.validateResourceBorrowScope();
+        
+        // Host (-1) tasks have no component instance (and so no async
+        // state or exclusive lock); do not materialise one for them.
+        const state = this.#componentIdx === -1
+        ? null
+        : getOrCreateAsyncState(this.#componentIdx);
+        if (!state && this.#componentIdx !== -1) {
+          throw new Error('missing async state for component [' + this.#componentIdx + ']');
+        }
+        
+        if (state && !args?.skipExclusiveLockCheck && !this.#lockFreeEntry) {
+          if (this.needsExclusiveLock() && !state.exclusivelyLockedBy(this.#id)) {
+            throw new Error(`task [${this.#id}] exit: component [${this.#componentIdx}] should have been exclusively locked by it`);
+          }
+        }
+        
+        // Ownership-checked: releases only this task's own hold (a
+        // task exiting while another task's slice holds the lock no
+        // longer clears the foreign hold).
+        if (state) { state.exclusiveRelease(this.#id); }
+        this.notifyProgress();
+        
+        for (const f of this.#onExitHandlers) {
+          try {
+            f();
+          } catch (err) {
+            console.error("error during task exit handler", err);
+            throw err;
+          }
+        }
+        
+        this.#exited = true;
+        this.removeThread(this.defaultThread());
+        if (this.#threads.length > 0) {
+          clearCurrentThread(this.#componentIdx, this.#id, { preserveTask: true });
+        }
+      }
       
-      for (const f of this.#onExitHandlers) {
+      needsExclusiveLock() {
+        // Host (-1) tasks model host-side import handling: there is no
+        // guest linear memory or executor state to protect, and host
+        // calls from unrelated guest components would contend spuriously.
+        if (this.#componentIdx === -1) { return false; }
+        // Import-handler tasks (CallInterface) run host code nested
+        // inside the calling guest slice, which already holds the
+        // lock; only tasks that execute guest slices need it.
+        if (!this.#callingWasmExport) { return false; }
+        // Automatic backpressure only applies to async function
+        // types. A sync-typed call may run ready callback threads
+        // before returning, so holding this lock would deadlock it.
+        if (!this.#funcTypeIsAsync) { return false; }
+        // A sync-lifted callee cannot be reentered until the whole
+        // stackful call returns. This is the Component Model's
+        // automatic-backpressure rule for async-lowered calls.
+        return !this.#isAsync || this.hasCallback() || this.#calleeIsAsync === false;
+      }
+      
+      createSubtask(args) {
+        _debugLog('[AsyncTask#createSubtask()] args', args);
+        const { componentIdx, childTask, callMetadata, fnName, isAsync, isManualAsync } = args;
+        
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        if (!cstate) {
+          throw new Error(`invalid/missing async state for component idx [${componentIdx}]`);
+        }
+        
+        const waitable = new Waitable({
+          componentIdx: this.#componentIdx,
+          target: `subtask (internal ID [${this.#id}])`,
+        });
+        
+        const newSubtask = new AsyncSubtask({
+          componentIdx,
+          childTask,
+          parentTask: this,
+          callMetadata,
+          isAsync,
+          isManualAsync,
+          fnName,
+          waitable,
+        });
+        this.#subtasks.push(newSubtask);
+        newSubtask.setTarget(`subtask (internal ID [${newSubtask.id()}], waitable [${waitable.idx()}], component [${componentIdx}])`);
+        // The subtask gets a handle index in this task's table only once the
+        // guest is given it (see `AsyncSubtask#ensureHandle`).
+        return newSubtask;
+      }
+      
+      getLatestSubtask() {
+        return this.#subtasks.at(-1);
+      }
+      
+      getSubtaskByWaitableRep(rep) {
+        if (rep === undefined) { throw new TypeError('missing rep'); }
+        return this.#subtasks.find(s => s.waitableRep() === rep);
+      }
+      
+      currentSubtask() {
+        _debugLog('[AsyncTask#currentSubtask()]');
+        if (this.#subtasks.length === 0) { return undefined; }
+        return this.#subtasks.at(-1);
+      }
+      
+      removeSubtask(subtask) {
+        if (this.#subtasks.length === 0) {
+          throw new Error('cannot end current subtask: no current subtask');
+        }
+        this.#subtasks = this.#subtasks.filter(t => t !== subtask);
+        return subtask;
+      }
+    }
+    
+    class AsyncThread {
+      static State = {
+        // Explicitly spawned (`thread.new-indirect`) threads start
+        // here; the implicit thread of a task skips straight to
+        // RUNNING since it is the task's own entry.
+        NOT_STARTED: 'not-started',
+        RUNNING: 'running',
+        COMPLETED: 'completed',
+      }
+      
+      // Component-instance-scoped id (the canonical ABI's
+      // `Thread.index`) -- globally unique within the instance,
+      // *not* per task, since a thread of one task may be
+      // targeted (e.g. by `thread.resume-later`) by code
+      // running in a different task of the same instance.
+      // Assigned post-construction by `Task#addThread()`, which
+      // is the only code allowed to insert into the instance's
+      // thread table.
+      #id = null;
+      #componentIdx;
+      #task;
+      #state;
+      #startFn = null;
+      storage = [0, 0];
+      
+      constructor (opts) {
+        if (opts?.componentIdx === undefined) {
+          throw new TypeError('missing component id during thread creation');
+        }
+        this.#componentIdx = opts.componentIdx;
+        
+        if (!opts?.task) {
+          throw new TypeError('missing task during thread creation');
+        }
+        this.#task = opts.task;
+        
+        // Explicitly spawned threads provide a `startFn` and begin
+        // NOT_STARTED; the task's own implicit thread has none and
+        // is already running by the time it's constructed.
+        if (opts.startFn) {
+          this.#startFn = opts.startFn;
+          this.#state = AsyncThread.State.NOT_STARTED;
+        } else {
+          this.#state = AsyncThread.State.RUNNING;
+        }
+      }
+      
+      id() { return this.#id; }
+      setId(id) {
+        if (this.#id !== null) { throw new Error('thread id can only be assigned once'); }
+        this.#id = id;
+      }
+      componentIdx() { return this.#componentIdx; }
+      task() { return this.#task; }
+      taskID() { return this.#task.id(); }
+      state() { return this.#state; }
+      
+      // Delegate task-scoped bookkeeping that doesn't yet have a
+      // thread-specific notion (cancellation, progress waiters,
+      // the subtask this task is answering) to the owning task.
+      isCancelled() { return this.#task.isCancelled(); }
+      isRejected() { return this.#task.isRejected(); }
+      notifyProgress() { return this.#task.notifyProgress(); }
+      entryFnName() { return this.#task.entryFnName(); }
+      getParentSubtask() { return this.#task.getParentSubtask(); }
+      
+      async suspend(opts) {
+        const cstate = getOrCreateAsyncState(this.#componentIdx);
+        const task = this.#task;
+        task.endFirstSlice();
+        task.settleCompletion();
+        const { cancellable, readyFn, releaseLock = false } = opts;
+        if (task.deliverPendingCancel({ cancellable })) { return false; }
+        const reacquireLock = releaseLock && task.needsExclusiveLock() && cstate.exclusivelyLockedBy(task.id());
+        if (reacquireLock) { cstate.exclusiveRelease(task.id()); }
         try {
-          f();
-        } catch (err) {
-          console.error("error during task exit handler", err);
-          throw err;
+          const keepGoing = await cstate.suspendThread({
+            ...opts,
+            thread: this,
+            readyFn: () => (cancellable && task.cancellationPending()) || readyFn(),
+          });
+          cstate.throwIfInterrupted();
+          if (keepGoing && task.deliverPendingCancel({ cancellable })) { return false; }
+          return !!keepGoing;
+        } finally {
+          if (reacquireLock && !cstate.exclusivelyLockedBy(task.id())) {
+            await cstate.acquireExclusiveLock(task.id());
+          }
         }
       }
       
-      this.#exited = true;
-      clearCurrentTask(this.#componentIdx, this.id());
-    }
-    
-    needsExclusiveLock() {
-      // Host (-1) tasks model host-side import handling: there is no
-      // guest linear memory or executor state to protect, and host
-      // calls from unrelated guest components would contend spuriously.
-      if (this.#componentIdx === -1) { return false; }
-      // Import-handler tasks (CallInterface) run host code nested
-      // inside the calling guest slice, which already holds the
-      // lock; only tasks that execute guest slices need it.
-      if (!this.#callingWasmExport) { return false; }
-      // A sync-lifted callee cannot be reentered until the whole
-      // stackful call returns. This is the Component Model's
-      // automatic-backpressure rule for async-lowered calls.
-      return !this.#isAsync || this.hasCallback() || this.#calleeIsAsync === false;
-    }
-    
-    createSubtask(args) {
-      _debugLog('[AsyncTask#createSubtask()] args', args);
-      const { componentIdx, childTask, callMetadata, fnName, isAsync, isManualAsync } = args;
-      
-      const cstate = getOrCreateAsyncState(this.#componentIdx);
-      if (!cstate) {
-        throw new Error(`invalid/missing async state for component idx [${componentIdx}]`);
+      // Begins running a NOT_STARTED (explicitly spawned) thread's
+      // start function. Runs detached -- the caller (`thread.resume-later`)
+      // does not wait for the thread to finish or even reach its first
+      // suspension point.
+      start() {
+        if (this.#state !== AsyncThread.State.NOT_STARTED) {
+          throw new Error(`cannot start thread [${this.#id}] in state [${this.#state}]`);
+        }
+        this.#state = AsyncThread.State.RUNNING;
+        const startFn = this.#startFn;
+        this.#startFn = null;
+        
+        _withGlobalCurrentThreadMetaAsync({
+          threadID: this.#id,
+          taskID: this.#task.id(),
+          componentIdx: this.#componentIdx,
+          fn: async () => {
+            getOrCreateAsyncState(this.#componentIdx).throwIfInterrupted();
+            return startFn();
+          },
+        }).then(() => {
+          this.#state = AsyncThread.State.COMPLETED;
+          this.#task.removeThread(this);
+        }).catch((err) => {
+          err = _recordTrap(this.#componentIdx, err);
+          this.#state = AsyncThread.State.COMPLETED;
+          _debugLog('[AsyncThread#start()] spawned thread errored', {
+            threadID: this.#id,
+            taskID: this.#task.id(),
+            componentIdx: this.#componentIdx,
+            err,
+          });
+          this.#task.setErrored(err);
+          this.#task.reject(err);
+          this.#task.removeThread(this);
+        });
       }
-      
-      const waitable = new Waitable({
-        componentIdx: this.#componentIdx,
-        target: `subtask (internal ID [${this.#id}])`,
-      });
-      
-      const newSubtask = new AsyncSubtask({
-        componentIdx,
-        childTask,
-        parentTask: this,
-        callMetadata,
-        isAsync,
-        isManualAsync,
-        fnName,
-        waitable,
-      });
-      this.#subtasks.push(newSubtask);
-      newSubtask.setTarget(`subtask (internal ID [${newSubtask.id()}], waitable [${waitable.idx()}], component [${componentIdx}])`);
-      waitable.setIdx(cstate.handles.insert(newSubtask));
-      waitable.setTarget(`waitable for subtask (waitable id [${waitable.idx()}], subtask internal ID [${newSubtask.id()}])`);
-      return newSubtask;
     }
     
-    getLatestSubtask() {
-      return this.#subtasks.at(-1);
-    }
-    
-    getSubtaskByWaitableRep(rep) {
-      if (rep === undefined) { throw new TypeError('missing rep'); }
-      return this.#subtasks.find(s => s.waitableRep() === rep);
-    }
-    
-    currentSubtask() {
-      _debugLog('[AsyncTask#currentSubtask()]');
-      if (this.#subtasks.length === 0) { return undefined; }
-      return this.#subtasks.at(-1);
-    }
-    
-    removeSubtask(subtask) {
-      if (this.#subtasks.length === 0) {
-        throw new Error('cannot end current subtask: no current subtask');
-      }
-      this.#subtasks = this.#subtasks.filter(t => t !== subtask);
-      return subtask;
-    }
-  }
-  
-  function createNewCurrentTask(args) {
-    _debugLog('[createNewCurrentTask()] args', args);
-    const {
-      componentIdx,
-      isAsync,
-      isManualAsync,
-      preserveFutureResult,
-      entryFnName,
-      parentSubtaskID,
-      callbackFnName,
-      getCallbackFn,
-      getParamsFn,
-      stringEncoding,
-      errHandling,
-      getCalleeParamsFn,
-      resultPtr,
-      callingWasmExport,
-    } = args;
-    if (componentIdx === undefined || componentIdx === null) {
-      throw new Error('missing/invalid component instance index while starting task');
-    }
-    let taskMetas = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
-    const callbackFn = getCallbackFn ? getCallbackFn() : null;
-    
-    const newTask = new AsyncTask({
-      componentIdx,
-      isAsync,
-      isManualAsync,
-      preserveFutureResult,
-      entryFnName,
-      callbackFn,
-      callbackFnName,
-      stringEncoding,
-      getCalleeParamsFn,
-      resultPtr,
-      errHandling,
-      callingWasmExport,
-    });
-    
-    const newTaskID = newTask.id();
-    const newTaskMeta = { id: newTaskID, componentIdx, task: newTask };
-    
-    // NOTE: do not track host tasks
-    ASYNC_CURRENT_TASK_IDS.push(newTaskID);
-    ASYNC_CURRENT_COMPONENT_IDXS.push(componentIdx);
-    
-    if (!taskMetas) {
-      taskMetas = [newTaskMeta];
-      ASYNC_TASKS_BY_COMPONENT_IDX.set(componentIdx, [newTaskMeta]);
-    } else {
-      taskMetas.push(newTaskMeta);
-    }
-    
-    return [newTask, newTaskID];
-  }
-  
-  function _checkMayLeave(componentIdx) {
-    if (INSTANCE_FLAGS.get(componentIdx)?.value !== 1) {
-      throw new WebAssemblyRuntimeError('cannot leave component instance');
-    }
-  }
-  
-  function _getGlobalCurrentTaskMeta(componentIdx) {
-    const v = componentIdx === undefined || componentIdx === null
-    ? CURRENT_TASK_META.current
-    : CURRENT_TASK_META[componentIdx];
-    if (v === undefined || v === null) {
-      return undefined;
-    }
-    return { ...v };
-  }
-  
-  
-  function _setGlobalCurrentTaskMeta(args) {
-    if (!args) { throw new TypeError('args missing'); }
-    if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
-    if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
-    const { taskID, componentIdx } = args;
-    return CURRENT_TASK_META.current =
-    CURRENT_TASK_META[componentIdx] = { taskID, componentIdx };
-  }
-  
-  
-  async function _clearCurrentTask(args) {
-    _debugLog('[_clearCurrentTask()] args', args);
-    if (!args) { throw new TypeError('args missing'); }
-    if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
-    if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
-    const { taskID, componentIdx } = args;
-    
-    const meta = CURRENT_TASK_META[componentIdx];
-    if (!meta) { throw new Error(`missing current task meta for component idx [${componentIdx}]`); }
-    
-    if (meta.taskID !== taskID) {
-      throw new Error(`task ID [${meta.taskID}] != requested ID [${taskID}]`);
-    }
-    if (meta.componentIdx !== componentIdx) {
-      throw new Error(`component idx [${meta.componentIdx}] != requested idx [${componentIdx}]`);
-    }
-    
-    CURRENT_TASK_META[componentIdx] = null;
-    if (CURRENT_TASK_META.current?.taskID === taskID) {
-      CURRENT_TASK_META.current = null;
-    }
-  }
-  
-  function _lowerImportBackwardsCompat(args) {
-    const params = [...arguments].slice(1);
-    _debugLog('[_lowerImportBackwardsCompat()] args', { args, params });
-    const {
-      functionIdx,
-      componentIdx,
-      isAsync,
-      isManualAsync,
-      paramLiftFns,
-      resultLowerFns,
-      hasResultPointer,
-      funcTypeIsAsync,
-      metadata,
-      memoryIdx,
-      getMemoryFn,
-      getReallocFn,
-      importFn,
-      stringEncoding,
-    } = args;
-    
-    _checkMayLeave(componentIdx);
-    
-    const meta = _getGlobalCurrentTaskMeta(componentIdx);
-    let taskMeta = meta && getCurrentTask(componentIdx, meta.taskID);
-    let createdTask;
-    
-    // Some components depend on initialization logic (i.e. `_initialize` or some such
-    // core wasm export) that is embedded in the component, but is not executed or wizer'd
-    // away before the transpiled component is attempted to be used.
-    //
-    // These components execut their initialization logic *when they are imported* in the
-    // transpiled context -- so we may get a call to an export that is lowered without going
-    // through `CallWasm` or `CallInterface`.
-    //
-    // A nested synchronous call can leave global metadata for a task
-    // that has already exited. Treat it like a call with no current task.
-    if (!taskMeta) {
-      if (funcTypeIsAsync || (isAsync && !isManualAsync)) {
-        throw new Error('p3 async wasm exports cannot use backwards compat auto-task init');
-      }
-      
-      const [newTask, newTaskID] = createNewCurrentTask({
+    function createNewCurrentImplicitThread(args) {
+      _debugLog('[createNewCurrentImplicitThread()] args', args);
+      const {
         componentIdx,
         isAsync,
         isManualAsync,
-        callingWasmExport: false,
-      });
-      createdTask = newTask;
+        preserveFutureResult,
+        entryFnName,
+        parentSubtaskID,
+        callbackFnName,
+        getCallbackFn,
+        getParamsFn,
+        stringEncoding,
+        errHandling,
+        getCalleeParamsFn,
+        resultPtr,
+        callingWasmExport,
+      } = args;
+      if (componentIdx === undefined || componentIdx === null) {
+        throw new Error('missing/invalid component instance index while starting task');
+      }
+      let taskMetas = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
+      const callbackFn = getCallbackFn ? getCallbackFn() : null;
       
-      // Since we're managing the task creation ourselves we must clear ourselves
-      createdTask.registerOnResolveHandler(() => {
-        _clearCurrentTask({
-          taskID: task.id(),
-          componentIdx: task.componentIdx(),
+      const newTask = new AsyncTask({
+        componentIdx,
+        isAsync,
+        isManualAsync,
+        preserveFutureResult,
+        entryFnName,
+        callbackFn,
+        callbackFnName,
+        stringEncoding,
+        getCalleeParamsFn,
+        resultPtr,
+        errHandling,
+        callingWasmExport,
+      });
+      
+      const newTaskID = newTask.id();
+      const newTaskMeta = { id: newTaskID, componentIdx, task: newTask };
+      
+      // Every task starts with a single implicit thread, registered
+      // the same way as explicitly spawned ones (`thread.new-indirect`):
+      // `addThread` assigns its real, instance-scoped id.
+      const newThread = newTask.addThread(new AsyncThread({
+        componentIdx,
+        task: newTask,
+      }));
+      const newThreadID = newThread.id();
+      
+      // NOTE: do not track host tasks
+      ASYNC_CURRENT_TASK_IDS.push(newTaskID);
+      ASYNC_CURRENT_COMPONENT_IDXS.push(componentIdx);
+      
+      if (!taskMetas) {
+        taskMetas = [newTaskMeta];
+        ASYNC_TASKS_BY_COMPONENT_IDX.set(componentIdx, [newTaskMeta]);
+      } else {
+        taskMetas.push(newTaskMeta);
+      }
+      
+      return { task: newTask, thread: newThread, taskID: newTaskID, threadID: newThreadID };
+    }
+    
+    function callResourceDestructor(args) {
+      const { componentIdx, dtor, rep } = args;
+      if (STORE_TRAP.stopped) { return; }
+      
+      // A destructor enters a separate synchronous call, even when
+      // invoked from its own component. Its context slots must start
+      // empty: SDK task hooks allocate and free a stack through them.
+      // The enclosing task's register is restored after the call.
+      
+      const { task, threadID } = createNewCurrentImplicitThread({
+        componentIdx,
+        isAsync: false,
+        callingWasmExport: true,
+        entryFnName: '<resource-drop>',
+      });
+      task.enterSync();
+      
+      return _withGlobalCurrentThreadMeta({
+        taskID: task.id(),
+        threadID,
+        componentIdx,
+        fn: () => {
+          try {
+            const result = dtor(rep);
+            task.resolve([]);
+            task.exit();
+            return result;
+          } catch (err) {
+            if (!task.isResolvedState()) {
+              task.setErrored(err);
+              task.reject(err);
+            }
+            if (!task.isExited()) {
+              task.exit({ skipExclusiveLockCheck: true });
+            }
+            throw err;
+          }
+        },
+      });
+    }
+    
+    
+    function getCurrentTask(componentIdx, taskID) {
+      let usedGlobal = false;
+      if (componentIdx === undefined || componentIdx === null) {
+        throw new Error('missing component idx'); // TODO(fix)
+        // componentIdx = ASYNC_CURRENT_COMPONENT_IDXS.at(-1);
+        // usedGlobal = true;
+      }
+      
+      const taskMetas = ASYNC_TASKS_BY_COMPONENT_IDX.get(componentIdx);
+      if (taskMetas === undefined || taskMetas.length === 0) { return undefined; }
+      
+      if (taskID) {
+        return taskMetas.find(meta => meta.task.id() === taskID);
+      }
+      
+      // The task whose guest code is running is the one the metadata
+      // wrappers record for the component (and restore when a suspended
+      // stack resumes). The component's most recently created task may
+      // be another one, e.g. a prepared callee that has not entered yet
+      // while an earlier task of the component is suspended.
+      const current = CURRENT_TASK_META[componentIdx];
+      if (current && current.taskID !== undefined) {
+        const currentMeta = taskMetas.find(meta => meta.task.id() === current.taskID);
+        if (currentMeta) { return currentMeta; }
+      }
+      
+      const taskMeta = taskMetas[taskMetas.length - 1];
+      if (!taskMeta || !taskMeta.task) { return undefined; }
+      
+      return taskMeta;
+    }
+    
+    function _checkMayLeave(componentIdx) {
+      if (INSTANCE_FLAGS.get(componentIdx)?.value !== 1) {
+        throw new WebAssemblyRuntimeError('cannot leave component instance');
+      }
+    }
+    
+    function _setGlobalCurrentThreadMeta(args) {
+      if (!args) { throw new TypeError('args missing'); }
+      if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
+      if (args.threadID === undefined) { throw new TypeError('missing thread ID'); }
+      if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
+      const { taskID, threadID, componentIdx } = args;
+      return CURRENT_TASK_META.current =
+      CURRENT_TASK_META[componentIdx] = { threadID, taskID, componentIdx };
+    }
+    
+    
+    async function _clearCurrentTask(args) {
+      _debugLog('[_clearCurrentTask()] args', args);
+      if (!args) { throw new TypeError('args missing'); }
+      if (args.taskID === undefined) { throw new TypeError('missing task ID'); }
+      if (args.threadID === undefined) { throw new TypeError('missing thread ID'); }
+      if (args.componentIdx === undefined) { throw new TypeError('missing component idx'); }
+      const { taskID, threadID, componentIdx } = args;
+      
+      const meta = CURRENT_TASK_META[componentIdx];
+      if (!meta) { throw new Error(`missing current thread meta for component idx [${componentIdx}]`); }
+      
+      if (meta.threadID !== threadID) {
+        throw new Error(`thread ID [${meta.threadID}] != requested ID [${threadID}]`);
+      }
+      if (meta.taskID !== taskID) {
+        throw new Error(`task ID [${meta.taskID}] != requested ID [${taskID}]`);
+      }
+      if (meta.componentIdx !== componentIdx) {
+        throw new Error(`component idx [${meta.componentIdx}] != requested idx [${componentIdx}]`);
+      }
+      
+      CURRENT_TASK_META[componentIdx] = null;
+      if (CURRENT_TASK_META.current?.threadID === threadID &&
+      CURRENT_TASK_META.current?.taskID === taskID) {
+        CURRENT_TASK_META.current = null;
+      }
+    }
+    
+    function _lowerImportBackwardsCompat(args) {
+      const params = [...arguments].slice(1);
+      _debugLog('[_lowerImportBackwardsCompat()] args', { args, params });
+      const {
+        functionIdx,
+        componentIdx,
+        isAsync,
+        isManualAsync,
+        paramLiftFns,
+        resultLowerFns,
+        hasResultPointer,
+        funcTypeIsAsync,
+        metadata,
+        memoryIdx,
+        getMemoryFn,
+        getReallocFn,
+        importFn,
+        stringEncoding,
+      } = args;
+      
+      _checkMayLeave(componentIdx);
+      
+      const meta = _getGlobalCurrentThreadMeta(componentIdx);
+      let taskMeta = meta && getCurrentTask(componentIdx, meta.taskID);
+      let createdTask;
+      
+      // Some components depend on initialization logic (i.e. `_initialize` or some such
+      // core wasm export) that is embedded in the component, but is not executed or wizer'd
+      // away before the transpiled component is attempted to be used.
+      //
+      // These components execut their initialization logic *when they are imported* in the
+      // transpiled context -- so we may get a call to an export that is lowered without going
+      // through `CallWasm` or `CallInterface`.
+      //
+      // A nested synchronous call can leave global metadata for a task
+      // that has already exited. Treat it like a call with no current task.
+      if (!taskMeta) {
+        if (funcTypeIsAsync || (isAsync && !isManualAsync)) {
+          throw new Error('p3 async wasm exports cannot use backwards compat auto-task init');
+        }
+        
+        const { task: newTask, taskID: newTaskID, threadID: newThreadID } = createNewCurrentImplicitThread({
+          componentIdx,
+          isAsync,
+          isManualAsync,
+          callingWasmExport: false,
+        });
+        createdTask = newTask;
+        
+        // Since we're managing the task creation ourselves we must clear ourselves
+        createdTask.registerOnResolveHandler(() => {
+          _clearCurrentTask({
+            taskID: task.id(),
+            threadID: newThreadID,
+            componentIdx: task.componentIdx(),
+          });
+        });
+        
+        _setGlobalCurrentThreadMeta({
+          componentIdx,
+          taskID: newTaskID,
+          threadID: newThreadID,
+        });
+        
+        taskMeta = getCurrentTask(componentIdx, newTaskID);
+      }
+      if (!taskMeta) {
+        throw new Error('invalid/missing async task meta');
+      }
+      
+      const task = taskMeta.task;
+      if (!task) { throw new Error('invalid/missing async task'); }
+      
+      const cstate = getOrCreateAsyncState(componentIdx);
+      
+      if (!task.mayBlock() && funcTypeIsAsync && !isAsync) {
+        throw new Error("non async exports cannot synchronously call async functions");
+      }
+      
+      // If there is an existing task, this should be part of a subtask
+      const memory = getMemoryFn();
+      // Canonical ABI lower appends result storage as a trailing
+      // param when async lower has any flat result, or sync lower
+      // has more than one flat result.
+      const resultPtr = hasResultPointer ? params[params.length - 1] >>> 0 : undefined;
+      const subtask = task.createSubtask({
+        componentIdx,
+        parentTask: task,
+        fnName: importFn.fnName,
+        isAsync,
+        isManualAsync,
+        callMetadata: {
+          memoryIdx,
+          memory,
+          realloc: getReallocFn?.(),
+          getReallocFn,
+          resultPtr,
+          lowers: resultLowerFns,
+          funcTypeIsAsync,
+          stringEncoding,
+        }
+      });
+      task.setReturnMemoryIdx(memoryIdx);
+      task.setReturnMemory(getMemoryFn());
+      
+      subtask.onStart();
+      
+      // If dealing with a sync lowered sync function, we can directly return results
+      //
+      // TODO(breaking): remove once we get rid of manual async import specification,
+      // as func types cannot be detected in that case only (and we don't need that w/ p3)
+      if (!isManualAsync && !isAsync && !funcTypeIsAsync) {
+        if (createdTask) { createdTask.enterSync(); }
+        
+        const res = importFn(...params);
+        
+        // TODO(breaking): remove once we get rid of manual async import specification,
+        // as func types cannot be detected in that case only (and we don't need that w/ p3)
+        if (!funcTypeIsAsync && !subtask.isReturned()) {
+          throw new Error('post-execution subtasks must either be async or returned');
+        }
+        
+        const syncRes = subtask.getResult();
+        if (createdTask) {
+          createdTask.resolve([syncRes]);
+          createdTask.exit();
+        }
+        
+        return syncRes;
+      }
+      
+      // Sync-lowered async functions requires async behavior because the callee *can* block,
+      // but this call must *act* synchronously and return immediately with the result
+      // (i.e. not returning until the work is done)
+      //
+      // TODO(breaking): remove checking for manual async specification here, once we can go p3-only
+      //
+      if (!isManualAsync && !isAsync && funcTypeIsAsync) {
+        const { promise, resolve, reject } = promiseWithResolvers();
+        queueMicrotask(async () => {
+          try {
+            await importFn(...params);
+            if (!subtask.isResolved()) {
+              await task.suspendUntil({ readyFn: () => subtask.isResolved() });
+            }
+            resolve(subtask.getResult());
+          } catch (err) {
+            reject(err);
+          }
+        });
+        return promise;
+      }
+      
+      // NOTE: at this point we know that we are working with an async lowered import
+      
+      const subtaskState = subtask.getStateNumber();
+      if (subtaskState < 0 || subtaskState >= 2**4) {
+        throw new Error('invalid subtask state, out of valid range');
+      }
+      
+      subtask.setOnProgressFn(() => {
+        subtask.setPendingEvent(() => {
+          if (subtask.isResolved()) { subtask.deliverResolve(); }
+          const event = {
+            code: ASYNC_EVENT_CODE.SUBTASK,
+            payload0: subtask.waitableRep(),
+            payload1: subtask.getStateNumber(),
+          }
+          return event;
         });
       });
       
-      _setGlobalCurrentTaskMeta({
-        componentIdx,
-        taskID: newTaskID,
-      });
-      
-      taskMeta = getCurrentTask(componentIdx, newTaskID);
-    }
-    if (!taskMeta) {
-      throw new Error('invalid/missing async task meta');
-    }
-    
-    const task = taskMeta.task;
-    if (!task) { throw new Error('invalid/missing async task'); }
-    
-    const cstate = getOrCreateAsyncState(componentIdx);
-    
-    if (!task.mayBlock() && funcTypeIsAsync && !isAsync) {
-      throw new Error("non async exports cannot synchronously call async functions");
-    }
-    
-    // If there is an existing task, this should be part of a subtask
-    const memory = getMemoryFn();
-    // Canonical ABI lower appends result storage as a trailing
-    // param when async lower has any flat result, or sync lower
-    // has more than one flat result.
-    const resultPtr = hasResultPointer ? params[params.length - 1] >>> 0 : undefined;
-    const subtask = task.createSubtask({
-      componentIdx,
-      parentTask: task,
-      fnName: importFn.fnName,
-      isAsync,
-      isManualAsync,
-      callMetadata: {
-        memoryIdx,
-        memory,
-        realloc: getReallocFn?.(),
-        getReallocFn,
-        resultPtr,
-        lowers: resultLowerFns,
-        funcTypeIsAsync,
-        stringEncoding,
-      }
-    });
-    task.setReturnMemoryIdx(memoryIdx);
-    task.setReturnMemory(getMemoryFn());
-    
-    subtask.onStart();
-    
-    // If dealing with a sync lowered sync function, we can directly return results
-    //
-    // TODO(breaking): remove once we get rid of manual async import specification,
-    // as func types cannot be detected in that case only (and we don't need that w/ p3)
-    if (!isManualAsync && !isAsync && !funcTypeIsAsync) {
-      if (createdTask) { createdTask.enterSync(); }
-      
-      const res = importFn(...params);
-      
-      // TODO(breaking): remove once we get rid of manual async import specification,
-      // as func types cannot be detected in that case only (and we don't need that w/ p3)
-      if (!funcTypeIsAsync && !subtask.isReturned()) {
-        throw new Error('post-execution subtasks must either be async or returned');
+      // This is a hack to maintain backwards compatibility with
+      // manually-specified async imports, used in wasm exports that are
+      // not actually async (but are specified as so).
+      //
+      // This is not normal p3 sync behavior but instead anticipating that
+      // the caller that is doing manual async will be given the *actual* result,
+      // or a promise that resolves to it.
+      //
+      // TODO(breaking): remove once manually specified async is removed
+      //
+      // There are a few cases:
+      // 1. sync function with async types (e.g. `f: func() -> stream<u32>`)
+      // 2. async function with async types (e.g. `f: async func() -> stream<u32>`)
+      // 3. async function with sync types (e.g. `f: async func() -> list<u32>`)
+      // 4. sync function with non-async types (e.g. `f: func() -> list<u32>`)
+      //
+      // This hack *only* applies to 4 -- the case where an async JS host function
+      // is supplied to a Wasm export which does *not* need to do any async abi
+      // lifting/lowering (async ABI did not exist when JSPI integratiton was
+      // initially merged to enable asynchronously returning values from the host)
+      //
+      // The host is called now rather than in a microtask, so that a host which
+      // answers synchronously is answered synchronously: a task that cannot block
+      // (e.g. a resource destructor) traps on a promise.
+      if (!isAsync && !funcTypeIsAsync && isManualAsync) {
+        _debugLog('[_lowerImportBackwardsCompat()] calling lowered import', { importFn, params });
+        if (createdTask) { createdTask.enterSync(); }
+        try {
+          const res = importFn(...params);
+          const isPromise = res !== null &&
+          (typeof res === 'object' || typeof res === 'function') &&
+          typeof res.then === 'function';
+          // Without a current task the call cannot block, and its caller
+          // traps on a promise, so a task created for it ends now.
+          if (createdTask) { createdTask.resolve([isPromise ? undefined : res]); }
+          if (!isPromise) { return subtask.getResult(); }
+          return Promise.resolve(res).then(() => subtask.getResult());
+        } catch (err) {
+          if (createdTask) { createdTask.reject(err); }
+          throw err;
+        } finally {
+          // Resolution delivers the result; exit retires the implicit
+          // thread and removes the task from the component's registry.
+          if (createdTask) { createdTask.exit(); }
+        }
       }
       
-      const syncRes = subtask.getResult();
-      if (createdTask) { createdTask.resolve([syncRes]); }
-      
-      return syncRes;
-    }
-    
-    // Sync-lowered async functions requires async behavior because the callee *can* block,
-    // but this call must *act* synchronously and return immediately with the result
-    // (i.e. not returning until the work is done)
-    //
-    // TODO(breaking): remove checking for manual async specification here, once we can go p3-only
-    //
-    if (!isManualAsync && !isAsync && funcTypeIsAsync) {
-      const { promise, resolve, reject } = promiseWithResolvers();
       queueMicrotask(async () => {
         try {
-          await importFn(...params);
-          if (!subtask.isResolved()) {
-            await task.suspendUntil({ readyFn: () => subtask.isResolved() });
-          }
-          resolve(subtask.getResult());
+          _debugLog('[_lowerImportBackwardsCompat()] calling lowered import', { importFn, params });
+          if (createdTask) { await createdTask.enter(); }
+          
+          const asyncRes = await importFn(...params);
+          if (createdTask) { createdTask.resolve([asyncRes]); }
         } catch (err) {
-          reject(err);
+          _debugLog("[_lowerImportBackwardsCompat()] import fn error:", err);
+          task.setErrored(err);
+          task.reject(err);
         }
       });
-      return promise;
-    }
-    
-    // NOTE: at this point we know that we are working with an async lowered import
-    
-    const subtaskState = subtask.getStateNumber();
-    if (subtaskState < 0 || subtaskState >= 2**4) {
-      throw new Error('invalid subtask state, out of valid range');
-    }
-    
-    subtask.setOnProgressFn(() => {
-      subtask.setPendingEvent(() => {
-        if (subtask.isResolved()) { subtask.deliverResolve(); }
-        const event = {
-          code: ASYNC_EVENT_CODE.SUBTASK,
-          payload0: subtask.waitableRep(),
-          payload1: subtask.getStateNumber(),
-        }
-        return event;
+      
+      _debugLog('[_lowerImportBackwardsCompat()] async-lowered import return', {
+        fnName: importFn.fnName,
+        componentIdx,
+        subtaskID: subtask.id(),
+        waitableRep: subtask.waitableRep(),
+        subtaskState,
+        packedResult: Number(subtask.waitableRep()) << 4 | subtaskState,
       });
-    });
-    
-    // This is a hack to maintain backwards compatibility with
-    // manually-specified async imports, used in wasm exports that are
-    // not actually async (but are specified as so).
-    //
-    // This is not normal p3 sync behavior but instead anticipating that
-    // the caller that is doing manual async will be waiting for a promise that
-    // resolves to the *actual* result.
-    //
-    // TODO(breaking): remove once manually specified async is removed
-    //
-    // There are a few cases:
-    // 1. sync function with async types (e.g. `f: func() -> stream<u32>`)
-    // 2. async function with async types (e.g. `f: async func() -> stream<u32>`)
-    // 3. async function with sync types (e.g. `f: async func() -> list<u32>`)
-    // 4. sync function with non-async types (e.g. `f: func() -> list<u32>`)
-    //
-    // This hack *only* applies to 4 -- the case where an async JS host function
-    // is supplied to a Wasm export which does *not* need to do any async abi
-    // lifting/lowering (async ABI did not exist when JSPI integratiton was
-    // initially merged to enable asynchronously returning values from the host)
-    //
-    const requiresManualAsyncResult = !isAsync && !funcTypeIsAsync && isManualAsync;
-    let manualAsyncResult;
-    if (requiresManualAsyncResult) {
-      manualAsyncResult = promiseWithResolvers();
-    }
-    
-    queueMicrotask(async () => {
-      try {
-        _debugLog('[_lowerImportBackwardsCompat()] calling lowered import', { importFn, params });
-        if (createdTask) { await createdTask.enter(); }
-        
-        const asyncRes = await importFn(...params);
-        if (requiresManualAsyncResult) {
-          manualAsyncResult.resolve(subtask.getResult());
-        }
-        
-        if (createdTask) { createdTask.resolve([asyncRes]); }
-        
-        
-      } catch (err) {
-        _debugLog("[_lowerImportBackwardsCompat()] import fn error:", err);
-        if (requiresManualAsyncResult) {
-          manualAsyncResult.reject(err);
-          return;
-        }
-        task.setErrored(err);
-        task.reject(err);
-      }
-    });
-    
-    if (requiresManualAsyncResult) { return manualAsyncResult.promise; }
-    
-    _debugLog('[_lowerImportBackwardsCompat()] async-lowered import return', {
-      fnName: importFn.fnName,
-      componentIdx,
-      subtaskID: subtask.id(),
-      waitableRep: subtask.waitableRep(),
-      subtaskState,
-      packedResult: Number(subtask.waitableRep()) << 4 | subtaskState,
-    });
-    
-    return Number(subtask.waitableRep()) << 4 | subtaskState;
-  }
-  
-  const CURRENT_TASK_MAY_BLOCK= globalThis.WebAssembly ? new globalThis.WebAssembly.Global({ value: 'i32', mutable: true }, 0) : false;
-  
-  
-  function _liftFlatU8(ctx) {
-    _debugLog('[_liftFlatU8()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length === 0) { throw new Error('expected at least a single i32 argument'); }
-      val = ctx.params[0];
-      ctx.params = ctx.params.slice(1);
-      return [val, ctx];
-    }
-    
-    if (ctx.storageLen !== undefined && ctx.storageLen < 1) {
-      throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u8 requires 1 byte)`);
-    }
-    
-    val = new DataView(ctx.memory.buffer).getUint8(ctx.storagePtr, true);
-    
-    ctx.storagePtr += 1;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 1; }
-    
-    return [val, ctx];
-  }
-  
-  
-  function _liftFlatU16(ctx) {
-    _debugLog('[_liftFlatU16()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length === 0) { throw new Error('expected at least a single i32 argument'); }
-      val = ctx.params[0];
-      ctx.params = ctx.params.slice(1);
-      return [val, ctx];
-    }
-    
-    if (ctx.storageLen !== undefined && ctx.storageLen < 2) {
-      throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u16 requires 2 bytes)`);
-    }
-    
-    val = new DataView(ctx.memory.buffer).getUint16(ctx.storagePtr, true);
-    
-    ctx.storagePtr += 2;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 2; }
-    
-    const rem = ctx.storagePtr % 2;
-    if (rem !== 0) { ctx.storagePtr += (2 - rem); }
-    
-    return [val, ctx];
-  }
-  
-  
-  function _liftFlatU32(ctx) {
-    _debugLog('[_liftFlatU32()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length === 0) { throw new Error('expected at least a single i34 argument'); }
-      // core i32 values arrive as signed numbers
-      val = ctx.params[0] >>> 0;
-      ctx.params = ctx.params.slice(1);
-      return [val, ctx];
-    }
-    
-    if (ctx.storageLen !== undefined && ctx.storageLen < 4) {
-      throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u32 requires 4 bytes)`);
-    }
-    val = new DataView(ctx.memory.buffer).getUint32(ctx.storagePtr, true);
-    ctx.storagePtr += 4;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 4; }
-    
-    return [val, ctx];
-  }
-  
-  
-  function _liftFlatU64(ctx) {
-    _debugLog('[_liftFlatU64()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length === 0) { throw new Error('expected at least one single i64 argument'); }
-      if (typeof ctx.params[0] !== 'bigint') { throw new Error('expected bigint'); }
-      // core i64 values arrive as signed BigInts
-      val = BigInt.asUintN(64, ctx.params[0]);
-      ctx.params = ctx.params.slice(1);
-      return [val, ctx];
-    }
-    
-    if (ctx.storageLen !== undefined && ctx.storageLen < 8) {
-      throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u64 requires 8 bytes)`);
-    }
-    
-    val = new DataView(ctx.memory.buffer).getBigUint64(ctx.storagePtr, true);
-    ctx.storagePtr += 8;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
-    
-    return [val, ctx];
-  }
-  
-  
-  function _liftFlatStringUTF8(ctx) {
-    _debugLog('[_liftFlatStringUTF8()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
-      let offset = ctx.params[0];
-      if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
-      if (!Number.isSafeInteger(offset)) { throw new Error('invalid offset'); }
-      const len = ctx.params[1];
-      if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
-      val = TEXT_DECODER_UTF8.decode(new DataView(ctx.memory.buffer, offset, len));
-      ctx.params = ctx.params.slice(2);
-      return [val, ctx];
-    }
-    
-    const rem = ctx.storagePtr % 4;
-    if (rem !== 0) { ctx.storagePtr += (4 - rem); }
-    
-    const dv = new DataView(ctx.memory.buffer);
-    const start = dv.getUint32(ctx.storagePtr, true);
-    const codeUnits = dv.getUint32(ctx.storagePtr + 4, true);
-    
-    val = TEXT_DECODER_UTF8.decode(new Uint8Array(ctx.memory.buffer, start, codeUnits));
-    
-    ctx.storagePtr += 8;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
-    
-    return [val, ctx];
-  }
-  
-  function _liftFlatStringUTF16(ctx) {
-    _debugLog('[_liftFlatStringUTF16()] args', { ctx });
-    let val;
-    
-    if (ctx.useDirectParams) {
-      if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
-      let offset = ctx.params[0];
-      if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
-      if (!Number.isSafeInteger(offset)) {  throw new Error('invalid offset'); }
-      const len = ctx.params[1];
-      if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
-      val = utf16Decoder.decode(new DataView(ctx.memory.buffer, offset, len * 2));
-      ctx.params = ctx.params.slice(2);
-      return [val, ctx];
-    }
-    
-    const rem = ctx.storagePtr % 4;
-    if (rem !== 0) { ctx.storagePtr += (4 - rem); }
-    
-    const dv = new DataView(ctx.memory.buffer);
-    const start = dv.getUint32(ctx.storagePtr, true);
-    const codeUnits = dv.getUint32(ctx.storagePtr + 4, true);
-    
-    val = utf16Decoder.decode(new DataView(ctx.memory.buffer, start, codeUnits * 2));
-    
-    ctx.storagePtr += 8;
-    if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
-    
-    return [val, ctx];
-  }
-  
-  function _liftFlatStringAny(ctx) {
-    switch (ctx.stringEncoding) {
-      case 'utf8':
-      return _liftFlatStringUTF8(ctx);
-      case 'utf16':
-      return _liftFlatStringUTF16(ctx);
-      default:
-      throw new Error(`missing/unrecognized/unsupported string encoding [${ctx.stringEncoding}]`);
-    }
-  }
-  
-  const _liftFlatVariantScratch = new DataView(new ArrayBuffer(8));
-  
-  function _liftFlatVariant(meta) {
-    const {
-      caseMetas,
-      variantSize32,
-      variantAlign32,
-      variantPayloadOffset32,
-      variantFlatCount,
-      variantPayloadFlatTypes,
-      isEnum,
-    } = meta;
-    
-    return function _liftFlatVariantInner(ctx) {
-      _debugLog('[_liftFlatVariant()] args', { ctx });
-      const origUseParams = ctx.useDirectParams;
       
-      let caseIdx;
-      let liftRes;
-      const originalPtr = ctx.storagePtr;
-      const numCases =  caseMetas.length;
-      if (caseMetas.length < 256) {
-        liftRes = _liftFlatU8(ctx);
-      } else if (numCases >= 256 && numCases < 65536) {
-        liftRes = _liftFlatU16(ctx);
-      } else if (numCases >= 65536 && numCases < 4_294_967_296) {
-        liftRes = _liftFlatU32(ctx);
-      } else {
-        throw new Error(`unsupported number of variant cases [${numCases}]`);
-      }
-      caseIdx = liftRes[0];
-      ctx = liftRes[1];
-      
-      const [
-      tag,
-      liftFn,
-      caseSize32,
-      caseAlign32,
-      caseFlatCount,
-      caseFlatTypes,
-      ] = caseMetas[caseIdx];
-      
-      if (variantPayloadOffset32 === undefined) {
-        throw new Error('unexpectedly missing payload offset');
-      }
-      
-      if (originalPtr !== undefined) {
-        ctx.storagePtr = originalPtr + variantPayloadOffset32;
-      }
-      
-      let val;
-      if (liftFn === null) {
-        val = { tag };
-        // NOTE: here we need to move past the entire object in memory
-        // despite moving to the payload which we now know is missing/unnecessary
-        if (originalPtr !== undefined) {
-          ctx.storagePtr = originalPtr + variantSize32;
-        }
-      } else {
-        // When lifting from direct params, the payload arrives as the
-        // *join* of all case flat representations: each slot whose
-        // joined core type differs from the selected case's core type
-        // must be reinterpreted before the payload lift
-        // (see CanonicalABI `lift_flat_variant`)
-        if (ctx.useDirectParams) {
-          if (!variantPayloadFlatTypes || !caseFlatTypes) {
-            throw new Error('missing variant flat type metadata during direct-param lift');
+      return Number(subtask.ensureHandle()) << 4 | subtaskState;
+    }
+    
+    const CURRENT_TASK_MAY_BLOCK= typeof WebAssembly !== 'undefined' ? new WebAssembly.Global({ value: 'i32', mutable: true }, 0) : false;
+    
+    
+    function _decodeUtf8(decoder, input) {
+      try { return decoder.decode(input); } catch (error) {
+        if (!(error instanceof TypeError)) { throw error; }
+        let bytes;
+        try {
+          bytes = ArrayBuffer.isView(input)
+          ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+          : new Uint8Array(input);
+        } catch { throw error; }
+        // Preserve provider errors for valid input. Fatal codecs
+        // do not distinguish malformed data from a truncated prefix.
+        for (let i = 0; i < bytes.length; i++) {
+          const lead = bytes[i];
+          if (lead < 0x80) { continue; }
+          const count = lead >= 0xc2 && lead <= 0xdf ? 1
+          : lead >= 0xe0 && lead <= 0xef ? 2
+          : lead >= 0xf0 && lead <= 0xf4 ? 3 : -1;
+          if (count < 0) { throw new WebAssemblyRuntimeError('invalid utf-8'); }
+          for (let j = 1; j <= count; j++) {
+            if (i + j >= bytes.length) { throw new WebAssemblyRuntimeError('incomplete utf-8 byte sequence'); }
+            const byte = bytes[i + j];
+            if (byte < 0x80 || byte > 0xbf || (j === 1 && (
+            (lead === 0xe0 && byte < 0xa0) || (lead === 0xed && byte > 0x9f) ||
+            (lead === 0xf0 && byte < 0x90) || (lead === 0xf4 && byte > 0x8f)
+            ))) { throw new WebAssemblyRuntimeError('invalid utf-8'); }
           }
-          const scratch = _liftFlatVariantScratch;
-          for (let i = 0; i < caseFlatTypes.length; i++) {
-            const have = variantPayloadFlatTypes[i];
-            const want = caseFlatTypes[i];
-            if (have === want) { continue; }
-            const val = ctx.params[i];
-            if (have === 'i64' && want === 'i32') {
-              ctx.params[i] = Number(BigInt.asIntN(32, val));
-            } else if (have === 'i64' && want === 'f32') {
-              scratch.setInt32(0, Number(BigInt.asIntN(32, val)), true);
-              ctx.params[i] = scratch.getFloat32(0, true);
-            } else if (have === 'i64' && want === 'f64') {
-              scratch.setBigInt64(0, val, true);
-              ctx.params[i] = scratch.getFloat64(0, true);
-            } else if (have === 'i32' && want === 'f32') {
-              scratch.setInt32(0, val, true);
-              ctx.params[i] = scratch.getFloat32(0, true);
-            } else {
-              throw new Error(`invalid variant payload coercion [${have}] -> [${want}]`);
+          i += count;
+        }
+        throw error;
+      }
+    }
+    
+    
+    function _liftFlatU8(ctx) {
+      _debugLog('[_liftFlatU8()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length === 0) { throw new Error('expected at least a single i32 argument'); }
+        val = ctx.params[0];
+        ctx.params = ctx.params.slice(1);
+        return [val, ctx];
+      }
+      
+      if (ctx.storageLen !== undefined && ctx.storageLen < 1) {
+        throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u8 requires 1 byte)`);
+      }
+      
+      val = new DataView(ctx.memory.buffer).getUint8(ctx.storagePtr, true);
+      
+      ctx.storagePtr += 1;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 1; }
+      
+      return [val, ctx];
+    }
+    
+    
+    function _liftFlatU16(ctx) {
+      _debugLog('[_liftFlatU16()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length === 0) { throw new Error('expected at least a single i32 argument'); }
+        val = ctx.params[0];
+        ctx.params = ctx.params.slice(1);
+        return [val, ctx];
+      }
+      
+      if (ctx.storageLen !== undefined && ctx.storageLen < 2) {
+        throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u16 requires 2 bytes)`);
+      }
+      
+      val = new DataView(ctx.memory.buffer).getUint16(ctx.storagePtr, true);
+      
+      ctx.storagePtr += 2;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 2; }
+      
+      const rem = ctx.storagePtr % 2;
+      if (rem !== 0) { ctx.storagePtr += (2 - rem); }
+      
+      return [val, ctx];
+    }
+    
+    
+    function _liftFlatU32(ctx) {
+      _debugLog('[_liftFlatU32()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length === 0) { throw new Error('expected at least a single i34 argument'); }
+        // core i32 values arrive as signed numbers
+        val = ctx.params[0] >>> 0;
+        ctx.params = ctx.params.slice(1);
+        return [val, ctx];
+      }
+      
+      if (ctx.storageLen !== undefined && ctx.storageLen < 4) {
+        throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u32 requires 4 bytes)`);
+      }
+      val = new DataView(ctx.memory.buffer).getUint32(ctx.storagePtr, true);
+      ctx.storagePtr += 4;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 4; }
+      
+      return [val, ctx];
+    }
+    
+    
+    function _liftFlatU64(ctx) {
+      _debugLog('[_liftFlatU64()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length === 0) { throw new Error('expected at least one single i64 argument'); }
+        if (typeof ctx.params[0] !== 'bigint') { throw new Error('expected bigint'); }
+        // core i64 values arrive as signed BigInts
+        val = BigInt.asUintN(64, ctx.params[0]);
+        ctx.params = ctx.params.slice(1);
+        return [val, ctx];
+      }
+      
+      if (ctx.storageLen !== undefined && ctx.storageLen < 8) {
+        throw new Error(`insufficient storage ([${ctx.storageLen}] bytes) for lift (u64 requires 8 bytes)`);
+      }
+      
+      val = new DataView(ctx.memory.buffer).getBigUint64(ctx.storagePtr, true);
+      ctx.storagePtr += 8;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
+      
+      return [val, ctx];
+    }
+    
+    
+    function _liftFlatStringUTF8(ctx) {
+      _debugLog('[_liftFlatStringUTF8()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
+        let offset = ctx.params[0];
+        if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
+        if (!Number.isSafeInteger(offset)) { throw new Error('invalid offset'); }
+        const len = ctx.params[1];
+        if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
+        if (offset % 1 !== 0) { throw new WebAssemblyRuntimeError('wasm trap: unaligned pointer'); }
+        if (offset > ctx.memory.buffer.byteLength || len < 0 || len > Math.floor((ctx.memory.buffer.byteLength - offset) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        val = _decodeUtf8(TEXT_DECODER_UTF8, new DataView(ctx.memory.buffer, offset, len));
+        ctx.params = ctx.params.slice(2);
+        return [val, ctx];
+      }
+      
+      const rem = ctx.storagePtr % 4;
+      if (rem !== 0) { ctx.storagePtr += (4 - rem); }
+      
+      const dv = new DataView(ctx.memory.buffer);
+      const start = dv.getUint32(ctx.storagePtr, true);
+      const codeUnits = dv.getUint32(ctx.storagePtr + 4, true);
+      
+      if (start % 1 !== 0) { throw new WebAssemblyRuntimeError('wasm trap: unaligned pointer'); }
+      if (start > ctx.memory.buffer.byteLength || codeUnits > Math.floor((ctx.memory.buffer.byteLength - start) / 1)) {
+        throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+      }
+      val = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(ctx.memory.buffer, start, codeUnits));
+      
+      ctx.storagePtr += 8;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
+      
+      return [val, ctx];
+    }
+    
+    function _liftFlatStringUTF16(ctx) {
+      _debugLog('[_liftFlatStringUTF16()] args', { ctx });
+      let val;
+      
+      if (ctx.useDirectParams) {
+        if (ctx.params.length < 2) { throw new Error('expected at least two u32 arguments'); }
+        let offset = ctx.params[0];
+        if (typeof offset === 'bigint') { offset = Number(offset); } else { offset >>>= 0; }
+        if (!Number.isSafeInteger(offset)) {  throw new Error('invalid offset'); }
+        const len = ctx.params[1];
+        if (!Number.isSafeInteger(len)) {  throw new Error('invalid len'); }
+        if (offset % 2 !== 0) { throw new WebAssemblyRuntimeError('wasm trap: unaligned pointer'); }
+        if (offset > ctx.memory.buffer.byteLength || len < 0 || len > Math.floor((ctx.memory.buffer.byteLength - offset) / 2)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        val = utf16Decoder.decode(new DataView(ctx.memory.buffer, offset, len * 2));
+        ctx.params = ctx.params.slice(2);
+        return [val, ctx];
+      }
+      
+      const rem = ctx.storagePtr % 4;
+      if (rem !== 0) { ctx.storagePtr += (4 - rem); }
+      
+      const dv = new DataView(ctx.memory.buffer);
+      const start = dv.getUint32(ctx.storagePtr, true);
+      const codeUnits = dv.getUint32(ctx.storagePtr + 4, true);
+      
+      if (start % 2 !== 0) { throw new WebAssemblyRuntimeError('wasm trap: unaligned pointer'); }
+      if (start > ctx.memory.buffer.byteLength || codeUnits > Math.floor((ctx.memory.buffer.byteLength - start) / 2)) {
+        throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+      }
+      val = utf16Decoder.decode(new DataView(ctx.memory.buffer, start, codeUnits * 2));
+      
+      ctx.storagePtr += 8;
+      if (ctx.storageLen !== undefined) { ctx.storageLen -= 8; }
+      
+      return [val, ctx];
+    }
+    
+    function _liftFlatStringAny(ctx) {
+      switch (ctx.stringEncoding) {
+        case 'utf8':
+        return _liftFlatStringUTF8(ctx);
+        case 'utf16':
+        return _liftFlatStringUTF16(ctx);
+        case 'compact-utf16': {
+          const [ptr, ptrCtx] = _liftFlatU32(ctx);
+          const [len, newCtx] = _liftFlatU32(ptrCtx);
+          return [_compactUtf16Decode(ctx.memory, ptr, len), newCtx];
+        }
+        default:
+        throw new Error(`missing/unrecognized/unsupported string encoding [${ctx.stringEncoding}]`);
+      }
+    }
+    
+    const _liftFlatVariantScratch = new DataView(new ArrayBuffer(8));
+    
+    function _liftFlatVariant(meta) {
+      const {
+        caseMetas,
+        variantSize32,
+        variantAlign32,
+        variantPayloadOffset32,
+        variantFlatCount,
+        variantPayloadFlatTypes,
+        isEnum,
+      } = meta;
+      
+      return function _liftFlatVariantInner(ctx) {
+        _debugLog('[_liftFlatVariant()] args', { ctx });
+        const origUseParams = ctx.useDirectParams;
+        
+        let caseIdx;
+        let liftRes;
+        const originalPtr = ctx.storagePtr;
+        const numCases =  caseMetas.length;
+        if (caseMetas.length < 256) {
+          liftRes = _liftFlatU8(ctx);
+        } else if (numCases >= 256 && numCases < 65536) {
+          liftRes = _liftFlatU16(ctx);
+        } else if (numCases >= 65536 && numCases < 4_294_967_296) {
+          liftRes = _liftFlatU32(ctx);
+        } else {
+          throw new Error(`unsupported number of variant cases [${numCases}]`);
+        }
+        caseIdx = liftRes[0];
+        ctx = liftRes[1];
+        
+        const [
+        tag,
+        liftFn,
+        caseSize32,
+        caseAlign32,
+        caseFlatCount,
+        caseFlatTypes,
+        ] = caseMetas[caseIdx];
+        
+        if (variantPayloadOffset32 === undefined) {
+          throw new Error('unexpectedly missing payload offset');
+        }
+        
+        if (originalPtr !== undefined) {
+          ctx.storagePtr = originalPtr + variantPayloadOffset32;
+        }
+        
+        let val;
+        if (liftFn === null) {
+          val = { tag };
+          // NOTE: here we need to move past the entire object in memory
+          // despite moving to the payload which we now know is missing/unnecessary
+          if (originalPtr !== undefined) {
+            ctx.storagePtr = originalPtr + variantSize32;
+          }
+        } else {
+          // When lifting from direct params, the payload arrives as the
+          // *join* of all case flat representations: each slot whose
+          // joined core type differs from the selected case's core type
+          // must be reinterpreted before the payload lift
+          // (see CanonicalABI `lift_flat_variant`)
+          if (ctx.useDirectParams) {
+            if (!variantPayloadFlatTypes || !caseFlatTypes) {
+              throw new Error('missing variant flat type metadata during direct-param lift');
+            }
+            const scratch = _liftFlatVariantScratch;
+            for (let i = 0; i < caseFlatTypes.length; i++) {
+              const have = variantPayloadFlatTypes[i];
+              const want = caseFlatTypes[i];
+              if (have === want) { continue; }
+              const val = ctx.params[i];
+              if (have === 'i64' && want === 'i32') {
+                ctx.params[i] = Number(BigInt.asIntN(32, val));
+              } else if (have === 'i64' && want === 'f32') {
+                scratch.setInt32(0, Number(BigInt.asIntN(32, val)), true);
+                ctx.params[i] = scratch.getFloat32(0, true);
+              } else if (have === 'i64' && want === 'f64') {
+                scratch.setBigInt64(0, val, true);
+                ctx.params[i] = scratch.getFloat64(0, true);
+              } else if (have === 'i32' && want === 'f32') {
+                scratch.setInt32(0, val, true);
+                ctx.params[i] = scratch.getFloat32(0, true);
+              } else {
+                throw new Error(`invalid variant payload coercion [${have}] -> [${want}]`);
+              }
             }
           }
+          
+          const [newVal, newCtx] = liftFn(ctx);
+          val = { tag, val: newVal };
+          ctx = newCtx;
         }
         
-        const [newVal, newCtx] = liftFn(ctx);
-        val = { tag, val: newVal };
-        ctx = newCtx;
+        if (origUseParams) {
+          if (variantFlatCount === undefined || variantFlatCount === null) {
+            _debugLog('[_liftFlatVariant()] variant with unknown flat count', { ctx, meta });
+            throw new Error('cannot lift variant with unknown flat count');
+          }
+          if (caseFlatCount === undefined || caseFlatCount === null) {
+            _debugLog('[_liftFlatVariant()] case with unknown flat count', { ctx, meta, case: meta.caseMetas[caseIdx] });
+            throw new Error('cannot lift case with unknown flat count');
+          }
+          // NOTE: enums can be tightly packed and do not have a descriminant
+          const remainingPayloadParams = variantFlatCount - caseFlatCount - (isEnum ? 0 : 1);
+          if (remainingPayloadParams < 0) {
+            throw new Error(`invalid variant flat count metadata`);
+          }
+          if (ctx.params.length < remainingPayloadParams) {
+            throw new Error(`expected at least [${remainingPayloadParams}] remaining variant payload params, but got [${ctx.params.length}]`);
+          }
+          ctx.params = ctx.params.slice(remainingPayloadParams);
+        }
+        
+        if (ctx.storagePtr !== undefined) {
+          const rem = ctx.storagePtr % variantAlign32;
+          if (rem !== 0) { ctx.storagePtr += variantAlign32 - rem; }
+        }
+        
+        return [val, ctx];
       }
-      
-      if (origUseParams) {
-        if (variantFlatCount === undefined || variantFlatCount === null) {
-          _debugLog('[_liftFlatVariant()] variant with unknown flat count', { ctx, meta });
-          throw new Error('cannot lift variant with unknown flat count');
-        }
-        if (caseFlatCount === undefined || caseFlatCount === null) {
-          _debugLog('[_liftFlatVariant()] case with unknown flat count', { ctx, meta, case: meta.caseMetas[caseIdx] });
-          throw new Error('cannot lift case with unknown flat count');
-        }
-        // NOTE: enums can be tightly packed and do not have a descriminant
-        const remainingPayloadParams = variantFlatCount - caseFlatCount - (isEnum ? 0 : 1);
-        if (remainingPayloadParams < 0) {
-          throw new Error(`invalid variant flat count metadata`);
-        }
-        if (ctx.params.length < remainingPayloadParams) {
-          throw new Error(`expected at least [${remainingPayloadParams}] remaining variant payload params, but got [${ctx.params.length}]`);
-        }
-        ctx.params = ctx.params.slice(remainingPayloadParams);
-      }
-      
-      if (ctx.storagePtr !== undefined) {
-        const rem = ctx.storagePtr % variantAlign32;
-        if (rem !== 0) { ctx.storagePtr += variantAlign32 - rem; }
-      }
-      
-      return [val, ctx];
     }
-  }
-  
-  function _liftFlatList(meta) {
-    const { elemLiftFn, elemSize32, elemAlign32, knownLen, typedArray } = meta;
     
-    const listValue =
-    typedArray === undefined
-    ? values => values
-    : values => new typedArray(values);
-    
-    const readValuesAndReset = (ctx, originalPtr, originalLen, dataPtr, len) => {
-      if (
-      dataPtr < 0 || len < 0 ||
-      (elemSize32 !== 0 && len > Math.floor(((1 << 28) - 1) / elemSize32)) ||
-      dataPtr > ctx.memory.buffer.byteLength ||
-      (elemSize32 !== 0 && len > Math.floor((ctx.memory.buffer.byteLength - dataPtr) / elemSize32))
-      ) {
-        throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
-      }
-      if (dataPtr % elemAlign32 !== 0) {
-        throw new TypeError(`list pointer [${dataPtr}] is not aligned to ${elemAlign32}`);
-      }
-      ctx.storagePtr = dataPtr;
-      const val = [];
-      for (var i = 0; i < len; i++) {
-        const elemPtr = dataPtr + i * elemSize32;
-        ctx.storagePtr = elemPtr;
-        const [res, nextCtx] = elemLiftFn(ctx);
-        val.push(res);
-        ctx = nextCtx;
+    function _liftFlatList(meta) {
+      const { elemLiftFn, elemSize32, elemAlign32, knownLen, typedArray } = meta;
+      
+      const listValue =
+      typedArray === undefined
+      ? values => values
+      : values => new typedArray(values);
+      
+      const readValuesAndReset = (ctx, originalPtr, originalLen, dataPtr, len) => {
+        if (
+        dataPtr < 0 || len < 0 ||
+        (elemSize32 !== 0 && len > Math.floor(((1 << 28) - 1) / elemSize32)) ||
+        dataPtr > ctx.memory.buffer.byteLength ||
+        (elemSize32 !== 0 && len > Math.floor((ctx.memory.buffer.byteLength - dataPtr) / elemSize32))
+        ) {
+          throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
+        }
+        if (dataPtr % elemAlign32 !== 0) {
+          throw new TypeError(`list pointer [${dataPtr}] is not aligned to ${elemAlign32}`);
+        }
+        ctx.storagePtr = dataPtr;
+        let val;
+        if (typedArray !== undefined && (isLE || elemSize32 === 1)) {
+          // A list of numbers is its elements' bytes as they are in memory.
+          ctx.storagePtr = dataPtr + len * elemSize32;
+          val = new typedArray(ctx.memory.buffer.slice(dataPtr, ctx.storagePtr));
+        } else {
+          val = [];
+          for (var i = 0; i < len; i++) {
+            const elemPtr = dataPtr + i * elemSize32;
+            ctx.storagePtr = elemPtr;
+            const [res, nextCtx] = elemLiftFn(ctx);
+            val.push(res);
+            ctx = nextCtx;
+            
+            ctx.storagePtr = Math.max(ctx.storagePtr, elemPtr + elemSize32);
+          }
+          val = listValue(val);
+        }
+        if (originalPtr !== null) { ctx.storagePtr = originalPtr; }
+        if (originalLen !== null) { ctx.storageLen = originalLen; }
+        return [val, ctx];
+      };
+      
+      return function _liftFlatListInner(ctx) {
+        _debugLog('[_liftFlatList()] args', { ctx });
         
-        ctx.storagePtr = Math.max(ctx.storagePtr, elemPtr + elemSize32);
+        let liftResults;
+        if (knownLen !== undefined) { // list with known length
+        if (ctx.useDirectParams) {
+          _debugLog('memory unexpectedly missing while lifting unknown length list', { ctx });
+          liftResults = [listValue(ctx.params.slice(0, knownLen)), ctx];
+          ctx.params = ctx.params.slice(knownLen);
+        } else { // indirect params
+        if (ctx.memory === null) {
+          _debugLog('memory unexpectedly missing while lifting known length list', { knownLen, ctx });
+          throw new Error(`memory missing while lifting known length (${knownLen}) list`);
+        }
+        
+        const originalLen = ctx.storageLen;
+        const originalPtr = ctx.storagePtr;
+        
+        ctx.storageLen = knownLen * elemSize32;
+        liftResults = readValuesAndReset(ctx, null, originalLen, ctx.storagePtr, knownLen);
       }
-      if (originalPtr !== null) { ctx.storagePtr = originalPtr; }
-      if (originalLen !== null) { ctx.storageLen = originalLen; }
-      return [listValue(val), ctx];
-    };
+      
+    } else { // unknown length list
     
-    return function _liftFlatListInner(ctx) {
-      _debugLog('[_liftFlatList()] args', { ctx });
+    if (ctx.useDirectParams) {
+      // unknown length list ptr w/ direct params
+      const dataPtr = ctx.params[0] >>> 0;
+      const len = ctx.params[1];
+      ctx.params = ctx.params.slice(2);
       
-      let liftResults;
-      if (knownLen !== undefined) { // list with known length
-      if (ctx.useDirectParams) {
-        _debugLog('memory unexpectedly missing while lifting unknown length list', { ctx });
-        liftResults = [listValue(ctx.params.slice(0, knownLen)), ctx];
-        ctx.params = ctx.params.slice(knownLen);
-      } else { // indirect params
-      if (ctx.memory === null) {
-        _debugLog('memory unexpectedly missing while lifting known length list', { knownLen, ctx });
-        throw new Error(`memory missing while lifting known length (${knownLen}) list`);
-      }
-      
-      const originalLen = ctx.storageLen;
+      ctx.useDirectParams = false;
       const originalPtr = ctx.storagePtr;
+      const originalLen = ctx.storageLen;
+      ctx.storageLen = len * elemSize32;
       
-      ctx.storageLen = knownLen * elemSize32;
-      liftResults = readValuesAndReset(ctx, null, originalLen, ctx.storagePtr, knownLen);
+      liftResults = readValuesAndReset(ctx, originalPtr, originalLen, dataPtr, len);
+      
+      ctx.useDirectParams = true;
+    } else {
+      // unknown length list ptr w/ in-memory params
+      const originalLen = ctx.storageLen;
+      ctx.storageLen = 8;
+      
+      const dataPtrLiftRes = _liftFlatU32(ctx);
+      const dataPtr = dataPtrLiftRes[0];
+      ctx = dataPtrLiftRes[1];
+      
+      const lenLiftRes = _liftFlatU32(ctx);
+      const len = lenLiftRes[0];
+      ctx = lenLiftRes[1];
+      
+      const originalPtr = ctx.storagePtr;
+      ctx.storagePtr = dataPtr;
+      
+      ctx.storageLen = len * elemSize32;
+      liftResults = readValuesAndReset(ctx, originalPtr, originalLen, dataPtr, len);
     }
-    
-  } else { // unknown length list
-  
-  if (ctx.useDirectParams) {
-    // unknown length list ptr w/ direct params
-    const dataPtr = ctx.params[0] >>> 0;
-    const len = ctx.params[1];
-    ctx.params = ctx.params.slice(2);
-    
-    ctx.useDirectParams = false;
-    const originalPtr = ctx.storagePtr;
-    const originalLen = ctx.storageLen;
-    ctx.storageLen = len * elemSize32;
-    
-    liftResults = readValuesAndReset(ctx, originalPtr, originalLen, dataPtr, len);
-    
-    ctx.useDirectParams = true;
-  } else {
-    // unknown length list ptr w/ in-memory params
-    const originalLen = ctx.storageLen;
-    ctx.storageLen = 8;
-    
-    const dataPtrLiftRes = _liftFlatU32(ctx);
-    const dataPtr = dataPtrLiftRes[0];
-    ctx = dataPtrLiftRes[1];
-    
-    const lenLiftRes = _liftFlatU32(ctx);
-    const len = lenLiftRes[0];
-    ctx = lenLiftRes[1];
-    
-    const originalPtr = ctx.storagePtr;
-    ctx.storagePtr = dataPtr;
-    
-    ctx.storageLen = len * elemSize32;
-    liftResults = readValuesAndReset(ctx, originalPtr, originalLen, dataPtr, len);
   }
-}
-
-return liftResults;
+  
+  return liftResults;
 }
 }
 
@@ -3637,6 +4443,15 @@ function _lowerFlatStringAny(ctx) {
     return _lowerFlatStringUTF8(ctx);
     case 'utf16':
     return _lowerFlatStringUTF16(ctx);
+    case 'compact-utf16': {
+      if (!ctx.realloc) { throw new Error('missing realloc during flat string lower'); }
+      const { ptr, len } = _compactUtf16AllocateAndEncode(ctx.vals[0], ctx.realloc, ctx.memory);
+      const view = new DataView(ctx.memory.buffer);
+      view.setUint32(ctx.storagePtr, ptr, true);
+      view.setUint32(ctx.storagePtr + 4, len, true);
+      ctx.storagePtr += 8;
+      return;
+    }
     default:
     throw new Error(`missing/unrecognized/unsupported string encoding [${ctx.stringEncoding}]`);
   }
@@ -3672,7 +4487,7 @@ function _lowerFlatRecord(meta) {
 function _lowerFlatVariant(meta) {
   const { variantSize32, variantAlign32, variantPayloadOffset32, caseMetas } = meta;
   
-  let caseLookup = {};
+  const caseLookup = Object.create(null);
   for (const [idx, meta] of caseMetas.entries()) {
     let tag = meta[0];
     caseLookup[tag] = { discriminant: idx, meta };
@@ -3722,6 +4537,7 @@ function _lowerFlatList(meta) {
     align32,
     elemSize32,
     elemAlign32,
+    typedArray,
   } = meta;
   
   if (!elemLowerFn) { throw new TypeError("missing/invalid element lower fn for list"); }
@@ -3737,11 +4553,16 @@ function _lowerFlatList(meta) {
       
       const list = ctx.vals[0];
       if (!list) { throw new Error("missing direct param value"); }
+      if (elemCount !== list.length) { throw new Error('list length does not match allocated storage'); }
       
       const lowerCtx = {
         storagePtr,
         memory: ctx.memory,
         stringEncoding: ctx.stringEncoding,
+        componentIdx: ctx.componentIdx,
+        realloc: ctx.realloc,
+        lowerResource: ctx.lowerResource,
+        vals: [],
       };
       for (let idx = 0; idx < list.length; idx++) {
         const elemPtr = storagePtr + idx * elemSize32;
@@ -3761,6 +4582,11 @@ function _lowerFlatList(meta) {
     // a component lower?
     
     const elems = ctx.vals[0];
+    const totalSizeBytes = knownLen === undefined ? 8 : (size32 ?? elems.length * elemSize32);
+    if (ctx.storageLen !== undefined && totalSizeBytes > ctx.storageLen) {
+      throw new Error('not enough storage remaining for list flat lower');
+    }
+    
     if (knownLen === undefined) {
       // unknown length
       if (!ctx.realloc) { throw new Error('missing realloc during flat string lower'); }
@@ -3775,12 +4601,18 @@ function _lowerFlatList(meta) {
       const origPtr = ctx.storagePtr;
       ctx.storagePtr = dataPtr;
       
-      for (const [idx, elem] of elems.entries()) {
-        const elemPtr = dataPtr + idx * elemSize32;
-        ctx.storagePtr = elemPtr;
-        ctx.vals = [elem];
-        elemLowerFn(ctx);
-        ctx.storagePtr = Math.max(ctx.storagePtr, elemPtr + elemSize32);
+      if (typedArray !== undefined && elems instanceof typedArray && (isLE || elemSize32 === 1)) {
+        // Copy numeric elements together; a matching typed array only holds valid values.
+        new Uint8Array(ctx.memory.buffer, dataPtr, elems.byteLength)
+        .set(new Uint8Array(elems.buffer, elems.byteOffset, elems.byteLength));
+      } else {
+        for (const [idx, elem] of elems.entries()) {
+          const elemPtr = dataPtr + idx * elemSize32;
+          ctx.storagePtr = elemPtr;
+          ctx.vals = [elem];
+          elemLowerFn(ctx);
+          ctx.storagePtr = Math.max(ctx.storagePtr, elemPtr + elemSize32);
+        }
       }
       
       ctx.storagePtr = origPtr;
@@ -3800,13 +4632,6 @@ function _lowerFlatList(meta) {
         elemLowerFn(ctx);
         ctx.storagePtr = Math.max(ctx.storagePtr, elemPtr + elemSize32);
       }
-    }
-    
-    // TODO(fix): special case for u8/u16/etc, we can do a direct copy
-    
-    const totalSizeBytes = elems.length * size32;
-    if (ctx.storageLen !== undefined && totalSizeBytes > ctx.storageLen) {
-      throw new Error('not enough storage remaining for list flat lower');
     }
   }
 }
@@ -3881,7 +4706,7 @@ function _lowerFlatEnum(meta) {
     _debugLog('[_lowerFlatEnum()] args', { ctx });
     
     const v = ctx.vals[0];
-    const isNotEnumObject = typeof v !== 'object'
+    const isNotEnumObject = v === null || typeof v !== 'object'
     || Object.keys(v).length !== 2
     || !('tag' in v);
     if (isNotEnumObject) {
@@ -3924,7 +4749,8 @@ function _lowerFlatResult(meta) {
     _debugLog('[_lowerFlatResult()] args', { ctx });
     
     const v = ctx.vals[0];
-    const isNotResultObject = typeof v !== 'object'
+    const isNotResultObject = v === null
+    || typeof v !== 'object'
     || Object.keys(v).length !== 2
     || !('tag' in v)
     || !('ok' === v.tag || 'err' === v.tag)
@@ -3959,16 +4785,84 @@ function _lowerFlatOwn(meta) {
   };
 }
 
+const STREAMS = new RepTable({ target: 'global stream map' });
+
+const FUTURES = new RepTable({ target: 'global future map' });
+
+function _stopInstance() {
+  if (STORE_TRAP.stopped) { return; }
+  STORE_TRAP.stopped = true;
+  const err = new WebAssemblyRuntimeError('component instance has been stopped');
+  STORE_TRAP.error ??= err;
+  clearTimeout(STORE_ASYNC_STATE.deadlockCheck);
+  STORE_ASYNC_STATE.deadlockCheck = null;
+  
+  // Poison every component before releasing any continuation or
+  // calling host cleanup, which can reenter the instance.
+  for (const state of ASYNC_STATE.values()) { state.markTrapped(err); }
+  for (const reject of STORE_TRAP.stopWaiters) { reject(err); }
+  STORE_TRAP.stopWaiters.clear();
+  const pending = [...ASYNC_TASKS_BY_COMPONENT_IDX.values()].flat().map(meta => meta.task);
+  for (const task of pending) { task.stop(err); }
+  for (const state of ASYNC_STATE.values()) { state.stop(); }
+  
+  // Both ends of every stream and future, whichever side either end is on.
+  const errors = [];
+  for (const channels of [STREAMS, FUTURES]) {
+    // data() is part of both inline and external table contracts.
+    for (let i = 2, data = channels.data(); i < data.length; i += 2) {
+      const channel = data[i];
+      if (channel === undefined || channel === RepTable.FREE) { continue; }
+      // (what a host has lifted is only a view of one of these)
+      try { channel.onInstanceStop?.(); } catch (e) { errors.push(e); }
+    }
+  }
+  
+  // A capture table also contains borrowed resources. Only live
+  // owned handles belong to the guest; lifting an own back to the
+  // host removes its capture. Shared tables/reps are deduplicated.
+  const resources = new Set();
+  for (const { handles, captures } of STORE_TRAP.resourceTables) {
+    for (let i = 2; i < handles.length; i += 2) {
+      if ((handles[i] & T_FLAG) !== 0 || !(handles[i + 1] >= T_OWN)) { continue; }
+      const resource = captures.get(handles[i + 1] - T_OWN);
+      if (resource !== undefined) { resources.add(resource); }
+    }
+  }
+  for (const { captures } of STORE_TRAP.resourceTables) { captures.clear(); }
+  STORE_TRAP.resourceTables.length = 0;
+  for (const resource of resources) {
+    // A guest holding it twice may have dropped the other handle.
+    if (STORE_TRAP.disposed.has(resource)) { continue; }
+    try { resource[symbolDispose]?.(); }
+    catch (error) { errors.push(error); }
+  }
+  if (errors.length) { throw new AggregateError(errors, 'failed to dispose stopped instance resources'); }
+}
+
+
+function _whenIdle() {
+  if (_isIdle()) { return Promise.resolve(); }
+  return new Promise((resolve) => { STORE_ASYNC_STATE.idleWaiters.add(resolve); });
+}
+
 function _trackHostOperation(operation) {
+  if (STORE_TRAP.stopped) { throw STORE_TRAP.error; }
   const result = operation();
   if (result === null ||
   (typeof result !== 'object' && typeof result !== 'function') ||
   typeof result.then !== 'function') {
+    if (STORE_TRAP.stopped) { throw STORE_TRAP.error; }
     return result;
   }
   
   STORE_ASYNC_STATE.pendingHostOperations++;
-  const tracked = Promise.resolve(result).finally(() => {
+  let rejectStopped;
+  const stopped = new Promise((_, reject) => { rejectStopped = reject; });
+  STORE_TRAP.stopWaiters.add(rejectStopped);
+  if (STORE_TRAP.stopped) { rejectStopped(STORE_TRAP.error); }
+  const tracked = Promise.race([result, stopped]).finally(() => {
+    STORE_TRAP.stopWaiters.delete(rejectStopped);
     STORE_ASYNC_STATE.pendingHostOperations--;
     if (STORE_ASYNC_STATE.pendingHostOperations < 0) {
       throw new Error('negative pending host operation count');
@@ -3994,6 +4888,24 @@ function _guardMayLeave(componentIdx, fn) {
     return fn.apply(this, args);
   };
 }
+
+function _guardTrap(componentIdx, fn, convertsRangeErrors = false) {
+  return function (...args) {
+    try {
+      return fn.apply(this, args);
+    } catch (err) {
+      throw _recordTrap(componentIdx, err, convertsRangeErrors);
+    }
+  };
+}
+
+function clampGuest(i, min, max) {
+  if (i < min || i > max) {
+    throw new TypeError(`must be between ${min} and ${max}`);
+  }
+  return i;
+}
+
 
 const fetchCompile = url => fetch(url).then(WebAssembly.compileStreaming);
 
@@ -4022,18 +4934,18 @@ function getErrorPayload(e) {
   return e;
 }
 
-function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = false) {
+function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = false, convertsRangeErrors = true, callsHost = false) {
   return function (...args) {
     _checkMayLeave(componentIdx);
     const saved = CURRENT_TASK_META[componentIdx] ?? null;
     
-    const savedTask = saved
-    ? getCurrentTask(saved.componentIdx, saved.taskID)?.task
+    const savedThread = saved
+    ? getCurrentThread(saved.componentIdx, saved.threadID, saved.taskID)
     : null;
-    const mayBlock = savedTask
-    ? (savedTask?.mayBlock() ?? (CURRENT_TASK_MAY_BLOCK.value !== 0))
+    const mayBlock = savedThread
+    ? (savedThread?.task.mayBlock() ?? (CURRENT_TASK_MAY_BLOCK.value !== 0))
     : false;
-    if (!saved && !mayBlock) {
+    if (!saved && !mayBlock && !callsHost) {
       throw new WebAssemblyRuntimeError('cannot block a synchronous task before returning');
     }
     
@@ -4044,7 +4956,9 @@ function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = fa
       } catch (err) {
         CURRENT_TASK_META[componentIdx] = saved;
         if (!switchesTask) { CURRENT_TASK_META.current = saved; }
-        throw err;
+        // A trap is recorded before it propagates: nothing else in
+        // the store may run after it, not even a queued call.
+        throw _recordTrap(componentIdx, err, convertsRangeErrors);
       }
       
       CURRENT_TASK_META[componentIdx] = saved;
@@ -4064,7 +4978,13 @@ function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = fa
     
     return (async () => {
       try {
-        return await fn.apply(null, args);
+        const result = await fn.apply(null, args);
+        // The instance trapped while this stack was suspended: it
+        // must not resume into guest code (Canonical ABI).
+        getOrCreateAsyncState(componentIdx).throwIfInterrupted();
+        return result;
+      } catch (err) {
+        throw _recordTrap(componentIdx, err, convertsRangeErrors);
       } finally {
         CURRENT_TASK_META[componentIdx] = saved;
         if (!switchesTask) { CURRENT_TASK_META.current = saved; }
@@ -4074,12 +4994,15 @@ function _suspendingImport(componentIdx, fn, syncOnly = false, switchesTask = fa
 }
 
 
-if (!getCoreModule) getCoreModule = (name) => fetchCompile(new URL(`./${name}`, import.meta.url));
+if (!getCoreModule) getCoreModule = (name) => fetchCompile(new URL('./' + name, import.meta.url));
 const module0 = getCoreModule('aws.core.wasm');
+Promise.resolve(module0).catch(() => {});
 const module1 = getCoreModule('aws.core2.wasm');
+Promise.resolve(module1).catch(() => {});
 const module2 = getCoreModule('aws.core3.wasm');
+Promise.resolve(module2).catch(() => {});
 
-const { provideCredentials, provideRegion } = imports['component:aws-cli/providers'];
+const { provideCredentials, provideRegion } = imports["component:aws-cli/providers"];
 
 if (provideCredentials=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'provideCredentials', was 'provideCredentials' available at instantiation?");
@@ -4094,7 +5017,7 @@ if (provideRegion=== undefined) {
   throw err;
 }
 
-const { getArguments, getEnvironment } = imports['wasi:cli/environment'];
+const { getArguments, getEnvironment } = imports["wasi:cli/environment"];
 
 if (getArguments=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getArguments', was 'getArguments' available at instantiation?");
@@ -4109,7 +5032,7 @@ if (getEnvironment=== undefined) {
   throw err;
 }
 
-const { exit } = imports['wasi:cli/exit'];
+const { exit, exitWithCode } = imports["wasi:cli/exit"];
 
 if (exit=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'exit', was 'exit' available at instantiation?");
@@ -4117,7 +5040,14 @@ if (exit=== undefined) {
   throw err;
 }
 
-const { getStderr } = imports['wasi:cli/stderr'];
+
+if (exitWithCode=== undefined) {
+  const err = new Error("unexpectedly undefined instance import 'exitWithCode', was 'exitWithCode' available at instantiation?");
+  console.error("ERROR:", err.toString());
+  throw err;
+}
+
+const { getStderr } = imports["wasi:cli/stderr"];
 
 if (getStderr=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getStderr', was 'getStderr' available at instantiation?");
@@ -4125,7 +5055,7 @@ if (getStderr=== undefined) {
   throw err;
 }
 
-const { getStdin } = imports['wasi:cli/stdin'];
+const { getStdin } = imports["wasi:cli/stdin"];
 
 if (getStdin=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getStdin', was 'getStdin' available at instantiation?");
@@ -4133,7 +5063,7 @@ if (getStdin=== undefined) {
   throw err;
 }
 
-const { getStdout } = imports['wasi:cli/stdout'];
+const { getStdout } = imports["wasi:cli/stdout"];
 
 if (getStdout=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getStdout', was 'getStdout' available at instantiation?");
@@ -4141,7 +5071,7 @@ if (getStdout=== undefined) {
   throw err;
 }
 
-const { TerminalInput } = imports['wasi:cli/terminal-input'];
+const { TerminalInput } = imports["wasi:cli/terminal-input"];
 
 if (TerminalInput=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'TerminalInput', was 'TerminalInput' available at instantiation?");
@@ -4149,7 +5079,7 @@ if (TerminalInput=== undefined) {
   throw err;
 }
 
-const { TerminalOutput } = imports['wasi:cli/terminal-output'];
+const { TerminalOutput } = imports["wasi:cli/terminal-output"];
 
 if (TerminalOutput=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'TerminalOutput', was 'TerminalOutput' available at instantiation?");
@@ -4157,7 +5087,7 @@ if (TerminalOutput=== undefined) {
   throw err;
 }
 
-const { getTerminalStderr } = imports['wasi:cli/terminal-stderr'];
+const { getTerminalStderr } = imports["wasi:cli/terminal-stderr"];
 
 if (getTerminalStderr=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getTerminalStderr', was 'getTerminalStderr' available at instantiation?");
@@ -4165,7 +5095,7 @@ if (getTerminalStderr=== undefined) {
   throw err;
 }
 
-const { getTerminalStdin } = imports['wasi:cli/terminal-stdin'];
+const { getTerminalStdin } = imports["wasi:cli/terminal-stdin"];
 
 if (getTerminalStdin=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getTerminalStdin', was 'getTerminalStdin' available at instantiation?");
@@ -4173,7 +5103,7 @@ if (getTerminalStdin=== undefined) {
   throw err;
 }
 
-const { getTerminalStdout } = imports['wasi:cli/terminal-stdout'];
+const { getTerminalStdout } = imports["wasi:cli/terminal-stdout"];
 
 if (getTerminalStdout=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getTerminalStdout', was 'getTerminalStdout' available at instantiation?");
@@ -4181,7 +5111,7 @@ if (getTerminalStdout=== undefined) {
   throw err;
 }
 
-const { now, subscribeDuration } = imports['wasi:clocks/monotonic-clock'];
+const { now, subscribeDuration } = imports["wasi:clocks/monotonic-clock"];
 
 if (now=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'now', was 'now' available at instantiation?");
@@ -4196,7 +5126,7 @@ if (subscribeDuration=== undefined) {
   throw err;
 }
 
-const { now: now$1 } = imports['wasi:clocks/wall-clock'];
+const { now: now$1 } = imports["wasi:clocks/wall-clock"];
 
 if (now$1=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'now$1', was 'now' available at instantiation?");
@@ -4204,7 +5134,7 @@ if (now$1=== undefined) {
   throw err;
 }
 
-const { getDirectories } = imports['wasi:filesystem/preopens'];
+const { getDirectories } = imports["wasi:filesystem/preopens"];
 
 if (getDirectories=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'getDirectories', was 'getDirectories' available at instantiation?");
@@ -4212,7 +5142,7 @@ if (getDirectories=== undefined) {
   throw err;
 }
 
-const { Descriptor, DirectoryEntryStream } = imports['wasi:filesystem/types'];
+const { Descriptor, DirectoryEntryStream } = imports["wasi:filesystem/types"];
 
 if (Descriptor=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'Descriptor', was 'Descriptor' available at instantiation?");
@@ -4227,7 +5157,7 @@ if (DirectoryEntryStream=== undefined) {
   throw err;
 }
 
-const { handle } = imports['wasi:http/outgoing-handler'];
+const { handle } = imports["wasi:http/outgoing-handler"];
 
 if (handle=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'handle', was 'handle' available at instantiation?");
@@ -4235,7 +5165,7 @@ if (handle=== undefined) {
   throw err;
 }
 
-const { Fields, FutureIncomingResponse, FutureTrailers, IncomingBody, IncomingResponse, OutgoingBody, OutgoingRequest, RequestOptions } = imports['wasi:http/types'];
+const { Fields, FutureIncomingResponse, FutureTrailers, IncomingBody, IncomingResponse, OutgoingBody, OutgoingRequest, RequestOptions } = imports["wasi:http/types"];
 
 if (Fields=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'Fields', was 'Fields' available at instantiation?");
@@ -4292,7 +5222,7 @@ if (RequestOptions=== undefined) {
   throw err;
 }
 
-const { Error: Error$1 } = imports['wasi:io/error'];
+const { Error: Error$1 } = imports["wasi:io/error"];
 
 if (Error$1=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'Error$1', was 'Error' available at instantiation?");
@@ -4300,7 +5230,7 @@ if (Error$1=== undefined) {
   throw err;
 }
 
-const { Pollable, poll } = imports['wasi:io/poll'];
+const { Pollable, poll } = imports["wasi:io/poll"];
 
 if (Pollable=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'Pollable', was 'Pollable' available at instantiation?");
@@ -4315,7 +5245,7 @@ if (poll=== undefined) {
   throw err;
 }
 
-const { InputStream, OutputStream } = imports['wasi:io/streams'];
+const { InputStream, OutputStream } = imports["wasi:io/streams"];
 
 if (InputStream=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'InputStream', was 'InputStream' available at instantiation?");
@@ -4330,7 +5260,7 @@ if (OutputStream=== undefined) {
   throw err;
 }
 
-const { insecureSeed } = imports['wasi:random/insecure-seed'];
+const { insecureSeed } = imports["wasi:random/insecure-seed"];
 
 if (insecureSeed=== undefined) {
   const err = new Error("unexpectedly undefined instance import 'insecureSeed', was 'insecureSeed' available at instantiation?");
@@ -4341,6 +5271,13 @@ if (insecureSeed=== undefined) {
 let gen= (function* _initGenerator () {
   const instanceFlags0 = new WebAssembly.Global({ value: "i32", mutable: true }, 1);
   INSTANCE_FLAGS.set(0, instanceFlags0);
+  const hostImportModule = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7e, 0x01, 0x7f, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x12, 0x01, 0x10, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x10, 0x01, 0x0b]));
+  const hostImportModule$1 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x12, 0x01, 0x10, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x10, 0x01, 0x0b]));
+  const hostImportModule$2 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x1e, 0x01, 0x1c, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x10, 0x01, 0x0b]));
+  const hostImportModule$3 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x16, 0x01, 0x14, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x20, 0x01, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x10, 0x01, 0x0b]));
+  const hostImportModule$4 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x1a, 0x01, 0x18, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x10, 0x01, 0x0b]));
+  const hostImportModule$5 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0d, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x22, 0x01, 0x20, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x20, 0x04, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x20, 0x04, 0x10, 0x01, 0x0b]));
+  const hostImportModule$6 = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0f, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x07, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00, 0x02, 0x1d, 0x03, 0x00, 0x08, 0x6d, 0x61, 0x79, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x00, 0x04, 0x66, 0x61, 0x73, 0x74, 0x00, 0x01, 0x00, 0x04, 0x73, 0x6c, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x03, 0x0a, 0x2a, 0x01, 0x28, 0x00, 0x10, 0x00, 0x04, 0x40, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x20, 0x04, 0x20, 0x05, 0x20, 0x06, 0x10, 0x02, 0x0f, 0x0b, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x20, 0x04, 0x20, 0x05, 0x20, 0x06, 0x10, 0x01, 0x0b]));
   let exports0;
   
   const handleTable5 = [T_FLAG, 0];
@@ -4351,6 +5288,7 @@ let gen= (function* _initGenerator () {
   const captureTable5= new Map();
   let captureCnt5= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable5, captures: captureTable5 });
   HANDLE_TABLES[5] = handleTable5;
   
   const handleTable6 = [T_FLAG, 0];
@@ -4361,12 +5299,13 @@ let gen= (function* _initGenerator () {
   const captureTable6= new Map();
   let captureCnt6= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable6, captures: captureTable6 });
   HANDLE_TABLES[6] = handleTable6;
   
   const _trampoline2 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable5[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable5.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(IncomingBody.prototype);
@@ -4383,10 +5322,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'IncomingBody.finish',
@@ -4394,14 +5334,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4425,9 +5364,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => IncomingBody.finish(rsc0)),
       })
       ;
@@ -4446,13 +5386,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof FutureTrailers)) {
       throw new TypeError('Resource error: Not a valid \"FutureTrailers\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt6;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt6) >>> 0;
       captureTable6.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable6, rep);
     }
@@ -4477,12 +5420,13 @@ let gen= (function* _initGenerator () {
   const captureTable0= new Map();
   let captureCnt0= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable0, captures: captureTable0 });
   HANDLE_TABLES[0] = handleTable0;
   
   const _trampoline4 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable6[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable6[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable6.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(FutureTrailers.prototype);
@@ -4496,10 +5440,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'subscribe',
@@ -4507,14 +5452,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4538,9 +5482,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
@@ -4559,6 +5504,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -4573,9 +5519,11 @@ let gen= (function* _initGenerator () {
     if (!(ret instanceof Pollable)) {
       throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt0;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt0) >>> 0;
       captureTable0.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable0, rep);
     }
@@ -4600,12 +5548,13 @@ let gen= (function* _initGenerator () {
   const captureTable8= new Map();
   let captureCnt8= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable8, captures: captureTable8 });
   HANDLE_TABLES[8] = handleTable8;
   
   const _trampoline8 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable8[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable8[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable8.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(FutureIncomingResponse.prototype);
@@ -4619,10 +5568,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'subscribe',
@@ -4630,14 +5580,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4661,9 +5610,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
@@ -4682,6 +5632,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -4696,9 +5647,11 @@ let gen= (function* _initGenerator () {
     if (!(ret instanceof Pollable)) {
       throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt0;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt0) >>> 0;
       captureTable0.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable0, rep);
     }
@@ -4723,6 +5676,7 @@ let gen= (function* _initGenerator () {
   const captureTable9= new Map();
   let captureCnt9= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable9, captures: captureTable9 });
   HANDLE_TABLES[9] = handleTable9;
   
   const handleTable7 = [T_FLAG, 0];
@@ -4733,12 +5687,13 @@ let gen= (function* _initGenerator () {
   const captureTable7= new Map();
   let captureCnt7= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable7, captures: captureTable7 });
   HANDLE_TABLES[7] = handleTable7;
   
   const _trampoline10 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable9[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable9[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable9.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(IncomingResponse.prototype);
@@ -4752,10 +5707,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'headers',
@@ -4763,14 +5719,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4794,9 +5749,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.headers()),
       })
       ;
@@ -4815,6 +5771,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -4829,9 +5786,11 @@ let gen= (function* _initGenerator () {
     if (!(ret instanceof Fields)) {
       throw new TypeError('Resource error: Not a valid \"Headers\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt7;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt7) >>> 0;
       captureTable7.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable7, rep);
     }
@@ -4851,7 +5810,7 @@ let gen= (function* _initGenerator () {
   const _trampoline11 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable9[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable9[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable9.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(IncomingResponse.prototype);
@@ -4865,10 +5824,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'status',
@@ -4876,14 +5836,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4907,9 +5866,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.status()),
       })
       ;
@@ -4928,6 +5888,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -4950,16 +5911,17 @@ let gen= (function* _initGenerator () {
   }
   _trampoline11.fnName = 'wasi:http/types@0.2.12#status';
   
-  const _trampoline14 = async function(arg0) {
+  const _trampoline14 = _maybeSyncGenerator(function*(arg0) {
     _debugLog('[iface="wasi:clocks/monotonic-clock@0.2.12", function="subscribe-duration"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'subscribeDuration',
@@ -4967,14 +5929,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -4994,22 +5955,24 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = subscribeDuration(BigInt.asUintN(64, BigInt(arg0)));
           subtask?.setHostPendingResult(hostRet);
@@ -5028,17 +5991,20 @@ let gen= (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof Pollable)) {
       throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt0;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt0) >>> 0;
       captureTable0.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable0, rep);
     }
@@ -5052,7 +6018,7 @@ let gen= (function* _initGenerator () {
     task.resolve([handle0]);
     task.exit();
     return handle0;
-  }
+  });
   _trampoline14.fnName = 'wasi:clocks/monotonic-clock@0.2.12#subscribeDuration';
   _trampoline14.manuallyAsync = true;
   
@@ -5062,10 +6028,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'now',
@@ -5073,14 +6040,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5104,9 +6070,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => now()),
       })
       ;
@@ -5125,6 +6092,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     _debugLog('[iface="wasi:clocks/monotonic-clock@0.2.12", function="now"][Instruction::Return]', {
       funcName: 'now',
       paramCount: 1,
@@ -5145,12 +6113,13 @@ let gen= (function* _initGenerator () {
   const captureTable10= new Map();
   let captureCnt10= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable10, captures: captureTable10 });
   HANDLE_TABLES[10] = handleTable10;
   
   const _trampoline16 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable7[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable7.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Fields.prototype);
@@ -5167,10 +6136,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'new OutgoingRequest',
@@ -5178,14 +6148,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5209,9 +6178,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => new OutgoingRequest(rsc0)),
       })
       ;
@@ -5230,13 +6200,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof OutgoingRequest)) {
       throw new TypeError('Resource error: Not a valid \"OutgoingRequest\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt10;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt10) >>> 0;
       captureTable10.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable10, rep);
     }
@@ -5261,6 +6234,7 @@ let gen= (function* _initGenerator () {
   const captureTable11= new Map();
   let captureCnt11= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable11, captures: captureTable11 });
   HANDLE_TABLES[11] = handleTable11;
   
   const _trampoline18 = function() {
@@ -5269,10 +6243,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'new RequestOptions',
@@ -5280,14 +6255,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5311,9 +6285,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => new RequestOptions()),
       })
       ;
@@ -5332,13 +6307,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof RequestOptions)) {
       throw new TypeError('Resource error: Not a valid \"RequestOptions\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt11;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt11) >>> 0;
       captureTable11.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable11, rep);
     }
@@ -5358,7 +6336,7 @@ let gen= (function* _initGenerator () {
   const _trampoline19 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable11[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable11[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable11.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(RequestOptions.prototype);
@@ -5386,10 +6364,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setConnectTimeout',
@@ -5397,14 +6376,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5427,9 +6405,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet4 = _withGlobalCurrentTaskMeta({
+      const hostRet4 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setConnectTimeout(variant3)),
       })
       ;
@@ -5441,6 +6420,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -5486,7 +6466,7 @@ let gen= (function* _initGenerator () {
   const _trampoline20 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable11[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable11[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable11.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(RequestOptions.prototype);
@@ -5514,10 +6494,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setFirstByteTimeout',
@@ -5525,14 +6506,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5555,9 +6535,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet4 = _withGlobalCurrentTaskMeta({
+      const hostRet4 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setFirstByteTimeout(variant3)),
       })
       ;
@@ -5569,6 +6550,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -5614,7 +6596,7 @@ let gen= (function* _initGenerator () {
   const _trampoline21 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable11[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable11[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable11.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(RequestOptions.prototype);
@@ -5642,10 +6624,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setBetweenBytesTimeout',
@@ -5653,14 +6636,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5683,9 +6665,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet4 = _withGlobalCurrentTaskMeta({
+      const hostRet4 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setBetweenBytesTimeout(variant3)),
       })
       ;
@@ -5697,6 +6680,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -5747,12 +6731,13 @@ let gen= (function* _initGenerator () {
   const captureTable2= new Map();
   let captureCnt2= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable2, captures: captureTable2 });
   HANDLE_TABLES[2] = handleTable2;
   
   const _trampoline23 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable2[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable2.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutputStream.prototype);
@@ -5766,10 +6751,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'subscribe',
@@ -5777,14 +6763,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -5808,9 +6793,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.subscribe()),
       })
       ;
@@ -5829,6 +6815,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -5843,9 +6830,11 @@ let gen= (function* _initGenerator () {
     if (!(ret instanceof Pollable)) {
       throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
     }
+    
+    
     var handle3 = ret[symbolRscHandle];
     if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt0;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt0) >>> 0;
       captureTable0.set(rep, ret);
       handle3 = rscTableCreateOwn(handleTable0, rep);
     }
@@ -5862,133 +6851,10 @@ let gen= (function* _initGenerator () {
   }
   _trampoline23.fnName = 'wasi:io/streams@0.2.12#subscribe';
   
-  const handleTable3 = [T_FLAG, 0];
-  handleTable3._createdReps = new Set();
-  handleTable3._componentIdx = 0;
-  
-  
-  const captureTable3= new Map();
-  let captureCnt3= 0;
-  
-  HANDLE_TABLES[3] = handleTable3;
-  
-  const _trampoline24 = function(arg0) {
+  const _trampoline25 = function(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable3.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(InputStream.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]input-stream.subscribe"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'subscribe',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    let ret;
-    
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => _trackHostOperation(() => rsc0.subscribe()),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-        err,
-      });
-      getOrCreateAsyncState(0).markTrapped(err);
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const entry of curResourceBorrows) {
-      const rsc = entry.rsc ?? entry;
-      if (entry.drop) {
-        if (rsc[symbolRscHandle]) {
-          entry.drop(rsc[symbolRscHandle]);
-        }
-      }
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    
-    if (!(ret instanceof Pollable)) {
-      throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-    }
-    var handle3 = ret[symbolRscHandle];
-    if (!handle3) {
-      const rep = ret[symbolRscRep] || ++captureCnt0;
-      captureTable0.set(rep, ret);
-      handle3 = rscTableCreateOwn(handleTable0, rep);
-    }
-    
-    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]input-stream.subscribe"][Instruction::Return]', {
-      funcName: '[method]input-stream.subscribe',
-      paramCount: 1,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([handle3]);
-    task.exit();
-    return handle3;
-  }
-  _trampoline24.fnName = 'wasi:io/streams@0.2.12#subscribe';
-  
-  const _trampoline26 = function(arg0) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable0[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable0[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable0.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Pollable.prototype);
@@ -6002,10 +6868,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'ready',
@@ -6013,14 +6880,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6044,9 +6910,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.ready()),
       })
       ;
@@ -6065,6 +6932,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -6085,33 +6953,55 @@ let gen= (function* _initGenerator () {
     task.exit();
     return ret ? 1 : 0;
   }
-  _trampoline26.fnName = 'wasi:io/poll@0.2.12#ready';
+  _trampoline25.fnName = 'wasi:io/poll@0.2.12#ready';
   
-  const _trampoline27 = function() {
-    _debugLog('[iface="wasi:http/types@0.2.12", function="[constructor]fields"] [Instruction::CallInterface] (sync, @ enter)');
+  const handleTable3 = [T_FLAG, 0];
+  handleTable3._createdReps = new Set();
+  handleTable3._componentIdx = 0;
+  
+  
+  const captureTable3= new Map();
+  let captureCnt3= 0;
+  
+  STORE_TRAP.resourceTables.push({ handles: handleTable3, captures: captureTable3 });
+  HANDLE_TABLES[3] = handleTable3;
+  
+  const _trampoline26 = function(arg0) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable3[(handle1 << 1) + 1] % T_OWN;
+    var rsc0 = captureTable3.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(InputStream.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]input-stream.subscribe"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
-        entryFnName: 'new Fields',
+        entryFnName: 'subscribe',
         getCallbackFn: () => null,
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6135,9 +7025,116 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => rsc0.subscribe()),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    for (const entry of curResourceBorrows) {
+      const rsc = entry.rsc ?? entry;
+      if (entry.drop) {
+        if (rsc[symbolRscHandle]) {
+          entry.drop(rsc[symbolRscHandle]);
+        }
+      }
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    
+    if (!(ret instanceof Pollable)) {
+      throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
+    }
+    
+    
+    var handle3 = ret[symbolRscHandle];
+    if (!handle3) {
+      const rep = (ret[symbolRscRep] ?? ++captureCnt0) >>> 0;
+      captureTable0.set(rep, ret);
+      handle3 = rscTableCreateOwn(handleTable0, rep);
+    }
+    
+    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]input-stream.subscribe"][Instruction::Return]', {
+      funcName: '[method]input-stream.subscribe',
+      paramCount: 1,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([handle3]);
+    task.exit();
+    return handle3;
+  }
+  _trampoline26.fnName = 'wasi:io/streams@0.2.12#subscribe';
+  
+  const _trampoline27 = function() {
+    _debugLog('[iface="wasi:http/types@0.2.12", function="[constructor]fields"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'new Fields',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    
+    try {
+      ret = _withGlobalCurrentThreadMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => new Fields()),
       })
       ;
@@ -6156,13 +7153,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof Fields)) {
       throw new TypeError('Resource error: Not a valid \"Fields\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt7;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt7) >>> 0;
       captureTable7.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable7, rep);
     }
@@ -6205,10 +7205,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'exit',
@@ -6216,14 +7217,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6247,9 +7247,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      _withGlobalCurrentTaskMeta({
+      _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => exit(variant0)),
       })
       ;
@@ -6268,6 +7269,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     _debugLog('[iface="wasi:cli/exit@0.2.12", function="exit"][Instruction::Return]', {
       funcName: 'exit',
       paramCount: 0,
@@ -6279,10 +7281,92 @@ let gen= (function* _initGenerator () {
   }
   _trampoline32.fnName = 'wasi:cli/exit@0.2.12#exit';
   
-  const _trampoline33 = async function(arg0) {
+  const _trampoline33 = function(arg0) {
+    _debugLog('[iface="wasi:cli/exit@0.2.12", function="exit-with-code"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'exitWithCode',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    
+    try {
+      _withGlobalCurrentThreadMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => exitWithCode(clampGuest(arg0, 0, 255))),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    _debugLog('[iface="wasi:cli/exit@0.2.12", function="exit-with-code"][Instruction::Return]', {
+      funcName: 'exit-with-code',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline33.fnName = 'wasi:cli/exit@0.2.12#exitWithCode';
+  
+  const _trampoline34 = _maybeSyncGenerator(function*(arg0) {
     var handle1 = arg0;
     
-    var rep2 = handleTable0[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable0[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable0.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Pollable.prototype);
@@ -6296,10 +7380,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'block',
@@ -6307,14 +7392,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6334,22 +7418,24 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.block();
           subtask?.setHostPendingResult(hostRet);
@@ -6368,10 +7454,11 @@ let gen= (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -6390,20 +7477,21 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline33.fnName = 'wasi:io/poll@0.2.12#block';
-  _trampoline33.manuallyAsync = true;
+  });
+  _trampoline34.fnName = 'wasi:io/poll@0.2.12#block';
+  _trampoline34.manuallyAsync = true;
   
-  const _trampoline34 = function() {
+  const _trampoline35 = function() {
     _debugLog('[iface="wasi:cli/stdin@0.2.12", function="get-stdin"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getStdin',
@@ -6411,14 +7499,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6442,9 +7529,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getStdin()),
       })
       ;
@@ -6463,13 +7551,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof InputStream)) {
       throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt3;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt3) >>> 0;
       captureTable3.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable3, rep);
     }
@@ -6484,18 +7575,19 @@ let gen= (function* _initGenerator () {
     task.exit();
     return handle0;
   }
-  _trampoline34.fnName = 'wasi:cli/stdin@0.2.12#getStdin';
+  _trampoline35.fnName = 'wasi:cli/stdin@0.2.12#getStdin';
   
-  const _trampoline35 = function() {
+  const _trampoline36 = function() {
     _debugLog('[iface="wasi:cli/stdout@0.2.12", function="get-stdout"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getStdout',
@@ -6503,14 +7595,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6534,9 +7625,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getStdout()),
       })
       ;
@@ -6555,13 +7647,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof OutputStream)) {
       throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt2;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt2) >>> 0;
       captureTable2.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable2, rep);
     }
@@ -6576,18 +7671,19 @@ let gen= (function* _initGenerator () {
     task.exit();
     return handle0;
   }
-  _trampoline35.fnName = 'wasi:cli/stdout@0.2.12#getStdout';
+  _trampoline36.fnName = 'wasi:cli/stdout@0.2.12#getStdout';
   
-  const _trampoline36 = function() {
+  const _trampoline37 = function() {
     _debugLog('[iface="wasi:cli/stderr@0.2.12", function="get-stderr"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getStderr',
@@ -6595,14 +7691,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6626,9 +7721,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getStderr()),
       })
       ;
@@ -6647,13 +7743,16 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     
     if (!(ret instanceof OutputStream)) {
       throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
     }
+    
+    
     var handle0 = ret[symbolRscHandle];
     if (!handle0) {
-      const rep = ret[symbolRscRep] || ++captureCnt2;
+      const rep = (ret[symbolRscRep] ?? ++captureCnt2) >>> 0;
       captureTable2.set(rep, ret);
       handle0 = rscTableCreateOwn(handleTable2, rep);
     }
@@ -6668,96 +7767,13 @@ let gen= (function* _initGenerator () {
     task.exit();
     return handle0;
   }
-  _trampoline36.fnName = 'wasi:cli/stderr@0.2.12#getStderr';
+  _trampoline37.fnName = 'wasi:cli/stderr@0.2.12#getStderr';
   let exports1;
   let memory0;
   let realloc0;
   let realloc0Async;
   
-  const _trampoline37 = function(arg0) {
-    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'insecureSeed',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    let ret;
-    
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => _trackHostOperation(() => insecureSeed()),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-        err,
-      });
-      getOrCreateAsyncState(0).markTrapped(err);
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    var [tuple0_0, tuple0_1] = ret;
-    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 0, toUint64(tuple0_0), true);
-    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 8, toUint64(tuple0_1), true);
-    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"][Instruction::Return]', {
-      funcName: 'insecure-seed',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline37.fnName = 'wasi:random/insecure-seed@0.2.12#insecureSeed';
-  
-  const _trampoline38 = async function(arg0, arg1, arg2, arg3) {
+  const _trampoline38 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3) {
     let variant1;
     switch (arg0) {
       case 0: {
@@ -6766,8 +7782,13 @@ let gen= (function* _initGenerator () {
       }
       case 1: {
         var ptr0 = (arg1 >>> 0) >>> 0;
-        var len0 = arg2;
-        var result0 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr0, len0));
+        var len0 = arg2 >>> 0;
+        
+        if (ptr0 > memory0.buffer.byteLength || len0 > Math.floor((memory0.buffer.byteLength - ptr0) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        
+        var result0 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr0, len0));
         variant1 = result0;
         break;
       }
@@ -6780,10 +7801,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'provideCredentials',
@@ -6791,14 +7813,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -6818,21 +7839,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet2 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet2 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = provideCredentials(variant1);
           subtask?.setHostPendingResult(hostRet);
@@ -6848,6 +7871,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant13 = ret;
     switch (variant13.tag) {
       case 'ok': {
@@ -6855,14 +7879,62 @@ let gen= (function* _initGenerator () {
         dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
         var {accessKeyId: v3_0, secretAccessKey: v3_1, sessionToken: v3_2, expiresAfter: v3_3, accountId: v3_4 } = e;
         
-        var encodeRes = _utf8AllocateAndEncode(v3_0, realloc0, memory0);
+        var encodeRes = _utf8AllocateAndEncode(v3_0, ((...args) => {
+          const state = getOrCreateAsyncState(0);
+          const previousMayLeave = state.mayLeave;
+          const meta = _getGlobalCurrentThreadMeta(0);
+          const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+          const previousStorage = thread?.storage;
+          if (thread) { thread.storage = [0, 0]; }
+          state.mayLeave = false;
+          const restore = () => {
+            state.mayLeave = previousMayLeave;
+            if (thread) { thread.storage = previousStorage; }
+          };
+          let result;
+          try {
+            result = realloc0(...args);
+          } catch (err) {
+            restore();
+            throw err;
+          }
+          if (result && typeof result.then === 'function') {
+            return Promise.resolve(result).finally(restore);
+          }
+          restore();
+          return result;
+        }), memory0);
         var ptr4= encodeRes.ptr;
         var len4 = encodeRes.len;
         
         dataView(memory0).setUint32(((arg3 >>> 0)) + 12, len4, true);
         dataView(memory0).setUint32(((arg3 >>> 0)) + 8, ptr4, true);
         
-        var encodeRes = _utf8AllocateAndEncode(v3_1, realloc0, memory0);
+        var encodeRes = _utf8AllocateAndEncode(v3_1, ((...args) => {
+          const state = getOrCreateAsyncState(0);
+          const previousMayLeave = state.mayLeave;
+          const meta = _getGlobalCurrentThreadMeta(0);
+          const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+          const previousStorage = thread?.storage;
+          if (thread) { thread.storage = [0, 0]; }
+          state.mayLeave = false;
+          const restore = () => {
+            state.mayLeave = previousMayLeave;
+            if (thread) { thread.storage = previousStorage; }
+          };
+          let result;
+          try {
+            result = realloc0(...args);
+          } catch (err) {
+            restore();
+            throw err;
+          }
+          if (result && typeof result.then === 'function') {
+            return Promise.resolve(result).finally(restore);
+          }
+          restore();
+          return result;
+        }), memory0);
         var ptr5= encodeRes.ptr;
         var len5 = encodeRes.len;
         
@@ -6875,7 +7947,31 @@ let gen= (function* _initGenerator () {
           const e = variant7;
           dataView(memory0).setInt8(((arg3 >>> 0)) + 24, 1, true);
           
-          var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+          var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+            const state = getOrCreateAsyncState(0);
+            const previousMayLeave = state.mayLeave;
+            const meta = _getGlobalCurrentThreadMeta(0);
+            const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+            const previousStorage = thread?.storage;
+            if (thread) { thread.storage = [0, 0]; }
+            state.mayLeave = false;
+            const restore = () => {
+              state.mayLeave = previousMayLeave;
+              if (thread) { thread.storage = previousStorage; }
+            };
+            let result;
+            try {
+              result = realloc0(...args);
+            } catch (err) {
+              restore();
+              throw err;
+            }
+            if (result && typeof result.then === 'function') {
+              return Promise.resolve(result).finally(restore);
+            }
+            restore();
+            return result;
+          }), memory0);
           var ptr6= encodeRes.ptr;
           var len6 = encodeRes.len;
           
@@ -6897,7 +7993,31 @@ let gen= (function* _initGenerator () {
           const e = variant10;
           dataView(memory0).setInt8(((arg3 >>> 0)) + 56, 1, true);
           
-          var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+          var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+            const state = getOrCreateAsyncState(0);
+            const previousMayLeave = state.mayLeave;
+            const meta = _getGlobalCurrentThreadMeta(0);
+            const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+            const previousStorage = thread?.storage;
+            if (thread) { thread.storage = [0, 0]; }
+            state.mayLeave = false;
+            const restore = () => {
+              state.mayLeave = previousMayLeave;
+              if (thread) { thread.storage = previousStorage; }
+            };
+            let result;
+            try {
+              result = realloc0(...args);
+            } catch (err) {
+              restore();
+              throw err;
+            }
+            if (result && typeof result.then === 'function') {
+              return Promise.resolve(result).finally(restore);
+            }
+            restore();
+            return result;
+          }), memory0);
           var ptr9= encodeRes.ptr;
           var len9 = encodeRes.len;
           
@@ -6955,11 +8075,11 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
+  });
   _trampoline38.fnName = 'component:aws-cli/providers#provideCredentials';
   _trampoline38.manuallyAsync = true;
   
-  const _trampoline39 = async function(arg0, arg1, arg2, arg3) {
+  const _trampoline39 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3) {
     let variant1;
     switch (arg0) {
       case 0: {
@@ -6968,8 +8088,13 @@ let gen= (function* _initGenerator () {
       }
       case 1: {
         var ptr0 = (arg1 >>> 0) >>> 0;
-        var len0 = arg2;
-        var result0 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr0, len0));
+        var len0 = arg2 >>> 0;
+        
+        if (ptr0 > memory0.buffer.byteLength || len0 > Math.floor((memory0.buffer.byteLength - ptr0) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        
+        var result0 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr0, len0));
         variant1 = result0;
         break;
       }
@@ -6982,10 +8107,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'provideRegion',
@@ -6993,14 +8119,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -7020,22 +8145,24 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = provideRegion(variant1);
           subtask?.setHostPendingResult(hostRet);
@@ -7054,10 +8181,11 @@ let gen= (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant3 = ret;
     if (variant3 === null || variant3=== undefined) {
       dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 0, true);
@@ -7065,7 +8193,31 @@ let gen= (function* _initGenerator () {
       const e = variant3;
       dataView(memory0).setInt8(((arg3 >>> 0)) + 0, 1, true);
       
-      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+      var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
       var ptr2= encodeRes.ptr;
       var len2 = encodeRes.len;
       
@@ -7080,35 +8232,35 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
+  });
   _trampoline39.fnName = 'component:aws-cli/providers#provideRegion';
   _trampoline39.manuallyAsync = true;
   
   const _trampoline40 = function(arg0) {
-    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-arguments"] [Instruction::CallInterface] (sync, @ enter)');
+    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
-        entryFnName: 'getArguments',
+        entryFnName: 'insecureSeed',
         getCallbackFn: () => null,
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -7132,9 +8284,95 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => insecureSeed()),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    var [tuple0_0, tuple0_1] = ret;
+    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 0, toUint64(tuple0_0), true);
+    dataView(memory0).setBigInt64(((arg0 >>> 0)) + 8, toUint64(tuple0_1), true);
+    _debugLog('[iface="wasi:random/insecure-seed@0.2.12", function="insecure-seed"][Instruction::Return]', {
+      funcName: 'insecure-seed',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline40.fnName = 'wasi:random/insecure-seed@0.2.12#insecureSeed';
+  
+  const _trampoline41 = function(arg0) {
+    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-arguments"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'getArguments',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    
+    try {
+      ret = _withGlobalCurrentThreadMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getArguments()),
       })
       ;
@@ -7153,14 +8391,70 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var vec1 = ret;
     var len1 = vec1.length;
-    var result1 = realloc0(0, 0, 4, len1 * 8);
+    var result1 = ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    })(0, 0, 4, len1 * 8);
+    
+    result1>>>= 0;
+    if (result1 % 4 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+    if (result1 > memory0.buffer.byteLength || len1 > Math.floor((memory0.buffer.byteLength - result1) / 8)) {
+      throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+    }
+    
     if (result1 < 0 || len1 < 0 || len1 > 33554431 || result1 > memory0.buffer.byteLength || len1 > Math.floor((memory0.buffer.byteLength - result1) / 8)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec1.length; i++) {
       const e = vec1[i];
       const base = result1 + i * 8;
-      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+      var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
       var ptr0= encodeRes.ptr;
       var len0 = encodeRes.len;
       
@@ -7178,7 +8472,192 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline40.fnName = 'wasi:cli/environment@0.2.12#getArguments';
+  _trampoline41.fnName = 'wasi:cli/environment@0.2.12#getArguments';
+  
+  const _trampoline42 = function(arg0) {
+    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-environment"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'getEnvironment',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    
+    try {
+      ret = _withGlobalCurrentThreadMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => getEnvironment()),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    var vec3 = ret;
+    var len3 = vec3.length;
+    var result3 = ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    })(0, 0, 4, len3 * 16);
+    
+    result3>>>= 0;
+    if (result3 % 4 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+    if (result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 16)) {
+      throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+    }
+    
+    if (result3 < 0 || len3 < 0 || len3 > 16777215 || result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
+    for (let i = 0; i < vec3.length; i++) {
+      const e = vec3[i];
+      const base = result3 + i * 16;var [tuple0_0, tuple0_1] = e;
+      
+      var encodeRes = _utf8AllocateAndEncode(tuple0_0, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
+      var ptr1= encodeRes.ptr;
+      var len1 = encodeRes.len;
+      
+      dataView(memory0).setUint32((base) + 4, len1, true);
+      dataView(memory0).setUint32((base) + 0, ptr1, true);
+      
+      var encodeRes = _utf8AllocateAndEncode(tuple0_1, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
+      var ptr2= encodeRes.ptr;
+      var len2 = encodeRes.len;
+      
+      dataView(memory0).setUint32((base) + 12, len2, true);
+      dataView(memory0).setUint32((base) + 8, ptr2, true);
+    }
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 4, len3, true);
+    dataView(memory0).setUint32(((arg0 >>> 0)) + 0, result3, true);
+    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-environment"][Instruction::Return]', {
+      funcName: 'get-environment',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline42.fnName = 'wasi:cli/environment@0.2.12#getEnvironment';
   
   const handleTable4 = [T_FLAG, 0];
   handleTable4._createdReps = new Set();
@@ -7188,12 +8667,13 @@ let gen= (function* _initGenerator () {
   const captureTable4= new Map();
   let captureCnt4= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable4, captures: captureTable4 });
   HANDLE_TABLES[4] = handleTable4;
   
-  const _trampoline41 = function(arg0, arg1) {
+  const _trampoline43 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable4[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable4[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable4.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingBody.prototype);
@@ -7207,10 +8687,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'write',
@@ -7218,14 +8699,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -7248,9 +8728,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.write()),
       })
       ;
@@ -7262,6 +8743,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -7281,9 +8763,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt2;
+          const rep = (e[symbolRscRep] ?? ++captureCnt2) >>> 0;
           captureTable2.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
@@ -7312,12 +8796,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline41.fnName = 'wasi:http/types@0.2.12#write';
+  _trampoline43.fnName = 'wasi:http/types@0.2.12#write';
   
-  const _trampoline42 = function(arg0, arg1) {
+  const _trampoline44 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable5[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable5[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable5.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(IncomingBody.prototype);
@@ -7331,10 +8815,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'stream',
@@ -7342,14 +8827,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -7372,9 +8856,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.stream()),
       })
       ;
@@ -7386,6 +8871,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -7405,9 +8891,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof InputStream)) {
           throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt3;
+          const rep = (e[symbolRscRep] ?? ++captureCnt3) >>> 0;
           captureTable3.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable3, rep);
         }
@@ -7436,12 +8924,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline42.fnName = 'wasi:http/types@0.2.12#stream';
+  _trampoline44.fnName = 'wasi:http/types@0.2.12#stream';
   
-  const _trampoline43 = function(arg0, arg1) {
+  const _trampoline45 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable8[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable8[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable8.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(FutureIncomingResponse.prototype);
@@ -7455,10 +8943,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'get',
@@ -7466,14 +8955,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -7497,9 +8985,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.get()),
       })
       ;
@@ -7518,6 +9007,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -7548,9 +9038,11 @@ let gen= (function* _initGenerator () {
               if (!(e instanceof IncomingResponse)) {
                 throw new TypeError('Resource error: Not a valid \"IncomingResponse\" resource.');
               }
+              
+              
               var handle3 = e[symbolRscHandle];
               if (!handle3) {
-                const rep = e[symbolRscRep] || ++captureCnt9;
+                const rep = (e[symbolRscRep] ?? ++captureCnt9) >>> 0;
                 captureTable9.set(rep, e);
                 handle3 = rscTableCreateOwn(handleTable9, rep);
               }
@@ -7579,7 +9071,31 @@ let gen= (function* _initGenerator () {
                     const e = variant6;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr5= encodeRes.ptr;
                     var len5 = encodeRes.len;
                     
@@ -7663,7 +9179,31 @@ let gen= (function* _initGenerator () {
                     const e = variant11;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr10= encodeRes.ptr;
                     var len10 = encodeRes.len;
                     
@@ -7735,7 +9275,31 @@ let gen= (function* _initGenerator () {
                       const e = variant16;
                       dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                       
-                      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                      var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                        const state = getOrCreateAsyncState(0);
+                        const previousMayLeave = state.mayLeave;
+                        const meta = _getGlobalCurrentThreadMeta(0);
+                        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                        const previousStorage = thread?.storage;
+                        if (thread) { thread.storage = [0, 0]; }
+                        state.mayLeave = false;
+                        const restore = () => {
+                          state.mayLeave = previousMayLeave;
+                          if (thread) { thread.storage = previousStorage; }
+                        };
+                        let result;
+                        try {
+                          result = realloc0(...args);
+                        } catch (err) {
+                          restore();
+                          throw err;
+                        }
+                        if (result && typeof result.then === 'function') {
+                          return Promise.resolve(result).finally(restore);
+                        }
+                        restore();
+                        return result;
+                      }), memory0);
                       var ptr15= encodeRes.ptr;
                       var len15 = encodeRes.len;
                       
@@ -7777,7 +9341,31 @@ let gen= (function* _initGenerator () {
                     const e = variant22;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr21= encodeRes.ptr;
                     var len21 = encodeRes.len;
                     
@@ -7822,7 +9410,31 @@ let gen= (function* _initGenerator () {
                     const e = variant27;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr26= encodeRes.ptr;
                     var len26 = encodeRes.len;
                     
@@ -7876,7 +9488,31 @@ let gen= (function* _initGenerator () {
                     const e = variant33;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr32= encodeRes.ptr;
                     var len32 = encodeRes.len;
                     
@@ -7903,7 +9539,31 @@ let gen= (function* _initGenerator () {
                     const e = variant36;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr35= encodeRes.ptr;
                     var len35 = encodeRes.len;
                     
@@ -7922,7 +9582,31 @@ let gen= (function* _initGenerator () {
                     const e = variant38;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr37= encodeRes.ptr;
                     var len37 = encodeRes.len;
                     
@@ -7961,7 +9645,31 @@ let gen= (function* _initGenerator () {
                     const e = variant40;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr39= encodeRes.ptr;
                     var len39 = encodeRes.len;
                     
@@ -8006,12 +9714,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline43.fnName = 'wasi:http/types@0.2.12#get';
+  _trampoline45.fnName = 'wasi:http/types@0.2.12#get';
   
-  const _trampoline44 = function(arg0, arg1) {
+  const _trampoline46 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable9[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable9[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable9.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(IncomingResponse.prototype);
@@ -8025,10 +9733,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'consume',
@@ -8036,14 +9745,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8066,9 +9774,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.consume()),
       })
       ;
@@ -8080,6 +9789,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8099,9 +9809,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof IncomingBody)) {
           throw new TypeError('Resource error: Not a valid \"IncomingBody\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt5;
+          const rep = (e[symbolRscRep] ?? ++captureCnt5) >>> 0;
           captureTable5.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable5, rep);
         }
@@ -8130,12 +9842,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline44.fnName = 'wasi:http/types@0.2.12#consume';
+  _trampoline46.fnName = 'wasi:http/types@0.2.12#consume';
   
-  const _trampoline45 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline47 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -8202,8 +9914,13 @@ let gen= (function* _initGenerator () {
       }
       case 9: {
         var ptr3 = (arg2 >>> 0) >>> 0;
-        var len3 = arg3;
-        var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+        var len3 = arg3 >>> 0;
+        
+        if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        
+        var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
         variant4= {
           tag: 'other',
           val: result3
@@ -8219,10 +9936,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setMethod',
@@ -8230,14 +9948,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8260,9 +9977,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setMethod(variant4)),
       })
       ;
@@ -8274,6 +9992,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8314,12 +10033,12 @@ let gen= (function* _initGenerator () {
     task.exit();
     return variant6_0;
   }
-  _trampoline45.fnName = 'wasi:http/types@0.2.12#setMethod';
+  _trampoline47.fnName = 'wasi:http/types@0.2.12#setMethod';
   
-  const _trampoline46 = function(arg0, arg1, arg2, arg3, arg4) {
+  const _trampoline48 = function(arg0, arg1, arg2, arg3, arg4) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -8351,8 +10070,13 @@ let gen= (function* _initGenerator () {
           }
           case 2: {
             var ptr3 = (arg3 >>> 0) >>> 0;
-            var len3 = arg4;
-            var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+            var len3 = arg4 >>> 0;
+            
+            if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+              throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+            }
+            
+            var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
             variant4= {
               tag: 'other',
               val: result3
@@ -8375,10 +10099,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setScheme',
@@ -8386,14 +10111,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8416,9 +10140,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet6 = _withGlobalCurrentTaskMeta({
+      const hostRet6 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setScheme(variant5)),
       })
       ;
@@ -8430,6 +10155,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8470,12 +10196,12 @@ let gen= (function* _initGenerator () {
     task.exit();
     return variant7_0;
   }
-  _trampoline46.fnName = 'wasi:http/types@0.2.12#setScheme';
+  _trampoline48.fnName = 'wasi:http/types@0.2.12#setScheme';
   
-  const _trampoline47 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline49 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -8492,8 +10218,13 @@ let gen= (function* _initGenerator () {
       }
       case 1: {
         var ptr3 = (arg2 >>> 0) >>> 0;
-        var len3 = arg3;
-        var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+        var len3 = arg3 >>> 0;
+        
+        if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        
+        var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
         variant4 = result3;
         break;
       }
@@ -8506,10 +10237,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setAuthority',
@@ -8517,14 +10249,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8547,9 +10278,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setAuthority(variant4)),
       })
       ;
@@ -8561,6 +10293,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8601,12 +10334,12 @@ let gen= (function* _initGenerator () {
     task.exit();
     return variant6_0;
   }
-  _trampoline47.fnName = 'wasi:http/types@0.2.12#setAuthority';
+  _trampoline49.fnName = 'wasi:http/types@0.2.12#setAuthority';
   
-  const _trampoline48 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline50 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -8623,8 +10356,13 @@ let gen= (function* _initGenerator () {
       }
       case 1: {
         var ptr3 = (arg2 >>> 0) >>> 0;
-        var len3 = arg3;
-        var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+        var len3 = arg3 >>> 0;
+        
+        if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+          throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+        }
+        
+        var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
         variant4 = result3;
         break;
       }
@@ -8637,10 +10375,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'setPathWithQuery',
@@ -8648,14 +10387,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8678,9 +10416,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.setPathWithQuery(variant4)),
       })
       ;
@@ -8692,6 +10431,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8732,12 +10472,12 @@ let gen= (function* _initGenerator () {
     task.exit();
     return variant6_0;
   }
-  _trampoline48.fnName = 'wasi:http/types@0.2.12#setPathWithQuery';
+  _trampoline50.fnName = 'wasi:http/types@0.2.12#setPathWithQuery';
   
-  const _trampoline49 = function(arg0, arg1) {
+  const _trampoline51 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -8751,10 +10491,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'body',
@@ -8762,14 +10503,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8792,9 +10532,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.body()),
       })
       ;
@@ -8806,6 +10547,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8825,9 +10567,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof OutgoingBody)) {
           throw new TypeError('Resource error: Not a valid \"OutgoingBody\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt4;
+          const rep = (e[symbolRscRep] ?? ++captureCnt4) >>> 0;
           captureTable4.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable4, rep);
         }
@@ -8856,12 +10600,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline49.fnName = 'wasi:http/types@0.2.12#body';
+  _trampoline51.fnName = 'wasi:http/types@0.2.12#body';
   
-  const _trampoline50 = function(arg0, arg1) {
+  const _trampoline52 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable6[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable6[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable6.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(FutureTrailers.prototype);
@@ -8875,10 +10619,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'get',
@@ -8886,14 +10631,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -8917,9 +10661,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.get()),
       })
       ;
@@ -8938,6 +10683,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -8974,9 +10720,11 @@ let gen= (function* _initGenerator () {
                 if (!(e instanceof Fields)) {
                   throw new TypeError('Resource error: Not a valid \"Trailers\" resource.');
                 }
+                
+                
                 var handle3 = e[symbolRscHandle];
                 if (!handle3) {
-                  const rep = e[symbolRscRep] || ++captureCnt7;
+                  const rep = (e[symbolRscRep] ?? ++captureCnt7) >>> 0;
                   captureTable7.set(rep, e);
                   handle3 = rscTableCreateOwn(handleTable7, rep);
                 }
@@ -9006,7 +10754,31 @@ let gen= (function* _initGenerator () {
                     const e = variant7;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr6= encodeRes.ptr;
                     var len6 = encodeRes.len;
                     
@@ -9090,7 +10862,31 @@ let gen= (function* _initGenerator () {
                     const e = variant12;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr11= encodeRes.ptr;
                     var len11 = encodeRes.len;
                     
@@ -9162,7 +10958,31 @@ let gen= (function* _initGenerator () {
                       const e = variant17;
                       dataView(memory0).setInt8(((arg1 >>> 0)) + 36, 1, true);
                       
-                      var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                      var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                        const state = getOrCreateAsyncState(0);
+                        const previousMayLeave = state.mayLeave;
+                        const meta = _getGlobalCurrentThreadMeta(0);
+                        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                        const previousStorage = thread?.storage;
+                        if (thread) { thread.storage = [0, 0]; }
+                        state.mayLeave = false;
+                        const restore = () => {
+                          state.mayLeave = previousMayLeave;
+                          if (thread) { thread.storage = previousStorage; }
+                        };
+                        let result;
+                        try {
+                          result = realloc0(...args);
+                        } catch (err) {
+                          restore();
+                          throw err;
+                        }
+                        if (result && typeof result.then === 'function') {
+                          return Promise.resolve(result).finally(restore);
+                        }
+                        restore();
+                        return result;
+                      }), memory0);
                       var ptr16= encodeRes.ptr;
                       var len16 = encodeRes.len;
                       
@@ -9204,7 +11024,31 @@ let gen= (function* _initGenerator () {
                     const e = variant23;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr22= encodeRes.ptr;
                     var len22 = encodeRes.len;
                     
@@ -9249,7 +11093,31 @@ let gen= (function* _initGenerator () {
                     const e = variant28;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr27= encodeRes.ptr;
                     var len27 = encodeRes.len;
                     
@@ -9303,7 +11171,31 @@ let gen= (function* _initGenerator () {
                     const e = variant34;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr33= encodeRes.ptr;
                     var len33 = encodeRes.len;
                     
@@ -9330,7 +11222,31 @@ let gen= (function* _initGenerator () {
                     const e = variant37;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr36= encodeRes.ptr;
                     var len36 = encodeRes.len;
                     
@@ -9349,7 +11265,31 @@ let gen= (function* _initGenerator () {
                     const e = variant39;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr38= encodeRes.ptr;
                     var len38 = encodeRes.len;
                     
@@ -9388,7 +11328,31 @@ let gen= (function* _initGenerator () {
                     const e = variant41;
                     dataView(memory0).setInt8(((arg1 >>> 0)) + 32, 1, true);
                     
-                    var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                    var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                      const state = getOrCreateAsyncState(0);
+                      const previousMayLeave = state.mayLeave;
+                      const meta = _getGlobalCurrentThreadMeta(0);
+                      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                      const previousStorage = thread?.storage;
+                      if (thread) { thread.storage = [0, 0]; }
+                      state.mayLeave = false;
+                      const restore = () => {
+                        state.mayLeave = previousMayLeave;
+                        if (thread) { thread.storage = previousStorage; }
+                      };
+                      let result;
+                      try {
+                        result = realloc0(...args);
+                      } catch (err) {
+                        restore();
+                        throw err;
+                      }
+                      if (result && typeof result.then === 'function') {
+                        return Promise.resolve(result).finally(restore);
+                      }
+                      restore();
+                      return result;
+                    }), memory0);
                     var ptr40= encodeRes.ptr;
                     var len40 = encodeRes.len;
                     
@@ -9433,12 +11397,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline50.fnName = 'wasi:http/types@0.2.12#get';
+  _trampoline52.fnName = 'wasi:http/types@0.2.12#get';
   
-  const _trampoline51 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline53 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable4[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable4[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable4.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingBody.prototype);
@@ -9459,7 +11423,7 @@ let gen= (function* _initGenerator () {
       case 1: {
         var handle4 = arg2;
         
-        var rep5 = handleTable7[(handle4 << 1) + 1] & ~T_FLAG;
+        var rep5 = handleTable7[(handle4 << 1) + 1] % T_OWN;
         var rsc3 = captureTable7.get(rep5);
         if (!rsc3) {
           rsc3 = Object.create(Fields.prototype);
@@ -9483,10 +11447,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'OutgoingBody.finish',
@@ -9494,14 +11459,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -9524,9 +11488,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet7 = _withGlobalCurrentTaskMeta({
+      const hostRet7 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => OutgoingBody.finish(rsc0, variant6)),
       })
       ;
@@ -9538,6 +11503,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant46 = ret;
     switch (variant46.tag) {
       case 'ok': {
@@ -9566,7 +11532,31 @@ let gen= (function* _initGenerator () {
               const e = variant10;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr9= encodeRes.ptr;
               var len9 = encodeRes.len;
               
@@ -9650,7 +11640,31 @@ let gen= (function* _initGenerator () {
               const e = variant15;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr14= encodeRes.ptr;
               var len14 = encodeRes.len;
               
@@ -9722,7 +11736,31 @@ let gen= (function* _initGenerator () {
                 const e = variant20;
                 dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
                 
-                var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                  const state = getOrCreateAsyncState(0);
+                  const previousMayLeave = state.mayLeave;
+                  const meta = _getGlobalCurrentThreadMeta(0);
+                  const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                  const previousStorage = thread?.storage;
+                  if (thread) { thread.storage = [0, 0]; }
+                  state.mayLeave = false;
+                  const restore = () => {
+                    state.mayLeave = previousMayLeave;
+                    if (thread) { thread.storage = previousStorage; }
+                  };
+                  let result;
+                  try {
+                    result = realloc0(...args);
+                  } catch (err) {
+                    restore();
+                    throw err;
+                  }
+                  if (result && typeof result.then === 'function') {
+                    return Promise.resolve(result).finally(restore);
+                  }
+                  restore();
+                  return result;
+                }), memory0);
                 var ptr19= encodeRes.ptr;
                 var len19 = encodeRes.len;
                 
@@ -9764,7 +11802,31 @@ let gen= (function* _initGenerator () {
               const e = variant26;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr25= encodeRes.ptr;
               var len25 = encodeRes.len;
               
@@ -9809,7 +11871,31 @@ let gen= (function* _initGenerator () {
               const e = variant31;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr30= encodeRes.ptr;
               var len30 = encodeRes.len;
               
@@ -9863,7 +11949,31 @@ let gen= (function* _initGenerator () {
               const e = variant37;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr36= encodeRes.ptr;
               var len36 = encodeRes.len;
               
@@ -9890,7 +12000,31 @@ let gen= (function* _initGenerator () {
               const e = variant40;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr39= encodeRes.ptr;
               var len39 = encodeRes.len;
               
@@ -9909,7 +12043,31 @@ let gen= (function* _initGenerator () {
               const e = variant42;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr41= encodeRes.ptr;
               var len41 = encodeRes.len;
               
@@ -9948,7 +12106,31 @@ let gen= (function* _initGenerator () {
               const e = variant44;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr43= encodeRes.ptr;
               var len43 = encodeRes.len;
               
@@ -9978,154 +12160,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline51.fnName = 'wasi:http/types@0.2.12#OutgoingBody.finish';
+  _trampoline53.fnName = 'wasi:http/types@0.2.12#OutgoingBody.finish';
   
-  const _trampoline52 = function(arg0, arg1) {
+  const _trampoline54 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
     var handle1 = arg0;
     
-    var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable7.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(Fields.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.entries"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'entries',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    let ret;
-    
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => _trackHostOperation(() => rsc0.entries()),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-        err,
-      });
-      getOrCreateAsyncState(0).markTrapped(err);
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    for (const entry of curResourceBorrows) {
-      const rsc = entry.rsc ?? entry;
-      if (entry.drop) {
-        if (rsc[symbolRscHandle]) {
-          entry.drop(rsc[symbolRscHandle]);
-        }
-      }
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    var vec6 = ret;
-    var len6 = vec6.length;
-    var result6 = realloc0(0, 0, 4, len6 * 16);
-    if (result6 < 0 || len6 < 0 || len6 > 16777215 || result6 > memory0.buffer.byteLength || len6 > Math.floor((memory0.buffer.byteLength - result6) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
-    for (let i = 0; i < vec6.length; i++) {
-      const e = vec6[i];
-      const base = result6 + i * 16;var [tuple3_0, tuple3_1] = e;
-      
-      var encodeRes = _utf8AllocateAndEncode(tuple3_0, realloc0, memory0);
-      var ptr4= encodeRes.ptr;
-      var len4 = encodeRes.len;
-      
-      dataView(memory0).setUint32((base) + 4, len4, true);
-      dataView(memory0).setUint32((base) + 0, ptr4, true);
-      var val5 = tuple3_1;
-      var len5 = Array.isArray(val5) ? val5.length : val5.byteLength;
-      var ptr5 = realloc0(0, 0, 1, len5 * 1);
-      
-      let valData5;
-      const valLenBytes5 = len5 * 1;
-      if (Array.isArray(val5)) {
-        // Regular array likely containing numbers, write values to memory
-        let offset = 0;
-        const dv5 = new DataView(memory0.buffer);
-        for (const v of val5) {
-          _requireValidNumericPrimitive.bind(null, 'u8')(v);
-          dv5.setUint8(ptr5+ offset, v, true);
-          offset += 1;
-        }
-      } else {
-        // TypedArray / ArrayBuffer-like, direct copy
-        valData5 = new Uint8Array(val5.buffer || val5, val5.byteOffset, valLenBytes5);
-        const out5 = new Uint8Array(memory0.buffer, ptr5, valLenBytes5);
-        out5.set(valData5);
-      }
-      
-      dataView(memory0).setUint32((base) + 12, len5, true);
-      dataView(memory0).setUint32((base) + 8, ptr5, true);
-    }
-    dataView(memory0).setUint32(((arg1 >>> 0)) + 4, len6, true);
-    dataView(memory0).setUint32(((arg1 >>> 0)) + 0, result6, true);
-    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.entries"][Instruction::Return]', {
-      funcName: '[method]fields.entries',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline52.fnName = 'wasi:http/types@0.2.12#entries';
-  
-  const _trampoline53 = function(arg0, arg1, arg2, arg3, arg4, arg5) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable7[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable7[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable7.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Fields.prototype);
@@ -10135,8 +12175,13 @@ let gen= (function* _initGenerator () {
     
     curResourceBorrows.push(rsc0);
     var ptr3 = (arg1 >>> 0) >>> 0;
-    var len3 = arg2;
-    var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+    var len3 = arg2 >>> 0;
+    
+    if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
     var ptr4 = (arg3 >>> 0) >>> 0;
     var len4 = arg4;
     if (ptr4 < 0 || len4 < 0 || len4 > 268435455 || ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
@@ -10147,10 +12192,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'append',
@@ -10158,14 +12204,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10188,9 +12233,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.append(result3, result4)),
       })
       ;
@@ -10202,6 +12248,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10258,7 +12305,237 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline53.fnName = 'wasi:http/types@0.2.12#append';
+  _trampoline54.fnName = 'wasi:http/types@0.2.12#append';
+  
+  const _trampoline55 = function(arg0, arg1) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable7[(handle1 << 1) + 1] % T_OWN;
+    var rsc0 = captureTable7.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(Fields.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.entries"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'entries',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'none',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    const started = task.enterSync();
+    let ret;
+    
+    
+    try {
+      ret = _withGlobalCurrentThreadMeta({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => rsc0.entries()),
+      })
+      ;
+    } catch (err) {
+      
+      _debugLog('[Instruction::CallInterface] error during sync call', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+        err,
+      });
+      getOrCreateAsyncState(0).markTrapped(err);
+      task.setErrored(err);
+      task.reject(err);
+      task.exit();
+      throw err;
+      
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    for (const entry of curResourceBorrows) {
+      const rsc = entry.rsc ?? entry;
+      if (entry.drop) {
+        if (rsc[symbolRscHandle]) {
+          entry.drop(rsc[symbolRscHandle]);
+        }
+      }
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    var vec6 = ret;
+    var len6 = vec6.length;
+    var result6 = ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    })(0, 0, 4, len6 * 16);
+    
+    result6>>>= 0;
+    if (result6 % 4 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+    if (result6 > memory0.buffer.byteLength || len6 > Math.floor((memory0.buffer.byteLength - result6) / 16)) {
+      throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+    }
+    
+    if (result6 < 0 || len6 < 0 || len6 > 16777215 || result6 > memory0.buffer.byteLength || len6 > Math.floor((memory0.buffer.byteLength - result6) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
+    for (let i = 0; i < vec6.length; i++) {
+      const e = vec6[i];
+      const base = result6 + i * 16;var [tuple3_0, tuple3_1] = e;
+      
+      var encodeRes = _utf8AllocateAndEncode(tuple3_0, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
+      var ptr4= encodeRes.ptr;
+      var len4 = encodeRes.len;
+      
+      dataView(memory0).setUint32((base) + 4, len4, true);
+      dataView(memory0).setUint32((base) + 0, ptr4, true);
+      var val5 = tuple3_1;
+      var len5 = Array.isArray(val5) ? val5.length : val5.byteLength;
+      var ptr5 = ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      })(0, 0, 1, len5 * 1);
+      
+      ptr5>>>= 0;
+      if (ptr5 % 1 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+      if (ptr5 > memory0.buffer.byteLength || len5 > Math.floor((memory0.buffer.byteLength - ptr5) / 1)) {
+        throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+      }
+      
+      
+      let valData5;
+      const valLenBytes5 = len5 * 1;
+      if (Array.isArray(val5)) {
+        // Regular array likely containing numbers, write values to memory
+        let offset = 0;
+        const dv5 = new DataView(memory0.buffer);
+        for (const v of val5) {
+          _requireValidNumericPrimitive.bind(null, 'u8')(v);
+          dv5.setUint8(ptr5+ offset, v, true);
+          offset += 1;
+        }
+      } else {
+        // TypedArray / ArrayBuffer-like, direct copy
+        valData5 = new Uint8Array(val5.buffer || val5, val5.byteOffset, valLenBytes5);
+        const out5 = new Uint8Array(memory0.buffer, ptr5, valLenBytes5);
+        out5.set(valData5);
+      }
+      
+      dataView(memory0).setUint32((base) + 12, len5, true);
+      dataView(memory0).setUint32((base) + 8, ptr5, true);
+    }
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 4, len6, true);
+    dataView(memory0).setUint32(((arg1 >>> 0)) + 0, result6, true);
+    _debugLog('[iface="wasi:http/types@0.2.12", function="[method]fields.entries"][Instruction::Return]', {
+      funcName: '[method]fields.entries',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  }
+  _trampoline55.fnName = 'wasi:http/types@0.2.12#entries';
   
   const handleTable1 = [T_FLAG, 0];
   handleTable1._createdReps = new Set();
@@ -10268,12 +12545,13 @@ let gen= (function* _initGenerator () {
   const captureTable1= new Map();
   let captureCnt1= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable1, captures: captureTable1 });
   HANDLE_TABLES[1] = handleTable1;
   
-  const _trampoline54 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline56 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable2[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable2.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutputStream.prototype);
@@ -10284,7 +12562,7 @@ let gen= (function* _initGenerator () {
     curResourceBorrows.push(rsc0);
     var handle4 = arg1;
     
-    var rep5 = handleTable3[(handle4 << 1) + 1] & ~T_FLAG;
+    var rep5 = handleTable3[(handle4 << 1) + 1] % T_OWN;
     var rsc3 = captureTable3.get(rep5);
     if (!rsc3) {
       rsc3 = Object.create(InputStream.prototype);
@@ -10298,10 +12576,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'splice',
@@ -10309,14 +12588,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10339,9 +12617,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet6 = _withGlobalCurrentTaskMeta({
+      const hostRet6 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.splice(rsc3, BigInt.asUintN(64, BigInt(arg2)))),
       })
       ;
@@ -10353,6 +12632,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10384,9 +12664,11 @@ let gen= (function* _initGenerator () {
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
             }
+            
+            
             var handle7 = e[symbolRscHandle];
             if (!handle7) {
-              const rep = e[symbolRscRep] || ++captureCnt1;
+              const rep = (e[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, e);
               handle7 = rscTableCreateOwn(handleTable1, rep);
             }
@@ -10419,12 +12701,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline54.fnName = 'wasi:io/streams@0.2.12#splice';
+  _trampoline56.fnName = 'wasi:io/streams@0.2.12#splice';
   
-  const _trampoline55 = function(arg0, arg1) {
+  const _trampoline57 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable2[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable2.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutputStream.prototype);
@@ -10438,10 +12720,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'checkWrite',
@@ -10449,14 +12732,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10479,9 +12761,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.checkWrite()),
       })
       ;
@@ -10493,6 +12776,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10524,9 +12808,11 @@ let gen= (function* _initGenerator () {
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
             }
+            
+            
             var handle4 = e[symbolRscHandle];
             if (!handle4) {
-              const rep = e[symbolRscRep] || ++captureCnt1;
+              const rep = (e[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, e);
               handle4 = rscTableCreateOwn(handleTable1, rep);
             }
@@ -10559,12 +12845,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline55.fnName = 'wasi:io/streams@0.2.12#checkWrite';
+  _trampoline57.fnName = 'wasi:io/streams@0.2.12#checkWrite';
   
-  const _trampoline56 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline58 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable2[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable2.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutputStream.prototype);
@@ -10583,10 +12869,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'write',
@@ -10594,14 +12881,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10624,9 +12910,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet4 = _withGlobalCurrentTaskMeta({
+      const hostRet4 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.write(result3)),
       })
       ;
@@ -10638,6 +12925,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10668,9 +12956,11 @@ let gen= (function* _initGenerator () {
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
             }
+            
+            
             var handle5 = e[symbolRscHandle];
             if (!handle5) {
-              const rep = e[symbolRscRep] || ++captureCnt1;
+              const rep = (e[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, e);
               handle5 = rscTableCreateOwn(handleTable1, rep);
             }
@@ -10703,12 +12993,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline56.fnName = 'wasi:io/streams@0.2.12#write';
+  _trampoline58.fnName = 'wasi:io/streams@0.2.12#write';
   
-  const _trampoline57 = function(arg0, arg1, arg2) {
+  const _trampoline59 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable3[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable3[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable3.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(InputStream.prototype);
@@ -10722,10 +13012,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'read',
@@ -10733,14 +13024,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10763,9 +13053,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.read(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
@@ -10777,6 +13068,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10794,7 +13086,38 @@ let gen= (function* _initGenerator () {
         dataView(memory0).setInt8(((arg2 >>> 0)) + 0, 0, true);
         var val4 = e;
         var len4 = Array.isArray(val4) ? val4.length : val4.byteLength;
-        var ptr4 = realloc0(0, 0, 1, len4 * 1);
+        var ptr4 = ((...args) => {
+          const state = getOrCreateAsyncState(0);
+          const previousMayLeave = state.mayLeave;
+          const meta = _getGlobalCurrentThreadMeta(0);
+          const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+          const previousStorage = thread?.storage;
+          if (thread) { thread.storage = [0, 0]; }
+          state.mayLeave = false;
+          const restore = () => {
+            state.mayLeave = previousMayLeave;
+            if (thread) { thread.storage = previousStorage; }
+          };
+          let result;
+          try {
+            result = realloc0(...args);
+          } catch (err) {
+            restore();
+            throw err;
+          }
+          if (result && typeof result.then === 'function') {
+            return Promise.resolve(result).finally(restore);
+          }
+          restore();
+          return result;
+        })(0, 0, 1, len4 * 1);
+        
+        ptr4>>>= 0;
+        if (ptr4 % 1 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+        if (ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) {
+          throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+        }
+        
         
         let valData4;
         const valLenBytes4 = len4 * 1;
@@ -10831,9 +13154,11 @@ let gen= (function* _initGenerator () {
             if (!(e instanceof Error$1)) {
               throw new TypeError('Resource error: Not a valid \"Error\" resource.');
             }
+            
+            
             var handle5 = e[symbolRscHandle];
             if (!handle5) {
-              const rep = e[symbolRscRep] || ++captureCnt1;
+              const rep = (e[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, e);
               handle5 = rscTableCreateOwn(handleTable1, rep);
             }
@@ -10866,12 +13191,170 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline57.fnName = 'wasi:io/streams@0.2.12#read';
+  _trampoline59.fnName = 'wasi:io/streams@0.2.12#read';
   
-  const _trampoline58 = function(arg0, arg1) {
+  const _trampoline60 = _maybeSyncGenerator(function*(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable1[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable2[(handle1 << 1) + 1] % T_OWN;
+    var rsc0 = captureTable2.get(rep2);
+    if (!rsc0) {
+      rsc0 = Object.create(OutputStream.prototype);
+      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
+    }
+    
+    curResourceBorrows.push(rsc0);
+    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]output-stream.blocking-flush"] [Instruction::CallInterface] (sync, @ enter)');
+    const hostProvided = true;
+    
+    let parentTask;
+    let task;
+    let threadID;
+    let subtask;
+    
+    const createTask = () => {
+      ({ task, threadID } = createNewCurrentImplicitThread({
+        componentIdx: -1,
+        isAsync: false,
+        entryFnName: 'blockingFlush',
+        getCallbackFn: () => null,
+        callbackFnName: null,
+        errHandling: 'result-catch-handler',
+        callingWasmExport: false,
+      }));
+    };
+    
+    taskCreation: {
+      parentTask = getCurrentTask(
+      0,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
+      )?.task;
+      
+      if (!parentTask) {
+        createTask();
+        break taskCreation;
+      }
+      
+      createTask();
+      
+      if (hostProvided) {
+        subtask = parentTask.getLatestSubtask();
+        if (!subtask) {
+          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
+        }
+        task.setParentSubtask(subtask);
+      }
+    }
+    
+    
+    const started = task.enterHost();
+    if (!started) {
+      _debugLog('[Instruction::CallInterface] failed to enter task', {
+        taskID: task.id(),
+        subtaskID: task.getParentSubtask()?.id(),
+      });
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
+    }
+    
+    let ret;
+    
+    try {
+      const hostRet3 = yield  _withGlobalCurrentThreadMetaAsync({
+        componentIdx: task.componentIdx(),
+        taskID: task.id(),
+        threadID,
+        fn: () => _trackHostOperation(() => {
+          const hostRet = rsc0.blockingFlush();
+          subtask?.setHostPendingResult(hostRet);
+          return hostRet;
+        }),
+      })
+      ;
+      ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
+      ? hostRet3
+      : { tag: 'ok', val: hostRet3};
+    } catch (e) {
+      if (getOrCreateAsyncState(0).markTrapped(e)) { throw e; }
+      ret = { tag: 'err', val: getErrorPayload(e) };
+    }
+    
+    getOrCreateAsyncState(0).throwIfInterrupted();
+    for (const entry of curResourceBorrows) {
+      const rsc = entry.rsc ?? entry;
+      if (entry.drop) {
+        if (rsc[symbolRscHandle]) {
+          entry.drop(rsc[symbolRscHandle]);
+        }
+      }
+      rsc[symbolRscHandle] = undefined;
+    }
+    curResourceBorrows = [];
+    var variant6 = ret;
+    switch (variant6.tag) {
+      case 'ok': {
+        const e = variant6.val;
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
+        
+        break;
+      }
+      case 'err': {
+        const e = variant6.val;
+        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
+        var variant5 = e;
+        switch (variant5.tag) {
+          case 'last-operation-failed': {
+            const e = variant5.val;
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 0, true);
+            
+            if (!(e instanceof Error$1)) {
+              throw new TypeError('Resource error: Not a valid \"Error\" resource.');
+            }
+            
+            
+            var handle4 = e[symbolRscHandle];
+            if (!handle4) {
+              const rep = (e[symbolRscRep] ?? ++captureCnt1) >>> 0;
+              captureTable1.set(rep, e);
+              handle4 = rscTableCreateOwn(handleTable1, rep);
+            }
+            
+            dataView(memory0).setInt32(((arg1 >>> 0)) + 8, handle4, true);
+            break;
+          }
+          case 'closed': {
+            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 1, true);
+            break;
+          }
+          default: {
+            throw new TypeError(`invalid variant tag value \`${JSON.stringify(variant5.tag)}\` (received \`${variant5}\`) specified for \`StreamError\``);
+          }
+        }
+        
+        break;
+      }
+      default: {
+        _debugLog("ERROR: invalid value (expected result as object with 'tag' member)", { value: variant6, valueType: typeof variant6});
+        throw new TypeError('invalid variant specified for result');
+      }
+    }
+    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]output-stream.blocking-flush"][Instruction::Return]', {
+      funcName: '[method]output-stream.blocking-flush',
+      paramCount: 0,
+      async: false,
+      postReturn: false
+    });
+    task.resolve([ret]);
+    task.exit();
+  });
+  _trampoline60.fnName = 'wasi:io/streams@0.2.12#blockingFlush';
+  _trampoline60.manuallyAsync = true;
+  
+  const _trampoline61 = function(arg0, arg1) {
+    var handle1 = arg0;
+    
+    var rep2 = handleTable1[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable1.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Error$1.prototype);
@@ -10885,10 +13368,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'toDebugString',
@@ -10896,14 +13380,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -10927,9 +13410,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.toDebugString()),
       })
       ;
@@ -10948,6 +13432,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -10959,7 +13444,31 @@ let gen= (function* _initGenerator () {
     }
     curResourceBorrows = [];
     
-    var encodeRes = _utf8AllocateAndEncode(ret, realloc0, memory0);
+    var encodeRes = _utf8AllocateAndEncode(ret, ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    }), memory0);
     var ptr3= encodeRes.ptr;
     var len3 = encodeRes.len;
     
@@ -10974,12 +13483,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline58.fnName = 'wasi:io/error@0.2.12#toDebugString';
+  _trampoline61.fnName = 'wasi:io/error@0.2.12#toDebugString';
   
-  const _trampoline59 = function(arg0, arg1, arg2, arg3) {
+  const _trampoline62 = function(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable10[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable10[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable10.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(OutgoingRequest.prototype);
@@ -11000,7 +13509,7 @@ let gen= (function* _initGenerator () {
       case 1: {
         var handle4 = arg2;
         
-        var rep5 = handleTable11[(handle4 << 1) + 1] & ~T_FLAG;
+        var rep5 = handleTable11[(handle4 << 1) + 1] % T_OWN;
         var rsc3 = captureTable11.get(rep5);
         if (!rsc3) {
           rsc3 = Object.create(RequestOptions.prototype);
@@ -11024,10 +13533,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'handle',
@@ -11035,14 +13545,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -11065,9 +13574,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet7 = _withGlobalCurrentTaskMeta({
+      const hostRet7 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => handle(rsc0, variant6)),
       })
       ;
@@ -11079,6 +13589,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant47 = ret;
     switch (variant47.tag) {
       case 'ok': {
@@ -11088,9 +13599,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof FutureIncomingResponse)) {
           throw new TypeError('Resource error: Not a valid \"FutureIncomingResponse\" resource.');
         }
+        
+        
         var handle8 = e[symbolRscHandle];
         if (!handle8) {
-          const rep = e[symbolRscRep] || ++captureCnt8;
+          const rep = (e[symbolRscRep] ?? ++captureCnt8) >>> 0;
           captureTable8.set(rep, e);
           handle8 = rscTableCreateOwn(handleTable8, rep);
         }
@@ -11119,7 +13632,31 @@ let gen= (function* _initGenerator () {
               const e = variant11;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr10= encodeRes.ptr;
               var len10 = encodeRes.len;
               
@@ -11203,7 +13740,31 @@ let gen= (function* _initGenerator () {
               const e = variant16;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr15= encodeRes.ptr;
               var len15 = encodeRes.len;
               
@@ -11275,7 +13836,31 @@ let gen= (function* _initGenerator () {
                 const e = variant21;
                 dataView(memory0).setInt8(((arg3 >>> 0)) + 20, 1, true);
                 
-                var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+                var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                  const state = getOrCreateAsyncState(0);
+                  const previousMayLeave = state.mayLeave;
+                  const meta = _getGlobalCurrentThreadMeta(0);
+                  const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                  const previousStorage = thread?.storage;
+                  if (thread) { thread.storage = [0, 0]; }
+                  state.mayLeave = false;
+                  const restore = () => {
+                    state.mayLeave = previousMayLeave;
+                    if (thread) { thread.storage = previousStorage; }
+                  };
+                  let result;
+                  try {
+                    result = realloc0(...args);
+                  } catch (err) {
+                    restore();
+                    throw err;
+                  }
+                  if (result && typeof result.then === 'function') {
+                    return Promise.resolve(result).finally(restore);
+                  }
+                  restore();
+                  return result;
+                }), memory0);
                 var ptr20= encodeRes.ptr;
                 var len20 = encodeRes.len;
                 
@@ -11317,7 +13902,31 @@ let gen= (function* _initGenerator () {
               const e = variant27;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr26= encodeRes.ptr;
               var len26 = encodeRes.len;
               
@@ -11362,7 +13971,31 @@ let gen= (function* _initGenerator () {
               const e = variant32;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr31= encodeRes.ptr;
               var len31 = encodeRes.len;
               
@@ -11416,7 +14049,31 @@ let gen= (function* _initGenerator () {
               const e = variant38;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr37= encodeRes.ptr;
               var len37 = encodeRes.len;
               
@@ -11443,7 +14100,31 @@ let gen= (function* _initGenerator () {
               const e = variant41;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr40= encodeRes.ptr;
               var len40 = encodeRes.len;
               
@@ -11462,7 +14143,31 @@ let gen= (function* _initGenerator () {
               const e = variant43;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr42= encodeRes.ptr;
               var len42 = encodeRes.len;
               
@@ -11501,7 +14206,31 @@ let gen= (function* _initGenerator () {
               const e = variant45;
               dataView(memory0).setInt8(((arg3 >>> 0)) + 16, 1, true);
               
-              var encodeRes = _utf8AllocateAndEncode(e, realloc0, memory0);
+              var encodeRes = _utf8AllocateAndEncode(e, ((...args) => {
+                const state = getOrCreateAsyncState(0);
+                const previousMayLeave = state.mayLeave;
+                const meta = _getGlobalCurrentThreadMeta(0);
+                const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+                const previousStorage = thread?.storage;
+                if (thread) { thread.storage = [0, 0]; }
+                state.mayLeave = false;
+                const restore = () => {
+                  state.mayLeave = previousMayLeave;
+                  if (thread) { thread.storage = previousStorage; }
+                };
+                let result;
+                try {
+                  result = realloc0(...args);
+                } catch (err) {
+                  restore();
+                  throw err;
+                }
+                if (result && typeof result.then === 'function') {
+                  return Promise.resolve(result).finally(restore);
+                }
+                restore();
+                return result;
+              }), memory0);
               var ptr44= encodeRes.ptr;
               var len44 = encodeRes.len;
               
@@ -11531,9 +14260,9 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline59.fnName = 'wasi:http/outgoing-handler@0.2.12#handle';
+  _trampoline62.fnName = 'wasi:http/outgoing-handler@0.2.12#handle';
   
-  const _trampoline60 = async function(arg0, arg1, arg2) {
+  const _trampoline63 = _maybeSyncGenerator(function*(arg0, arg1, arg2) {
     var len3 = arg1;
     var base3 = (arg0 >>> 0) >>> 0;
     if (base3 < 0 || len3 < 0 || len3 > 67108863 || base3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - base3) / 4)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
@@ -11543,7 +14272,7 @@ let gen= (function* _initGenerator () {
       const base = base3 + i * 4;
       var handle1 = dataView(memory0).getInt32((base) + 0, true);
       
-      var rep2 = handleTable0[(handle1 << 1) + 1] & ~T_FLAG;
+      var rep2 = handleTable0[(handle1 << 1) + 1] % T_OWN;
       var rsc0 = captureTable0.get(rep2);
       if (!rsc0) {
         rsc0 = Object.create(Pollable.prototype);
@@ -11559,10 +14288,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'poll',
@@ -11570,14 +14300,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -11597,22 +14326,24 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     
     try {
-      ret = await  _withGlobalCurrentTaskMetaAsync({
+      ret = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = poll(result3);
           subtask?.setHostPendingResult(hostRet);
@@ -11631,10 +14362,11 @@ let gen= (function* _initGenerator () {
       task.setErrored(err);
       task.reject(err);
       task.exit();
-      return task.completionPromise();
+      throw err;
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -11647,7 +14379,38 @@ let gen= (function* _initGenerator () {
     curResourceBorrows = [];
     var val4 = ret;
     var len4 = val4.length;
-    var ptr4 = realloc0(0, 0, 4, len4 * 4);
+    var ptr4 = ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    })(0, 0, 4, len4 * 4);
+    
+    ptr4>>>= 0;
+    if (ptr4 % 4 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+    if (ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 4)) {
+      throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+    }
+    
     
     let valData4;
     const valLenBytes4 = len4 * 4;
@@ -11677,162 +14440,9 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline60.fnName = 'wasi:io/poll@0.2.12#poll';
-  _trampoline60.manuallyAsync = true;
-  
-  const _trampoline61 = async function(arg0, arg1) {
-    var handle1 = arg0;
-    
-    var rep2 = handleTable2[(handle1 << 1) + 1] & ~T_FLAG;
-    var rsc0 = captureTable2.get(rep2);
-    if (!rsc0) {
-      rsc0 = Object.create(OutputStream.prototype);
-      Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
-      Object.defineProperty(rsc0, symbolRscRep, { writable: true, value: rep2});
-    }
-    
-    curResourceBorrows.push(rsc0);
-    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]output-stream.blocking-flush"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'blockingFlush',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'result-catch-handler',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    
-    const started = await task.enter({ isHost: hostProvided });
-    if (!started) {
-      _debugLog('[Instruction::CallInterface] failed to enter task', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-      });
-      throw new Error("failed to enter task");
-    }
-    
-    let ret;
-    
-    try {
-      const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => _trackHostOperation(() => {
-          const hostRet = rsc0.blockingFlush();
-          subtask?.setHostPendingResult(hostRet);
-          return hostRet;
-        }),
-      })
-      ;
-      ret = hostRet3 !== null && typeof hostRet3 === 'object' && (hostRet3.tag === 'ok' || hostRet3.tag === 'err')
-      ? hostRet3
-      : { tag: 'ok', val: hostRet3};
-    } catch (e) {
-      if (getOrCreateAsyncState(0).markTrapped(e)) { throw e; }
-      ret = { tag: 'err', val: getErrorPayload(e) };
-    }
-    
-    for (const entry of curResourceBorrows) {
-      const rsc = entry.rsc ?? entry;
-      if (entry.drop) {
-        if (rsc[symbolRscHandle]) {
-          entry.drop(rsc[symbolRscHandle]);
-        }
-      }
-      rsc[symbolRscHandle] = undefined;
-    }
-    curResourceBorrows = [];
-    var variant6 = ret;
-    switch (variant6.tag) {
-      case 'ok': {
-        const e = variant6.val;
-        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 0, true);
-        
-        break;
-      }
-      case 'err': {
-        const e = variant6.val;
-        dataView(memory0).setInt8(((arg1 >>> 0)) + 0, 1, true);
-        var variant5 = e;
-        switch (variant5.tag) {
-          case 'last-operation-failed': {
-            const e = variant5.val;
-            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 0, true);
-            
-            if (!(e instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error\" resource.');
-            }
-            var handle4 = e[symbolRscHandle];
-            if (!handle4) {
-              const rep = e[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, e);
-              handle4 = rscTableCreateOwn(handleTable1, rep);
-            }
-            
-            dataView(memory0).setInt32(((arg1 >>> 0)) + 8, handle4, true);
-            break;
-          }
-          case 'closed': {
-            dataView(memory0).setInt8(((arg1 >>> 0)) + 4, 1, true);
-            break;
-          }
-          default: {
-            throw new TypeError(`invalid variant tag value \`${JSON.stringify(variant5.tag)}\` (received \`${variant5}\`) specified for \`StreamError\``);
-          }
-        }
-        
-        break;
-      }
-      default: {
-        _debugLog("ERROR: invalid value (expected result as object with 'tag' member)", { value: variant6, valueType: typeof variant6});
-        throw new TypeError('invalid variant specified for result');
-      }
-    }
-    _debugLog('[iface="wasi:io/streams@0.2.12", function="[method]output-stream.blocking-flush"][Instruction::Return]', {
-      funcName: '[method]output-stream.blocking-flush',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline61.fnName = 'wasi:io/streams@0.2.12#blockingFlush';
-  _trampoline61.manuallyAsync = true;
+  });
+  _trampoline63.fnName = 'wasi:io/poll@0.2.12#poll';
+  _trampoline63.manuallyAsync = true;
   
   const handleTable14 = [T_FLAG, 0];
   handleTable14._createdReps = new Set();
@@ -11842,12 +14452,13 @@ let gen= (function* _initGenerator () {
   const captureTable14= new Map();
   let captureCnt14= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable14, captures: captureTable14 });
   HANDLE_TABLES[14] = handleTable14;
   
-  const _trampoline62 = function(arg0, arg1, arg2) {
+  const _trampoline64 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -11861,10 +14472,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'readViaStream',
@@ -11872,14 +14484,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -11902,9 +14513,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.readViaStream(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
@@ -11916,6 +14528,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -11935,9 +14548,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof InputStream)) {
           throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt3;
+          const rep = (e[symbolRscRep] ?? ++captureCnt3) >>> 0;
           captureTable3.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable3, rep);
         }
@@ -11952,151 +14567,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -12126,12 +14741,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline62.fnName = 'wasi:filesystem/types@0.2.12#readViaStream';
+  _trampoline64.fnName = 'wasi:filesystem/types@0.2.12#readViaStream';
   
-  const _trampoline63 = function(arg0, arg1, arg2) {
+  const _trampoline65 = function(arg0, arg1, arg2) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -12145,10 +14760,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'writeViaStream',
@@ -12156,14 +14772,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -12186,9 +14801,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.writeViaStream(BigInt.asUintN(64, BigInt(arg1)))),
       })
       ;
@@ -12200,6 +14816,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -12219,9 +14836,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt2;
+          const rep = (e[symbolRscRep] ?? ++captureCnt2) >>> 0;
           captureTable2.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
@@ -12236,151 +14855,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -12410,12 +15029,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline63.fnName = 'wasi:filesystem/types@0.2.12#writeViaStream';
+  _trampoline65.fnName = 'wasi:filesystem/types@0.2.12#writeViaStream';
   
-  const _trampoline64 = async function(arg0, arg1) {
+  const _trampoline66 = _maybeSyncGenerator(function*(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -12429,10 +15048,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'appendViaStream',
@@ -12440,14 +15060,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -12467,21 +15086,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet3 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.appendViaStream();
           subtask?.setHostPendingResult(hostRet);
@@ -12497,6 +15118,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -12516,9 +15138,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof OutputStream)) {
           throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt2;
+          const rep = (e[symbolRscRep] ?? ++captureCnt2) >>> 0;
           captureTable2.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable2, rep);
         }
@@ -12533,151 +15157,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -12706,14 +15330,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline64.fnName = 'wasi:filesystem/types@0.2.12#appendViaStream';
-  _trampoline64.manuallyAsync = true;
+  });
+  _trampoline66.fnName = 'wasi:filesystem/types@0.2.12#appendViaStream';
+  _trampoline66.manuallyAsync = true;
   
-  const _trampoline65 = function(arg0, arg1) {
+  const _trampoline67 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -12727,10 +15351,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getFlags',
@@ -12738,14 +15363,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -12768,9 +15392,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.getFlags()),
       })
       ;
@@ -12782,6 +15407,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -12813,151 +15439,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -12987,7 +15613,7 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline65.fnName = 'wasi:filesystem/types@0.2.12#getFlags';
+  _trampoline67.fnName = 'wasi:filesystem/types@0.2.12#getFlags';
   
   const handleTable15 = [T_FLAG, 0];
   handleTable15._createdReps = new Set();
@@ -12997,12 +15623,13 @@ let gen= (function* _initGenerator () {
   const captureTable15= new Map();
   let captureCnt15= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable15, captures: captureTable15 });
   HANDLE_TABLES[15] = handleTable15;
   
-  const _trampoline66 = async function(arg0, arg1) {
+  const _trampoline68 = _maybeSyncGenerator(function*(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -13016,10 +15643,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'readDirectory',
@@ -13027,14 +15655,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -13054,21 +15681,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet3 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.readDirectory();
           subtask?.setHostPendingResult(hostRet);
@@ -13084,6 +15713,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -13103,9 +15733,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof DirectoryEntryStream)) {
           throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
         }
+        
+        
         var handle4 = e[symbolRscHandle];
         if (!handle4) {
-          const rep = e[symbolRscRep] || ++captureCnt15;
+          const rep = (e[symbolRscRep] ?? ++captureCnt15) >>> 0;
           captureTable15.set(rep, e);
           handle4 = rscTableCreateOwn(handleTable15, rep);
         }
@@ -13120,151 +15752,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -13293,14 +15925,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline66.fnName = 'wasi:filesystem/types@0.2.12#readDirectory';
-  _trampoline66.manuallyAsync = true;
+  });
+  _trampoline68.fnName = 'wasi:filesystem/types@0.2.12#readDirectory';
+  _trampoline68.manuallyAsync = true;
   
-  const _trampoline67 = async function(arg0, arg1, arg2, arg3) {
+  const _trampoline69 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -13310,17 +15942,23 @@ let gen= (function* _initGenerator () {
     
     curResourceBorrows.push(rsc0);
     var ptr3 = (arg1 >>> 0) >>> 0;
-    var len3 = arg2;
-    var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+    var len3 = arg2 >>> 0;
+    
+    if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.create-directory-at"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'createDirectoryAt',
@@ -13328,14 +15966,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -13355,21 +15992,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet4 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet4 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.createDirectoryAt(result3);
           subtask?.setHostPendingResult(hostRet);
@@ -13385,6 +16024,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -13409,151 +16049,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -13582,14 +16222,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline67.fnName = 'wasi:filesystem/types@0.2.12#createDirectoryAt';
-  _trampoline67.manuallyAsync = true;
+  });
+  _trampoline69.fnName = 'wasi:filesystem/types@0.2.12#createDirectoryAt';
+  _trampoline69.manuallyAsync = true;
   
-  const _trampoline68 = async function(arg0, arg1) {
+  const _trampoline70 = _maybeSyncGenerator(function*(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -13603,10 +16243,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'stat',
@@ -13614,14 +16255,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -13641,21 +16281,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet3 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet3 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.stat();
           subtask?.setHostPendingResult(hostRet);
@@ -13671,6 +16313,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -13690,35 +16333,35 @@ let gen= (function* _initGenerator () {
         var val5 = v4_0;
         let enum5;
         switch (val5) {
-          case 'unknown': {
+          case "unknown": {
             enum5 = 0;
             break;
           }
-          case 'block-device': {
+          case "block-device": {
             enum5 = 1;
             break;
           }
-          case 'character-device': {
+          case "character-device": {
             enum5 = 2;
             break;
           }
-          case 'directory': {
+          case "directory": {
             enum5 = 3;
             break;
           }
-          case 'fifo': {
+          case "fifo": {
             enum5 = 4;
             break;
           }
-          case 'symbolic-link': {
+          case "symbolic-link": {
             enum5 = 5;
             break;
           }
-          case 'regular-file': {
+          case "regular-file": {
             enum5 = 6;
             break;
           }
-          case 'socket': {
+          case "socket": {
             enum5 = 7;
             break;
           }
@@ -13772,151 +16415,151 @@ let gen= (function* _initGenerator () {
         var val12 = e;
         let enum12;
         switch (val12) {
-          case 'access': {
+          case "access": {
             enum12 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum12 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum12 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum12 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum12 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum12 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum12 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum12 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum12 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum12 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum12 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum12 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum12 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum12 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum12 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum12 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum12 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum12 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum12 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum12 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum12 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum12 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum12 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum12 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum12 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum12 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum12 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum12 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum12 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum12 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum12 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum12 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum12 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum12 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum12 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum12 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum12 = 36;
             break;
           }
@@ -13945,14 +16588,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline68.fnName = 'wasi:filesystem/types@0.2.12#stat';
-  _trampoline68.manuallyAsync = true;
+  });
+  _trampoline70.fnName = 'wasi:filesystem/types@0.2.12#stat';
+  _trampoline70.manuallyAsync = true;
   
-  const _trampoline69 = async function(arg0, arg1, arg2, arg3, arg4) {
+  const _trampoline71 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3, arg4) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -13968,17 +16611,23 @@ let gen= (function* _initGenerator () {
       symlinkFollow: Boolean(arg1 & 1),
     };
     var ptr4 = (arg2 >>> 0) >>> 0;
-    var len4 = arg3;
-    var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
+    var len4 = arg3 >>> 0;
+    
+    if (ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result4 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr4, len4));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.stat-at"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'statAt',
@@ -13986,14 +16635,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -14013,21 +16661,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet5 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet5 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.statAt(flags3, result4);
           subtask?.setHostPendingResult(hostRet);
@@ -14043,6 +16693,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -14062,35 +16713,35 @@ let gen= (function* _initGenerator () {
         var val7 = v6_0;
         let enum7;
         switch (val7) {
-          case 'unknown': {
+          case "unknown": {
             enum7 = 0;
             break;
           }
-          case 'block-device': {
+          case "block-device": {
             enum7 = 1;
             break;
           }
-          case 'character-device': {
+          case "character-device": {
             enum7 = 2;
             break;
           }
-          case 'directory': {
+          case "directory": {
             enum7 = 3;
             break;
           }
-          case 'fifo': {
+          case "fifo": {
             enum7 = 4;
             break;
           }
-          case 'symbolic-link': {
+          case "symbolic-link": {
             enum7 = 5;
             break;
           }
-          case 'regular-file': {
+          case "regular-file": {
             enum7 = 6;
             break;
           }
-          case 'socket': {
+          case "socket": {
             enum7 = 7;
             break;
           }
@@ -14144,151 +16795,151 @@ let gen= (function* _initGenerator () {
         var val14 = e;
         let enum14;
         switch (val14) {
-          case 'access': {
+          case "access": {
             enum14 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum14 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum14 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum14 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum14 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum14 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum14 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum14 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum14 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum14 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum14 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum14 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum14 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum14 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum14 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum14 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum14 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum14 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum14 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum14 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum14 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum14 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum14 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum14 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum14 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum14 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum14 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum14 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum14 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum14 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum14 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum14 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum14 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum14 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum14 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum14 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum14 = 36;
             break;
           }
@@ -14317,14 +16968,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline69.fnName = 'wasi:filesystem/types@0.2.12#statAt';
-  _trampoline69.manuallyAsync = true;
+  });
+  _trampoline71.fnName = 'wasi:filesystem/types@0.2.12#statAt';
+  _trampoline71.manuallyAsync = true;
   
-  const _trampoline70 = async function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+  const _trampoline72 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -14340,8 +16991,13 @@ let gen= (function* _initGenerator () {
       symlinkFollow: Boolean(arg1 & 1),
     };
     var ptr4 = (arg2 >>> 0) >>> 0;
-    var len4 = arg3;
-    var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
+    var len4 = arg3 >>> 0;
+    
+    if (ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result4 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr4, len4));
     if ((arg4 & 4294967280) !== 0) {
       throw new TypeError('flags have extraneous bits set');
     }
@@ -14367,10 +17023,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'openAt',
@@ -14378,14 +17035,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -14405,21 +17061,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet7 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet7 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.openAt(flags3, result4, flags5, flags6);
           subtask?.setHostPendingResult(hostRet);
@@ -14435,6 +17093,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -14454,9 +17113,11 @@ let gen= (function* _initGenerator () {
         if (!(e instanceof Descriptor)) {
           throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
         }
+        
+        
         var handle8 = e[symbolRscHandle];
         if (!handle8) {
-          const rep = e[symbolRscRep] || ++captureCnt14;
+          const rep = (e[symbolRscRep] ?? ++captureCnt14) >>> 0;
           captureTable14.set(rep, e);
           handle8 = rscTableCreateOwn(handleTable14, rep);
         }
@@ -14471,151 +17132,151 @@ let gen= (function* _initGenerator () {
         var val9 = e;
         let enum9;
         switch (val9) {
-          case 'access': {
+          case "access": {
             enum9 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum9 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum9 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum9 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum9 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum9 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum9 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum9 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum9 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum9 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum9 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum9 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum9 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum9 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum9 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum9 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum9 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum9 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum9 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum9 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum9 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum9 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum9 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum9 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum9 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum9 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum9 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum9 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum9 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum9 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum9 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum9 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum9 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum9 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum9 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum9 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum9 = 36;
             break;
           }
@@ -14644,14 +17305,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline70.fnName = 'wasi:filesystem/types@0.2.12#openAt';
-  _trampoline70.manuallyAsync = true;
+  });
+  _trampoline72.fnName = 'wasi:filesystem/types@0.2.12#openAt';
+  _trampoline72.manuallyAsync = true;
   
-  const _trampoline71 = async function(arg0, arg1, arg2, arg3) {
+  const _trampoline73 = _maybeSyncGenerator(function*(arg0, arg1, arg2, arg3) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -14661,17 +17322,23 @@ let gen= (function* _initGenerator () {
     
     curResourceBorrows.push(rsc0);
     var ptr3 = (arg1 >>> 0) >>> 0;
-    var len3 = arg2;
-    var result3 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr3, len3));
+    var len3 = arg2 >>> 0;
+    
+    if (ptr3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - ptr3) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result3 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr3, len3));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.unlink-file-at"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'unlinkFileAt',
@@ -14679,14 +17346,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -14706,21 +17372,23 @@ let gen= (function* _initGenerator () {
     }
     
     
-    const started = await task.enter({ isHost: hostProvided });
+    const started = task.enterHost();
     if (!started) {
       _debugLog('[Instruction::CallInterface] failed to enter task', {
         taskID: task.id(),
         subtaskID: task.getParentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
     }
     
     let ret;
     
     try {
-      const hostRet4 = await  _withGlobalCurrentTaskMetaAsync({
+      const hostRet4 = yield  _withGlobalCurrentThreadMetaAsync({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => {
           const hostRet = rsc0.unlinkFileAt(result3);
           subtask?.setHostPendingResult(hostRet);
@@ -14736,6 +17404,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -14760,151 +17429,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -14933,14 +17602,14 @@ let gen= (function* _initGenerator () {
     });
     task.resolve([ret]);
     task.exit();
-  }
-  _trampoline71.fnName = 'wasi:filesystem/types@0.2.12#unlinkFileAt';
-  _trampoline71.manuallyAsync = true;
+  });
+  _trampoline73.fnName = 'wasi:filesystem/types@0.2.12#unlinkFileAt';
+  _trampoline73.manuallyAsync = true;
   
-  const _trampoline72 = function(arg0, arg1) {
+  const _trampoline74 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -14954,10 +17623,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'metadataHash',
@@ -14965,14 +17635,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -14995,9 +17664,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.metadataHash()),
       })
       ;
@@ -15009,6 +17679,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -15036,151 +17707,151 @@ let gen= (function* _initGenerator () {
         var val5 = e;
         let enum5;
         switch (val5) {
-          case 'access': {
+          case "access": {
             enum5 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum5 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum5 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum5 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum5 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum5 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum5 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum5 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum5 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum5 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum5 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum5 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum5 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum5 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum5 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum5 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum5 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum5 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum5 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum5 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum5 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum5 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum5 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum5 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum5 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum5 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum5 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum5 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum5 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum5 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum5 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum5 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum5 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum5 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum5 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum5 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum5 = 36;
             break;
           }
@@ -15210,12 +17881,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline72.fnName = 'wasi:filesystem/types@0.2.12#metadataHash';
+  _trampoline74.fnName = 'wasi:filesystem/types@0.2.12#metadataHash';
   
-  const _trampoline73 = function(arg0, arg1, arg2, arg3, arg4) {
+  const _trampoline75 = function(arg0, arg1, arg2, arg3, arg4) {
     var handle1 = arg0;
     
-    var rep2 = handleTable14[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable14[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable14.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(Descriptor.prototype);
@@ -15231,17 +17902,23 @@ let gen= (function* _initGenerator () {
       symlinkFollow: Boolean(arg1 & 1),
     };
     var ptr4 = (arg2 >>> 0) >>> 0;
-    var len4 = arg3;
-    var result4 = TEXT_DECODER_UTF8.decode(new Uint8Array(memory0.buffer, ptr4, len4));
+    var len4 = arg3 >>> 0;
+    
+    if (ptr4 > memory0.buffer.byteLength || len4 > Math.floor((memory0.buffer.byteLength - ptr4) / 1)) {
+      throw new WebAssemblyRuntimeError('string pointer/length out of bounds of memory');
+    }
+    
+    var result4 = _decodeUtf8(TEXT_DECODER_UTF8, new Uint8Array(memory0.buffer, ptr4, len4));
     _debugLog('[iface="wasi:filesystem/types@0.2.12", function="[method]descriptor.metadata-hash-at"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'metadataHashAt',
@@ -15249,14 +17926,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -15279,9 +17955,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet5 = _withGlobalCurrentTaskMeta({
+      const hostRet5 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.metadataHashAt(flags3, result4)),
       })
       ;
@@ -15293,6 +17970,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -15320,151 +17998,151 @@ let gen= (function* _initGenerator () {
         var val7 = e;
         let enum7;
         switch (val7) {
-          case 'access': {
+          case "access": {
             enum7 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum7 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum7 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum7 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum7 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum7 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum7 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum7 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum7 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum7 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum7 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum7 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum7 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum7 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum7 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum7 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum7 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum7 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum7 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum7 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum7 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum7 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum7 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum7 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum7 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum7 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum7 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum7 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum7 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum7 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum7 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum7 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum7 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum7 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum7 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum7 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum7 = 36;
             break;
           }
@@ -15494,12 +18172,12 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline73.fnName = 'wasi:filesystem/types@0.2.12#metadataHashAt';
+  _trampoline75.fnName = 'wasi:filesystem/types@0.2.12#metadataHashAt';
   
-  const _trampoline74 = function(arg0, arg1) {
+  const _trampoline76 = function(arg0, arg1) {
     var handle1 = arg0;
     
-    var rep2 = handleTable15[(handle1 << 1) + 1] & ~T_FLAG;
+    var rep2 = handleTable15[(handle1 << 1) + 1] % T_OWN;
     var rsc0 = captureTable15.get(rep2);
     if (!rsc0) {
       rsc0 = Object.create(DirectoryEntryStream.prototype);
@@ -15513,10 +18191,11 @@ let gen= (function* _initGenerator () {
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'readDirectoryEntry',
@@ -15524,14 +18203,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'result-catch-handler',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -15554,9 +18232,10 @@ let gen= (function* _initGenerator () {
     let ret;
     
     try {
-      const hostRet3 = _withGlobalCurrentTaskMeta({
+      const hostRet3 = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => rsc0.readDirectoryEntry()),
       })
       ;
@@ -15568,6 +18247,7 @@ let gen= (function* _initGenerator () {
       ret = { tag: 'err', val: getErrorPayload(e) };
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     for (const entry of curResourceBorrows) {
       const rsc = entry.rsc ?? entry;
       if (entry.drop) {
@@ -15593,35 +18273,35 @@ let gen= (function* _initGenerator () {
           var val5 = v4_0;
           let enum5;
           switch (val5) {
-            case 'unknown': {
+            case "unknown": {
               enum5 = 0;
               break;
             }
-            case 'block-device': {
+            case "block-device": {
               enum5 = 1;
               break;
             }
-            case 'character-device': {
+            case "character-device": {
               enum5 = 2;
               break;
             }
-            case 'directory': {
+            case "directory": {
               enum5 = 3;
               break;
             }
-            case 'fifo': {
+            case "fifo": {
               enum5 = 4;
               break;
             }
-            case 'symbolic-link': {
+            case "symbolic-link": {
               enum5 = 5;
               break;
             }
-            case 'regular-file': {
+            case "regular-file": {
               enum5 = 6;
               break;
             }
-            case 'socket': {
+            case "socket": {
               enum5 = 7;
               break;
             }
@@ -15635,7 +18315,31 @@ let gen= (function* _initGenerator () {
           }
           dataView(memory0).setInt8(((arg1 >>> 0)) + 8, enum5, true);
           
-          var encodeRes = _utf8AllocateAndEncode(v4_1, realloc0, memory0);
+          var encodeRes = _utf8AllocateAndEncode(v4_1, ((...args) => {
+            const state = getOrCreateAsyncState(0);
+            const previousMayLeave = state.mayLeave;
+            const meta = _getGlobalCurrentThreadMeta(0);
+            const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+            const previousStorage = thread?.storage;
+            if (thread) { thread.storage = [0, 0]; }
+            state.mayLeave = false;
+            const restore = () => {
+              state.mayLeave = previousMayLeave;
+              if (thread) { thread.storage = previousStorage; }
+            };
+            let result;
+            try {
+              result = realloc0(...args);
+            } catch (err) {
+              restore();
+              throw err;
+            }
+            if (result && typeof result.then === 'function') {
+              return Promise.resolve(result).finally(restore);
+            }
+            restore();
+            return result;
+          }), memory0);
           var ptr6= encodeRes.ptr;
           var len6 = encodeRes.len;
           
@@ -15651,151 +18355,151 @@ let gen= (function* _initGenerator () {
         var val8 = e;
         let enum8;
         switch (val8) {
-          case 'access': {
+          case "access": {
             enum8 = 0;
             break;
           }
-          case 'would-block': {
+          case "would-block": {
             enum8 = 1;
             break;
           }
-          case 'already': {
+          case "already": {
             enum8 = 2;
             break;
           }
-          case 'bad-descriptor': {
+          case "bad-descriptor": {
             enum8 = 3;
             break;
           }
-          case 'busy': {
+          case "busy": {
             enum8 = 4;
             break;
           }
-          case 'deadlock': {
+          case "deadlock": {
             enum8 = 5;
             break;
           }
-          case 'quota': {
+          case "quota": {
             enum8 = 6;
             break;
           }
-          case 'exist': {
+          case "exist": {
             enum8 = 7;
             break;
           }
-          case 'file-too-large': {
+          case "file-too-large": {
             enum8 = 8;
             break;
           }
-          case 'illegal-byte-sequence': {
+          case "illegal-byte-sequence": {
             enum8 = 9;
             break;
           }
-          case 'in-progress': {
+          case "in-progress": {
             enum8 = 10;
             break;
           }
-          case 'interrupted': {
+          case "interrupted": {
             enum8 = 11;
             break;
           }
-          case 'invalid': {
+          case "invalid": {
             enum8 = 12;
             break;
           }
-          case 'io': {
+          case "io": {
             enum8 = 13;
             break;
           }
-          case 'is-directory': {
+          case "is-directory": {
             enum8 = 14;
             break;
           }
-          case 'loop': {
+          case "loop": {
             enum8 = 15;
             break;
           }
-          case 'too-many-links': {
+          case "too-many-links": {
             enum8 = 16;
             break;
           }
-          case 'message-size': {
+          case "message-size": {
             enum8 = 17;
             break;
           }
-          case 'name-too-long': {
+          case "name-too-long": {
             enum8 = 18;
             break;
           }
-          case 'no-device': {
+          case "no-device": {
             enum8 = 19;
             break;
           }
-          case 'no-entry': {
+          case "no-entry": {
             enum8 = 20;
             break;
           }
-          case 'no-lock': {
+          case "no-lock": {
             enum8 = 21;
             break;
           }
-          case 'insufficient-memory': {
+          case "insufficient-memory": {
             enum8 = 22;
             break;
           }
-          case 'insufficient-space': {
+          case "insufficient-space": {
             enum8 = 23;
             break;
           }
-          case 'not-directory': {
+          case "not-directory": {
             enum8 = 24;
             break;
           }
-          case 'not-empty': {
+          case "not-empty": {
             enum8 = 25;
             break;
           }
-          case 'not-recoverable': {
+          case "not-recoverable": {
             enum8 = 26;
             break;
           }
-          case 'unsupported': {
+          case "unsupported": {
             enum8 = 27;
             break;
           }
-          case 'no-tty': {
+          case "no-tty": {
             enum8 = 28;
             break;
           }
-          case 'no-such-device': {
+          case "no-such-device": {
             enum8 = 29;
             break;
           }
-          case 'overflow': {
+          case "overflow": {
             enum8 = 30;
             break;
           }
-          case 'not-permitted': {
+          case "not-permitted": {
             enum8 = 31;
             break;
           }
-          case 'pipe': {
+          case "pipe": {
             enum8 = 32;
             break;
           }
-          case 'read-only': {
+          case "read-only": {
             enum8 = 33;
             break;
           }
-          case 'invalid-seek': {
+          case "invalid-seek": {
             enum8 = 34;
             break;
           }
-          case 'text-file-busy': {
+          case "text-file-busy": {
             enum8 = 35;
             break;
           }
-          case 'cross-device': {
+          case "cross-device": {
             enum8 = 36;
             break;
           }
@@ -15825,111 +18529,7 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline74.fnName = 'wasi:filesystem/types@0.2.12#readDirectoryEntry';
-  
-  const _trampoline75 = function(arg0) {
-    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-environment"] [Instruction::CallInterface] (sync, @ enter)');
-    const hostProvided = true;
-    
-    let parentTask;
-    let task;
-    let subtask;
-    
-    const createTask = () => {
-      const results = createNewCurrentTask({
-        componentIdx: -1,
-        isAsync: false,
-        entryFnName: 'getEnvironment',
-        getCallbackFn: () => null,
-        callbackFnName: null,
-        errHandling: 'none',
-        callingWasmExport: false,
-      });
-      task = results[0];
-    };
-    
-    taskCreation: {
-      parentTask = getCurrentTask(
-      0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
-      )?.task;
-      
-      if (!parentTask) {
-        createTask();
-        break taskCreation;
-      }
-      
-      createTask();
-      
-      if (hostProvided) {
-        subtask = parentTask.getLatestSubtask();
-        if (!subtask) {
-          throw new Error(`Missing subtask (in parent task [${parentTask.id()}]) for host import, has the import been lowered? (ensure asyncImports are set properly)`);
-        }
-        task.setParentSubtask(subtask);
-      }
-    }
-    
-    const started = task.enterSync();
-    let ret;
-    
-    
-    try {
-      ret = _withGlobalCurrentTaskMeta({
-        componentIdx: task.componentIdx(),
-        taskID: task.id(),
-        fn: () => _trackHostOperation(() => getEnvironment()),
-      })
-      ;
-    } catch (err) {
-      
-      _debugLog('[Instruction::CallInterface] error during sync call', {
-        taskID: task.id(),
-        subtaskID: task.getParentSubtask()?.id(),
-        err,
-      });
-      getOrCreateAsyncState(0).markTrapped(err);
-      task.setErrored(err);
-      task.reject(err);
-      task.exit();
-      throw err;
-      
-    }
-    
-    var vec3 = ret;
-    var len3 = vec3.length;
-    var result3 = realloc0(0, 0, 4, len3 * 16);
-    if (result3 < 0 || len3 < 0 || len3 > 16777215 || result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 16)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
-    for (let i = 0; i < vec3.length; i++) {
-      const e = vec3[i];
-      const base = result3 + i * 16;var [tuple0_0, tuple0_1] = e;
-      
-      var encodeRes = _utf8AllocateAndEncode(tuple0_0, realloc0, memory0);
-      var ptr1= encodeRes.ptr;
-      var len1 = encodeRes.len;
-      
-      dataView(memory0).setUint32((base) + 4, len1, true);
-      dataView(memory0).setUint32((base) + 0, ptr1, true);
-      
-      var encodeRes = _utf8AllocateAndEncode(tuple0_1, realloc0, memory0);
-      var ptr2= encodeRes.ptr;
-      var len2 = encodeRes.len;
-      
-      dataView(memory0).setUint32((base) + 12, len2, true);
-      dataView(memory0).setUint32((base) + 8, ptr2, true);
-    }
-    dataView(memory0).setUint32(((arg0 >>> 0)) + 4, len3, true);
-    dataView(memory0).setUint32(((arg0 >>> 0)) + 0, result3, true);
-    _debugLog('[iface="wasi:cli/environment@0.2.12", function="get-environment"][Instruction::Return]', {
-      funcName: 'get-environment',
-      paramCount: 0,
-      async: false,
-      postReturn: false
-    });
-    task.resolve([ret]);
-    task.exit();
-  }
-  _trampoline75.fnName = 'wasi:cli/environment@0.2.12#getEnvironment';
+  _trampoline76.fnName = 'wasi:filesystem/types@0.2.12#readDirectoryEntry';
   
   const handleTable12 = [T_FLAG, 0];
   handleTable12._createdReps = new Set();
@@ -15939,18 +18539,20 @@ let gen= (function* _initGenerator () {
   const captureTable12= new Map();
   let captureCnt12= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable12, captures: captureTable12 });
   HANDLE_TABLES[12] = handleTable12;
   
-  const _trampoline76 = function(arg0) {
+  const _trampoline77 = function(arg0) {
     _debugLog('[iface="wasi:cli/terminal-stdin@0.2.12", function="get-terminal-stdin"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getTerminalStdin',
@@ -15958,14 +18560,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -15989,9 +18590,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getTerminalStdin()),
       })
       ;
@@ -16010,6 +18612,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
       dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
@@ -16020,9 +18623,11 @@ let gen= (function* _initGenerator () {
       if (!(e instanceof TerminalInput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalInput\" resource.');
       }
+      
+      
       var handle0 = e[symbolRscHandle];
       if (!handle0) {
-        const rep = e[symbolRscRep] || ++captureCnt12;
+        const rep = (e[symbolRscRep] ?? ++captureCnt12) >>> 0;
         captureTable12.set(rep, e);
         handle0 = rscTableCreateOwn(handleTable12, rep);
       }
@@ -16038,7 +18643,7 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline76.fnName = 'wasi:cli/terminal-stdin@0.2.12#getTerminalStdin';
+  _trampoline77.fnName = 'wasi:cli/terminal-stdin@0.2.12#getTerminalStdin';
   
   const handleTable13 = [T_FLAG, 0];
   handleTable13._createdReps = new Set();
@@ -16048,18 +18653,20 @@ let gen= (function* _initGenerator () {
   const captureTable13= new Map();
   let captureCnt13= 0;
   
+  STORE_TRAP.resourceTables.push({ handles: handleTable13, captures: captureTable13 });
   HANDLE_TABLES[13] = handleTable13;
   
-  const _trampoline77 = function(arg0) {
+  const _trampoline78 = function(arg0) {
     _debugLog('[iface="wasi:cli/terminal-stdout@0.2.12", function="get-terminal-stdout"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getTerminalStdout',
@@ -16067,14 +18674,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -16098,9 +18704,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getTerminalStdout()),
       })
       ;
@@ -16119,6 +18726,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
       dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
@@ -16129,9 +18737,11 @@ let gen= (function* _initGenerator () {
       if (!(e instanceof TerminalOutput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
       }
+      
+      
       var handle0 = e[symbolRscHandle];
       if (!handle0) {
-        const rep = e[symbolRscRep] || ++captureCnt13;
+        const rep = (e[symbolRscRep] ?? ++captureCnt13) >>> 0;
         captureTable13.set(rep, e);
         handle0 = rscTableCreateOwn(handleTable13, rep);
       }
@@ -16147,18 +18757,19 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline77.fnName = 'wasi:cli/terminal-stdout@0.2.12#getTerminalStdout';
+  _trampoline78.fnName = 'wasi:cli/terminal-stdout@0.2.12#getTerminalStdout';
   
-  const _trampoline78 = function(arg0) {
+  const _trampoline79 = function(arg0) {
     _debugLog('[iface="wasi:cli/terminal-stderr@0.2.12", function="get-terminal-stderr"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getTerminalStderr',
@@ -16166,14 +18777,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -16197,9 +18807,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getTerminalStderr()),
       })
       ;
@@ -16218,6 +18829,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var variant1 = ret;
     if (variant1 === null || variant1=== undefined) {
       dataView(memory0).setInt8(((arg0 >>> 0)) + 0, 0, true);
@@ -16228,9 +18840,11 @@ let gen= (function* _initGenerator () {
       if (!(e instanceof TerminalOutput)) {
         throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
       }
+      
+      
       var handle0 = e[symbolRscHandle];
       if (!handle0) {
-        const rep = e[symbolRscRep] || ++captureCnt13;
+        const rep = (e[symbolRscRep] ?? ++captureCnt13) >>> 0;
         captureTable13.set(rep, e);
         handle0 = rscTableCreateOwn(handleTable13, rep);
       }
@@ -16246,18 +18860,19 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline78.fnName = 'wasi:cli/terminal-stderr@0.2.12#getTerminalStderr';
+  _trampoline79.fnName = 'wasi:cli/terminal-stderr@0.2.12#getTerminalStderr';
   
-  const _trampoline79 = function(arg0) {
+  const _trampoline80 = function(arg0) {
     _debugLog('[iface="wasi:clocks/wall-clock@0.2.12", function="now"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'now$1',
@@ -16265,14 +18880,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -16296,9 +18910,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => now$1()),
       })
       ;
@@ -16317,6 +18932,7 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var {seconds: v0_0, nanoseconds: v0_1 } = ret;
     dataView(memory0).setBigInt64(((arg0 >>> 0)) + 0, toUint64(v0_0), true);
     dataView(memory0).setInt32(((arg0 >>> 0)) + 8, toUint32(v0_1), true);
@@ -16329,18 +18945,19 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline79.fnName = 'wasi:clocks/wall-clock@0.2.12#now$1';
+  _trampoline80.fnName = 'wasi:clocks/wall-clock@0.2.12#now$1';
   
-  const _trampoline80 = function(arg0) {
+  const _trampoline81 = function(arg0) {
     _debugLog('[iface="wasi:filesystem/preopens@0.2.12", function="get-directories"] [Instruction::CallInterface] (sync, @ enter)');
     const hostProvided = true;
     
     let parentTask;
     let task;
+    let threadID;
     let subtask;
     
     const createTask = () => {
-      const results = createNewCurrentTask({
+      ({ task, threadID } = createNewCurrentImplicitThread({
         componentIdx: -1,
         isAsync: false,
         entryFnName: 'getDirectories',
@@ -16348,14 +18965,13 @@ let gen= (function* _initGenerator () {
         callbackFnName: null,
         errHandling: 'none',
         callingWasmExport: false,
-      });
-      task = results[0];
+      }));
     };
     
     taskCreation: {
       parentTask = getCurrentTask(
       0,
-      _getGlobalCurrentTaskMeta(0)?.taskID,
+      _getGlobalCurrentThreadMeta(0)?.taskID,
       )?.task;
       
       if (!parentTask) {
@@ -16379,9 +18995,10 @@ let gen= (function* _initGenerator () {
     
     
     try {
-      ret = _withGlobalCurrentTaskMeta({
+      ret = _withGlobalCurrentThreadMeta({
         componentIdx: task.componentIdx(),
         taskID: task.id(),
+        threadID,
         fn: () => _trackHostOperation(() => getDirectories()),
       })
       ;
@@ -16400,9 +19017,41 @@ let gen= (function* _initGenerator () {
       
     }
     
+    getOrCreateAsyncState(0).throwIfInterrupted();
     var vec3 = ret;
     var len3 = vec3.length;
-    var result3 = realloc0(0, 0, 4, len3 * 12);
+    var result3 = ((...args) => {
+      const state = getOrCreateAsyncState(0);
+      const previousMayLeave = state.mayLeave;
+      const meta = _getGlobalCurrentThreadMeta(0);
+      const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+      const previousStorage = thread?.storage;
+      if (thread) { thread.storage = [0, 0]; }
+      state.mayLeave = false;
+      const restore = () => {
+        state.mayLeave = previousMayLeave;
+        if (thread) { thread.storage = previousStorage; }
+      };
+      let result;
+      try {
+        result = realloc0(...args);
+      } catch (err) {
+        restore();
+        throw err;
+      }
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(restore);
+      }
+      restore();
+      return result;
+    })(0, 0, 4, len3 * 12);
+    
+    result3>>>= 0;
+    if (result3 % 4 !== 0) { throw new WebAssemblyRuntimeError('realloc return: result not aligned'); }
+    if (result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 12)) {
+      throw new WebAssemblyRuntimeError('realloc return: beyond end of memory');
+    }
+    
     if (result3 < 0 || len3 < 0 || len3 > 22369621 || result3 > memory0.buffer.byteLength || len3 > Math.floor((memory0.buffer.byteLength - result3) / 12)) throw new WebAssemblyRuntimeError('wasm trap: out of bounds memory access');
     for (let i = 0; i < vec3.length; i++) {
       const e = vec3[i];
@@ -16411,16 +19060,42 @@ let gen= (function* _initGenerator () {
       if (!(tuple0_0 instanceof Descriptor)) {
         throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
       }
+      
+      
       var handle1 = tuple0_0[symbolRscHandle];
       if (!handle1) {
-        const rep = tuple0_0[symbolRscRep] || ++captureCnt14;
+        const rep = (tuple0_0[symbolRscRep] ?? ++captureCnt14) >>> 0;
         captureTable14.set(rep, tuple0_0);
         handle1 = rscTableCreateOwn(handleTable14, rep);
       }
       
       dataView(memory0).setInt32((base) + 0, handle1, true);
       
-      var encodeRes = _utf8AllocateAndEncode(tuple0_1, realloc0, memory0);
+      var encodeRes = _utf8AllocateAndEncode(tuple0_1, ((...args) => {
+        const state = getOrCreateAsyncState(0);
+        const previousMayLeave = state.mayLeave;
+        const meta = _getGlobalCurrentThreadMeta(0);
+        const thread = meta && getCurrentThread(meta.componentIdx, meta.threadID, meta.taskID)?.thread;
+        const previousStorage = thread?.storage;
+        if (thread) { thread.storage = [0, 0]; }
+        state.mayLeave = false;
+        const restore = () => {
+          state.mayLeave = previousMayLeave;
+          if (thread) { thread.storage = previousStorage; }
+        };
+        let result;
+        try {
+          result = realloc0(...args);
+        } catch (err) {
+          restore();
+          throw err;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(restore);
+        }
+        restore();
+        return result;
+      }), memory0);
       var ptr2= encodeRes.ptr;
       var len2 = encodeRes.len;
       
@@ -16438,7 +19113,7 @@ let gen= (function* _initGenerator () {
     task.resolve([ret]);
     task.exit();
   }
-  _trampoline80.fnName = 'wasi:filesystem/preopens@0.2.12#getDirectories';
+  _trampoline81.fnName = 'wasi:filesystem/preopens@0.2.12#getDirectories';
   let exports2;
   let run0212Run;
   
@@ -16447,7 +19122,7 @@ let gen= (function* _initGenerator () {
     const hostProvided = false;
     getOrCreateAsyncState(0).throwIfTrapped();
     
-    const [task, _wasm_call_currentTaskID] = createNewCurrentTask({
+    const { task, threadID } = createNewCurrentImplicitThread({
       componentIdx: 0,
       isAsync: false,
       isManualAsync: true,
@@ -16459,6 +19134,8 @@ let gen= (function* _initGenerator () {
       callingWasmExport: true,
     });
     task.setCalleeIsAsync(false);
+    task.setFuncTypeIsAsync(false);
+    task.setReturnResultTypeIdx(29);
     
     
     const started = await task.enter();
@@ -16467,7 +19144,18 @@ let gen= (function* _initGenerator () {
         taskID: task.id(),
         subtaskID: task.currentSubtask()?.id(),
       });
-      throw new Error("failed to enter task");
+      // (the deadlock detector records why entry was given up on)
+      throw task.isErrored() ?? new Error("failed to enter task");
+    }
+    // The store may have trapped while this task waited to enter: nothing
+    // runs after a trap (Canonical ABI), so this call fails too.
+    try {
+      getOrCreateAsyncState(0).throwIfInterrupted();
+    } catch (err) {
+      task.setErrored(err);
+      task.reject(err);
+      task.exit({ skipExclusiveLockCheck: true });
+      throw err;
     }
     
     CURRENT_TASK_MAY_BLOCK.value = task.mayBlock() ? 1 : 0;
@@ -16478,8 +19166,9 @@ let gen= (function* _initGenerator () {
     }
     
     
-    return await _withGlobalCurrentTaskMetaAsync({
+    return await _withGlobalCurrentThreadMetaAsync({
       taskID: task.id(),
+      threadID,
       componentIdx: task.componentIdx(),
       fn: async () => {
         try {
@@ -16494,8 +19183,9 @@ let gen= (function* _initGenerator () {
           let ret;
           
           try {
-            ret =  await _withGlobalCurrentTaskMeta({
+            ret =  await _withGlobalCurrentThreadMeta({
               taskID: task.id(),
+              threadID,
               componentIdx: task.componentIdx(),
               fn: () => run0212Run(),
             });
@@ -16512,6 +19202,7 @@ let gen= (function* _initGenerator () {
             return task.completionPromise();
             
           }
+          task.endFirstSlice();
           
           let variant0;
           switch (ret) {
@@ -16540,7 +19231,7 @@ let gen= (function* _initGenerator () {
             postReturn: false
           });
           const retCopy = variant0;
-          task.resolve([retCopy.val]);
+          task.resolve([retCopy]);
           task.exit();
           
           if (typeof retCopy === 'object' && retCopy.tag === 'err') {
@@ -16567,8 +19258,9 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable2.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable2.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (OutputStream[symbolCabiDispose]) {
         OutputStream[symbolCabiDispose](handleEntry.rep);
       }
@@ -16580,16 +19272,15 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable1.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable1.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (Error$1[symbolCabiDispose]) {
         Error$1[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline2 = _trampoline2.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline2 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 2,
     componentIdx: 0,
     isAsync: false,
@@ -16600,7 +19291,7 @@ let gen= (function* _initGenerator () {
       classNameFn: () => IncomingBody,
       createResourceFn: 
       (handle) => {
-        const rep = handleTable5[(handle << 1) + 1] & ~T_FLAG;
+        const rep = handleTable5[(handle << 1) + 1] % T_OWN;
         let resourceObj = captureTable5.get(rep);
         if (!resourceObj) {
           resourceObj = Object.create(IncomingBody.prototype);
@@ -16625,7 +19316,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt6;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt6) >>> 0;
           captureTable6.set(rep, obj);
           handle = rscTableCreateOwn(handleTable6, rep);
         }
@@ -16643,81 +19334,22 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline2,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 2,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline2.manuallyAsync,
-    paramLiftFns: [_liftFlatOwn({
-      componentIdx: 0,
-      tableIdx: 5,
-      classNameFn: () => IncomingBody,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable5[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable5.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(IncomingBody.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable5.delete(rep);
-        }
-        rscTableRemove(handleTable5, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    ],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 6,
-      lowerFn: 
-      function lowerImportedOwnedHost_FutureTrailers(obj) {
-        if (!(obj instanceof FutureTrailers)) {
-          throw new TypeError('Resource error: Not a valid \"FutureTrailers\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt6;
-          captureTable6.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable6, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline2,
-  },
-  );
+  });
   function trampoline3(handle) {
     const handleEntry = rscTableRemove(handleTable5, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable5.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable5.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (IncomingBody[symbolCabiDispose]) {
         IncomingBody[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline4 = _trampoline4.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline4 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 4,
     componentIdx: 0,
     isAsync: false,
@@ -16733,7 +19365,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
           captureTable0.set(rep, obj);
           handle = rscTableCreateOwn(handleTable0, rep);
         }
@@ -16751,53 +19383,16 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline4,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 4,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline4.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 6)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Pollable(obj) {
-        if (!(obj instanceof Pollable)) {
-          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
-          captureTable0.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable0, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline4,
-  },
-  );
+  });
   function trampoline5(handle) {
     const handleEntry = rscTableRemove(handleTable7, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable7.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable7.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (Fields[symbolCabiDispose]) {
         Fields[symbolCabiDispose](handleEntry.rep);
       }
@@ -16809,8 +19404,9 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable4.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable4.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (OutgoingBody[symbolCabiDispose]) {
         OutgoingBody[symbolCabiDispose](handleEntry.rep);
       }
@@ -16822,16 +19418,15 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable6.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable6.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (FutureTrailers[symbolCabiDispose]) {
         FutureTrailers[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline8 = _trampoline8.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline8 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 8,
     componentIdx: 0,
     isAsync: false,
@@ -16847,7 +19442,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
           captureTable0.set(rep, obj);
           handle = rscTableCreateOwn(handleTable0, rep);
         }
@@ -16865,61 +19460,22 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline8,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 8,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline8.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 8)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Pollable(obj) {
-        if (!(obj instanceof Pollable)) {
-          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
-          captureTable0.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable0, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline8,
-  },
-  );
+  });
   function trampoline9(handle) {
     const handleEntry = rscTableRemove(handleTable8, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable8.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable8.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (FutureIncomingResponse[symbolCabiDispose]) {
         FutureIncomingResponse[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline10 = _trampoline10.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline10 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 10,
     componentIdx: 0,
     isAsync: false,
@@ -16935,7 +19491,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt7) >>> 0;
           captureTable7.set(rep, obj);
           handle = rscTableCreateOwn(handleTable7, rep);
         }
@@ -16953,48 +19509,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline10,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 10,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline10.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 7,
-      lowerFn: 
-      function lowerImportedOwnedHost_Fields(obj) {
-        if (!(obj instanceof Fields)) {
-          throw new TypeError('Resource error: Not a valid \"Fields\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
-          captureTable7.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable7, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline10,
-  },
-  );
-  let trampoline11 = _trampoline11.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline11 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 11,
     componentIdx: 0,
     isAsync: false,
@@ -17011,36 +19527,16 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline11,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 11,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline11.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
-    resultLowerFns: [_lowerFlatU16],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline11,
-  },
-  );
+  });
   function trampoline12(handle) {
     const handleEntry = rscTableRemove(handleTable9, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable9.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable9.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (IncomingResponse[symbolCabiDispose]) {
         IncomingResponse[symbolCabiDispose](handleEntry.rep);
       }
@@ -17052,16 +19548,15 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable3.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable3.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (InputStream[symbolCabiDispose]) {
         InputStream[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline14 = _trampoline14.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline14 = _trampoline14.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 14,
     componentIdx: 0,
     isAsync: false,
@@ -17077,7 +19572,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
           captureTable0.set(rep, obj);
           handle = rscTableCreateOwn(handleTable0, rep);
         }
@@ -17095,10 +19590,7 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline14,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 14,
     componentIdx: 0,
     isAsync: false,
@@ -17114,7 +19606,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
           captureTable0.set(rep, obj);
           handle = rscTableCreateOwn(handleTable0, rep);
         }
@@ -17132,11 +19624,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline14,
-  },
-  );
-  let trampoline15 = _trampoline15.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline15 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 15,
     componentIdx: 0,
     isAsync: false,
@@ -17153,31 +19642,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline15,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 15,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline15.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatU64],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline15,
-  },
-  );
-  let trampoline16 = _trampoline16.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline16 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 16,
     componentIdx: 0,
     isAsync: false,
@@ -17188,7 +19654,7 @@ let gen= (function* _initGenerator () {
       classNameFn: () => Fields,
       createResourceFn: 
       (handle) => {
-        const rep = handleTable7[(handle << 1) + 1] & ~T_FLAG;
+        const rep = handleTable7[(handle << 1) + 1] % T_OWN;
         let resourceObj = captureTable7.get(rep);
         if (!resourceObj) {
           resourceObj = Object.create(Fields.prototype);
@@ -17213,7 +19679,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt10;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt10) >>> 0;
           captureTable10.set(rep, obj);
           handle = rscTableCreateOwn(handleTable10, rep);
         }
@@ -17231,81 +19697,22 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline16,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 16,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline16.manuallyAsync,
-    paramLiftFns: [_liftFlatOwn({
-      componentIdx: 0,
-      tableIdx: 7,
-      classNameFn: () => Fields,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable7[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable7.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(Fields.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable7.delete(rep);
-        }
-        rscTableRemove(handleTable7, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    ],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 10,
-      lowerFn: 
-      function lowerImportedOwnedHost_OutgoingRequest(obj) {
-        if (!(obj instanceof OutgoingRequest)) {
-          throw new TypeError('Resource error: Not a valid \"OutgoingRequest\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt10;
-          captureTable10.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable10, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline16,
-  },
-  );
+  });
   function trampoline17(handle) {
     const handleEntry = rscTableRemove(handleTable10, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable10.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable10.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (OutgoingRequest[symbolCabiDispose]) {
         OutgoingRequest[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline18 = _trampoline18.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline18 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 18,
     componentIdx: 0,
     isAsync: false,
@@ -17321,7 +19728,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt11;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt11) >>> 0;
           captureTable11.set(rep, obj);
           handle = rscTableCreateOwn(handleTable11, rep);
         }
@@ -17339,48 +19746,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline18,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 18,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline18.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 11,
-      lowerFn: 
-      function lowerImportedOwnedHost_RequestOptions(obj) {
-        if (!(obj instanceof RequestOptions)) {
-          throw new TypeError('Resource error: Not a valid \"RequestOptions\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt11;
-          captureTable11.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable11, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline18,
-  },
-  );
-  let trampoline19 = _trampoline19.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline19 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 19,
     componentIdx: 0,
     isAsync: false,
@@ -17421,55 +19788,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline19,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 19,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline19.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 11),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatU64, 8, 8, 1, ['i64'] ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 2,
-      variantPayloadFlatTypes: ['i64'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline19,
-  },
-  );
-  let trampoline20 = _trampoline20.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline20 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 20,
     componentIdx: 0,
     isAsync: false,
@@ -17510,55 +19830,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline20,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 20,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline20.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 11),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatU64, 8, 8, 1, ['i64'] ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 2,
-      variantPayloadFlatTypes: ['i64'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline20,
-  },
-  );
-  let trampoline21 = _trampoline21.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline21 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 21,
     componentIdx: 0,
     isAsync: false,
@@ -17599,68 +19872,22 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline21,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 21,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline21.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 11),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatU64, 8, 8, 1, ['i64'] ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 2,
-      variantPayloadFlatTypes: ['i64'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline21,
-  },
-  );
+  });
   function trampoline22(handle) {
     const handleEntry = rscTableRemove(handleTable11, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable11.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable11.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (RequestOptions[symbolCabiDispose]) {
         RequestOptions[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline23 = _trampoline23.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline23 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 23,
     componentIdx: 0,
     isAsync: false,
@@ -17676,7 +19903,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
           captureTable0.set(rep, obj);
           handle = rscTableCreateOwn(handleTable0, rep);
         }
@@ -17694,140 +19921,26 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline23,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 23,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline23.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Pollable(obj) {
-        if (!(obj instanceof Pollable)) {
-          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
-          captureTable0.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable0, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline23,
-  },
-  );
-  let trampoline24 = _trampoline24.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 24,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline24.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Pollable(obj) {
-        if (!(obj instanceof Pollable)) {
-          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
-          captureTable0.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable0, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline24,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 24,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline24.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 0,
-      lowerFn: 
-      function lowerImportedOwnedHost_Pollable(obj) {
-        if (!(obj instanceof Pollable)) {
-          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt0;
-          captureTable0.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable0, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline24,
-  },
-  );
-  function trampoline25(handle) {
+  });
+  function trampoline24(handle) {
     const handleEntry = rscTableRemove(handleTable0, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable0.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable0.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (Pollable[symbolCabiDispose]) {
         Pollable[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline26 = _trampoline26.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 26,
+  let trampoline25 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 25,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline26.manuallyAsync,
+    isManualAsync: _trampoline25.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
     resultLowerFns: [_lowerFlatBool],
     hasResultPointer: false,
@@ -17839,17 +19952,32 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => null,
     getReallocFn: undefined,
-    importFn: _trampoline26,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
+    importFn: _trampoline25,
+  });
+  let trampoline26 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 26,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline26.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
-    resultLowerFns: [_lowerFlatBool],
+    paramLiftFns: [_liftFlatBorrow.bind(null, 3)],
+    resultLowerFns: [_lowerFlatOwn({
+      componentIdx: 0,
+      tableIdx: 0,
+      lowerFn: 
+      function lowerImportedOwnedHost_Pollable(obj) {
+        if (!(obj instanceof Pollable)) {
+          throw new TypeError('Resource error: Not a valid \"Pollable\" resource.');
+        }
+        let handle = obj[symbolRscHandle];
+        if (!handle) {
+          const rep = (obj[symbolRscRep] ?? ++captureCnt0) >>> 0;
+          captureTable0.set(rep, obj);
+          handle = rscTableCreateOwn(handleTable0, rep);
+        }
+        return handle;
+      }
+      ,
+    })],
     hasResultPointer: false,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -17860,11 +19988,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline26,
-  },
-  );
-  let trampoline27 = _trampoline27.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline27 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 27,
     componentIdx: 0,
     isAsync: false,
@@ -17880,7 +20005,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt7) >>> 0;
           captureTable7.set(rep, obj);
           handle = rscTableCreateOwn(handleTable7, rep);
         }
@@ -17898,53 +20023,16 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline27,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 27,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline27.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 7,
-      lowerFn: 
-      function lowerImportedOwnedHost_Fields(obj) {
-        if (!(obj instanceof Fields)) {
-          throw new TypeError('Resource error: Not a valid \"Fields\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt7;
-          captureTable7.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable7, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline27,
-  },
-  );
+  });
   function trampoline28(handle) {
     const handleEntry = rscTableRemove(handleTable12, handle);
     if (handleEntry.own) {
       
       const rsc = captureTable12.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable12.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (TerminalInput[symbolCabiDispose]) {
         TerminalInput[symbolCabiDispose](handleEntry.rep);
       }
@@ -17956,8 +20044,9 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable13.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable13.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (TerminalOutput[symbolCabiDispose]) {
         TerminalOutput[symbolCabiDispose](handleEntry.rep);
       }
@@ -17969,8 +20058,9 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable14.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable14.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (Descriptor[symbolCabiDispose]) {
         Descriptor[symbolCabiDispose](handleEntry.rep);
       }
@@ -17982,16 +20072,15 @@ let gen= (function* _initGenerator () {
       
       const rsc = captureTable15.get(handleEntry.rep);
       if (rsc) {
-        if (rsc[symbolDispose]) rsc[symbolDispose]();
         captureTable15.delete(handleEntry.rep);
+        STORE_TRAP.disposed.add(rsc);
+        if (rsc[symbolDispose]) rsc[symbolDispose]();
       } else if (DirectoryEntryStream[symbolCabiDispose]) {
         DirectoryEntryStream[symbolCabiDispose](handleEntry.rep);
       }
     }
   }
-  let trampoline32 = _trampoline32.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  let trampoline32 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 32,
     componentIdx: 0,
     isAsync: false,
@@ -18017,45 +20106,13 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline32,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 32,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline32.manuallyAsync,
-    paramLiftFns: [
-    _liftFlatResult({
-      caseMetas: [['ok', null, 0, 0, 0, []],['err', null, 0, 0, 0, []],],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-      variantPayloadFlatTypes: [],
-    })
-    ],
-    resultLowerFns: [],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline32,
-  },
-  );
-  let trampoline33 = _trampoline33.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline33 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 33,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline33.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
+    paramLiftFns: [_liftFlatU8],
     resultLowerFns: [],
     hasResultPointer: false,
     funcTypeIsAsync: false,
@@ -18067,35 +20124,47 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline33,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 33,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline33.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
-    resultLowerFns: [],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline33,
-  },
-  );
-  let trampoline34 = _trampoline34.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline34 = _trampoline34.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$1, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 34,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline34.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
+    resultLowerFns: [],
+    hasResultPointer: false,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: null,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => null,
+    getReallocFn: undefined,
+    importFn: _trampoline34,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 34,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline34.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 0)],
+    resultLowerFns: [],
+    hasResultPointer: false,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: null,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => null,
+    getReallocFn: undefined,
+    importFn: _trampoline34,
+  });
+  let trampoline35 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 35,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline35.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
@@ -18107,7 +20176,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt3;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt3) >>> 0;
           captureTable3.set(rep, obj);
           handle = rscTableCreateOwn(handleTable3, rep);
         }
@@ -18124,124 +20193,9 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => null,
     getReallocFn: undefined,
-    importFn: _trampoline34,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 34,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline34.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 3,
-      lowerFn: 
-      function lowerImportedOwnedHost_InputStream(obj) {
-        if (!(obj instanceof InputStream)) {
-          throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt3;
-          captureTable3.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable3, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline34,
-  },
-  );
-  let trampoline35 = _trampoline35.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 35,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline35.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 2,
-      lowerFn: 
-      function lowerImportedOwnedHost_OutputStream(obj) {
-        if (!(obj instanceof OutputStream)) {
-          throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt2;
-          captureTable2.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable2, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
     importFn: _trampoline35,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 35,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline35.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatOwn({
-      componentIdx: 0,
-      tableIdx: 2,
-      lowerFn: 
-      function lowerImportedOwnedHost_OutputStream(obj) {
-        if (!(obj instanceof OutputStream)) {
-          throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-        }
-        let handle = obj[symbolRscHandle];
-        if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt2;
-          captureTable2.set(rep, obj);
-          handle = rscTableCreateOwn(handleTable2, rep);
-        }
-        return handle;
-      }
-      ,
-    })],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: null,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => null,
-    getReallocFn: undefined,
-    importFn: _trampoline35,
-  },
-  );
-  let trampoline36 = _trampoline36.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline36 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 36,
     componentIdx: 0,
     isAsync: false,
@@ -18257,7 +20211,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt2;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
           captureTable2.set(rep, obj);
           handle = rscTableCreateOwn(handleTable2, rep);
         }
@@ -18275,14 +20229,12 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => null,
     getReallocFn: undefined,
     importFn: _trampoline36,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 36,
+  });
+  let trampoline37 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 37,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline36.manuallyAsync,
+    isManualAsync: _trampoline37.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatOwn({
       componentIdx: 0,
@@ -18294,7 +20246,7 @@ let gen= (function* _initGenerator () {
         }
         let handle = obj[symbolRscHandle];
         if (!handle) {
-          const rep = obj[symbolRscRep] || ++captureCnt2;
+          const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
           captureTable2.set(rep, obj);
           handle = rscTableCreateOwn(handleTable2, rep);
         }
@@ -18311,53 +20263,9 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => null,
     getReallocFn: undefined,
-    importFn: _trampoline36,
-  },
-  );
-  let trampoline37 = _trampoline37.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 37,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline37.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline37,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 37,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline37.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline37,
-  },
-  );
-  let trampoline38 = _trampoline38.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline38 = _trampoline38.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$2, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 38,
     componentIdx: 0,
     isAsync: false,
@@ -18417,7 +20325,7 @@ let gen= (function* _initGenerator () {
       })
       , 12, 4 ],], size32: 64, align32: 8 }), 72, 8, 8 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'credentials-not-loaded', null, 0, 0, 0 ],[ 'provider-timed-out', _lowerFlatRecord({ fieldMetas: [['duration', _lowerFlatU64, 8, 8 ],], size32: 8, align32: 8 }), 8, 8, 1 ],[ 'invalid-configuration', null, 0, 0, 0 ],[ 'provider-error', null, 0, 0, 0 ],[ 'unhandled', null, 0, 0, 0 ],],
+        caseMetas: [[ "credentials-not-loaded", null, 0, 0, 0 ],[ "provider-timed-out", _lowerFlatRecord({ fieldMetas: [['duration', _lowerFlatU64, 8, 8 ],], size32: 8, align32: 8 }), 8, 8, 1 ],[ "invalid-configuration", null, 0, 0, 0 ],[ "provider-error", null, 0, 0, 0 ],[ "unhandled", null, 0, 0, 0 ],],
         variantSize32: 16,
         variantAlign32: 8,
         variantPayloadOffset32: 8,
@@ -18440,10 +20348,7 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
     importFn: _trampoline38,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 38,
     componentIdx: 0,
     isAsync: false,
@@ -18503,7 +20408,7 @@ let gen= (function* _initGenerator () {
       })
       , 12, 4 ],], size32: 64, align32: 8 }), 72, 8, 8 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'credentials-not-loaded', null, 0, 0, 0 ],[ 'provider-timed-out', _lowerFlatRecord({ fieldMetas: [['duration', _lowerFlatU64, 8, 8 ],], size32: 8, align32: 8 }), 8, 8, 1 ],[ 'invalid-configuration', null, 0, 0, 0 ],[ 'provider-error', null, 0, 0, 0 ],[ 'unhandled', null, 0, 0, 0 ],],
+        caseMetas: [[ "credentials-not-loaded", null, 0, 0, 0 ],[ "provider-timed-out", _lowerFlatRecord({ fieldMetas: [['duration', _lowerFlatU64, 8, 8 ],], size32: 8, align32: 8 }), 8, 8, 1 ],[ "invalid-configuration", null, 0, 0, 0 ],[ "provider-error", null, 0, 0, 0 ],[ "unhandled", null, 0, 0, 0 ],],
         variantSize32: 16,
         variantAlign32: 8,
         variantPayloadOffset32: 8,
@@ -18526,11 +20431,8 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
     importFn: _trampoline38,
-  },
-  );
-  let trampoline39 = _trampoline39.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline39 = _trampoline39.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$2, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 39,
     componentIdx: 0,
     isAsync: false,
@@ -18572,10 +20474,7 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
     importFn: _trampoline39,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 39,
     componentIdx: 0,
     isAsync: false,
@@ -18617,20 +20516,36 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
     importFn: _trampoline39,
-  },
-  );
-  let trampoline40 = _trampoline40.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline40 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 40,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline40.manuallyAsync,
     paramLiftFns: [],
+    resultLowerFns: [_lowerFlatTuple({ elemLowerMetas: [[_lowerFlatU64, 8, 8],[_lowerFlatU64, 8, 8],], size32: 16, align32: 8 })],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline40,
+  });
+  let trampoline41 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 41,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline41.manuallyAsync,
+    paramLiftFns: [],
     resultLowerFns: [_lowerFlatList({
       elemLowerFn: _lowerFlatStringAny,
       elemSize32: 8,
       elemAlign32: 4,
+      typedArray: undefined,
     })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
@@ -18641,20 +20556,19 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline40,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 40,
+    importFn: _trampoline41,
+  });
+  let trampoline42 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 42,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline40.manuallyAsync,
+    isManualAsync: _trampoline42.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatStringAny,
-      elemSize32: 8,
+      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatStringAny, 8, 4],], size32: 16, align32: 4 }),
+      elemSize32: 16,
       elemAlign32: 4,
+      typedArray: undefined,
     })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
@@ -18665,210 +20579,105 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline40,
-  },
-  );
-  let trampoline41 = _trampoline41.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 41,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline41.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 4)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 2,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutputStream(obj) {
-          if (!(obj instanceof OutputStream)) {
-            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
-            captureTable2.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable2, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline41,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 41,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline41.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 4)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 2,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutputStream(obj) {
-          if (!(obj instanceof OutputStream)) {
-            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
-            captureTable2.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable2, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline41,
-  },
-  );
-  let trampoline42 = _trampoline42.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 42,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline42.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 3,
-        lowerFn: 
-        function lowerImportedOwnedHost_InputStream(obj) {
-          if (!(obj instanceof InputStream)) {
-            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt3;
-            captureTable3.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable3, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline42,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 42,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline42.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 3,
-        lowerFn: 
-        function lowerImportedOwnedHost_InputStream(obj) {
-          if (!(obj instanceof InputStream)) {
-            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt3;
-            captureTable3.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable3, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline42,
-  },
-  );
-  let trampoline43 = _trampoline43.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline43 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 43,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline43.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 4)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 2,
+        lowerFn: 
+        function lowerImportedOwnedHost_OutputStream(obj) {
+          if (!(obj instanceof OutputStream)) {
+            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
+            captureTable2.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable2, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', null, 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline43,
+  });
+  let trampoline44 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 44,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline44.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 5)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 3,
+        lowerFn: 
+        function lowerImportedOwnedHost_InputStream(obj) {
+          if (!(obj instanceof InputStream)) {
+            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt3) >>> 0;
+            captureTable3.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable3, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', null, 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline44,
+  });
+  let trampoline45 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 45,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline45.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 8)],
     resultLowerFns: [
     _lowerFlatOption({
@@ -18890,7 +20699,7 @@ let gen= (function* _initGenerator () {
               }
               let handle = obj[symbolRscHandle];
               if (!handle) {
-                const rep = obj[symbolRscRep] || ++captureCnt9;
+                const rep = (obj[symbolRscRep] ?? ++captureCnt9) >>> 0;
                 captureTable9.set(rep, obj);
                 handle = rscTableCreateOwn(handleTable9, rep);
               }
@@ -18899,7 +20708,7 @@ let gen= (function* _initGenerator () {
             ,
           }), 40, 8, 8 ],
           [ 'err', _lowerFlatVariant({
-            caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
+            caseMetas: [[ "DNS-timeout", null, 0, 0, 0 ],[ "DNS-error", _lowerFlatRecord({ fieldMetas: [['rcode', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -18923,7 +20732,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
+            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "destination-not-found", null, 0, 0, 0 ],[ "destination-unavailable", null, 0, 0, 0 ],[ "destination-IP-prohibited", null, 0, 0, 0 ],[ "destination-IP-unroutable", null, 0, 0, 0 ],[ "connection-refused", null, 0, 0, 0 ],[ "connection-terminated", null, 0, 0, 0 ],[ "connection-timeout", null, 0, 0, 0 ],[ "connection-read-timeout", null, 0, 0, 0 ],[ "connection-write-timeout", null, 0, 0, 0 ],[ "connection-limit-reached", null, 0, 0, 0 ],[ "TLS-protocol-error", null, 0, 0, 0 ],[ "TLS-certificate-error", null, 0, 0, 0 ],[ "TLS-alert-received", _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -18947,7 +20756,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
+            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "HTTP-request-denied", null, 0, 0, 0 ],[ "HTTP-request-length-required", null, 0, 0, 0 ],[ "HTTP-request-body-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -18959,7 +20768,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
+            , 16, 8, 2 ],[ "HTTP-request-method-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-too-long", null, 0, 0, 0 ],[ "HTTP-request-header-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -18971,7 +20780,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-request-header-size', 
+            , 8, 4, 2 ],[ "HTTP-request-header-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19007,7 +20816,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 6,
               payloadMaybeNull: false,
             })
-            , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
+            , 24, 4, 6 ],[ "HTTP-request-trailer-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19019,7 +20828,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-request-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19043,7 +20852,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-incomplete", null, 0, 0, 0 ],[ "HTTP-response-header-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19055,7 +20864,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-response-header-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19079,7 +20888,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-body-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19091,7 +20900,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
+            , 16, 8, 2 ],[ "HTTP-response-trailer-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19103,7 +20912,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-response-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19127,7 +20936,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-transfer-coding", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19139,7 +20948,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
+            , 12, 4, 3 ],[ "HTTP-response-content-coding", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19151,7 +20960,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
+            , 12, 4, 3 ],[ "HTTP-response-timeout", null, 0, 0, 0 ],[ "HTTP-upgrade-failed", null, 0, 0, 0 ],[ "HTTP-protocol-error", null, 0, 0, 0 ],[ "loop-detected", null, 0, 0, 0 ],[ "configuration-error", null, 0, 0, 0 ],[ "internal-error", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -19201,537 +21010,101 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline43,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 43,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline43.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 8)],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', 
-      _lowerFlatResult({
-        caseMetas: [
-        [ 'ok', 
-        _lowerFlatResult({
-          caseMetas: [
-          [ 'ok', _lowerFlatOwn({
-            componentIdx: 0,
-            tableIdx: 9,
-            lowerFn: 
-            function lowerImportedOwnedHost_IncomingResponse(obj) {
-              if (!(obj instanceof IncomingResponse)) {
-                throw new TypeError('Resource error: Not a valid \"IncomingResponse\" resource.');
-              }
-              let handle = obj[symbolRscHandle];
-              if (!handle) {
-                const rep = obj[symbolRscRep] || ++captureCnt9;
-                captureTable9.set(rep, obj);
-                handle = rscTableCreateOwn(handleTable9, rep);
-              }
-              return handle;
-            }
-            ,
-          }), 40, 8, 8 ],
-          [ 'err', _lowerFlatVariant({
-            caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['infoCode', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU16, 2, 2, 1],
-              ],
-              variantSize32: 4,
-              variantAlign32: 2,
-              variantPayloadOffset32: 2,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU8, 1, 1, 1],
-              ],
-              variantSize32: 2,
-              variantAlign32: 1,
-              variantPayloadOffset32: 1,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 2, 1 ],['alertMessage', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU64, 8, 8, 1],
-              ],
-              variantSize32: 16,
-              variantAlign32: 8,
-              variantPayloadOffset32: 8,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-request-header-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-              _lowerFlatOption({
-                caseMetas: [
-                [ 'none', null, 0, 0, 0 ],
-                [ 'some', _lowerFlatStringAny, 8, 4, 2],
-                ],
-                variantSize32: 12,
-                variantAlign32: 4,
-                variantPayloadOffset32: 4,
-                variantFlatCount: 3,
-                payloadMaybeNull: false,
-              })
-              , 12, 4 ],['fieldSize', 
-              _lowerFlatOption({
-                caseMetas: [
-                [ 'none', null, 0, 0, 0 ],
-                [ 'some', _lowerFlatU32, 4, 4, 1],
-                ],
-                variantSize32: 8,
-                variantAlign32: 4,
-                variantPayloadOffset32: 4,
-                variantFlatCount: 2,
-                payloadMaybeNull: false,
-              })
-              , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
-              ],
-              variantSize32: 24,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 6,
-              payloadMaybeNull: false,
-            })
-            , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU64, 8, 8, 1],
-              ],
-              variantSize32: 16,
-              variantAlign32: 8,
-              variantPayloadOffset32: 8,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],],
-            variantSize32: 32,
-            variantAlign32: 8,
-            variantPayloadOffset32: 8,
-            variantFlatCount: 7,
-          } ), 40, 8, 8 ],
-          ],
-          variantSize32: 40,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 8,
-        })
-        , 48, 8, 8 ],
-        [ 'err', null, 48, 8, 8 ],
-        ],
-        variantSize32: 48,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 9,
-      })
-      , 48, 8, 9],
-      ],
-      variantSize32: 56,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 10,
-      payloadMaybeNull: false,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline43,
-  },
-  );
-  let trampoline44 = _trampoline44.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 44,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline44.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 5,
-        lowerFn: 
-        function lowerImportedOwnedHost_IncomingBody(obj) {
-          if (!(obj instanceof IncomingBody)) {
-            throw new TypeError('Resource error: Not a valid \"IncomingBody\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt5;
-            captureTable5.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable5, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline44,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 44,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline44.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 5,
-        lowerFn: 
-        function lowerImportedOwnedHost_IncomingBody(obj) {
-          if (!(obj instanceof IncomingBody)) {
-            throw new TypeError('Resource error: Not a valid \"IncomingBody\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt5;
-            captureTable5.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable5, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline44,
-  },
-  );
-  let trampoline45 = _trampoline45.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 45,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline45.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),_liftFlatVariant({
-      caseMetas: [['get', null, 0, 0, 0, []],['head', null, 0, 0, 0, []],['post', null, 0, 0, 0, []],['put', null, 0, 0, 0, []],['delete', null, 0, 0, 0, []],['connect', null, 0, 0, 0, []],['options', null, 0, 0, 0, []],['trace', null, 0, 0, 0, []],['patch', null, 0, 0, 0, []],['other', _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-    } )],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline45,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 45,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline45.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),_liftFlatVariant({
-      caseMetas: [['get', null, 0, 0, 0, []],['head', null, 0, 0, 0, []],['post', null, 0, 0, 0, []],['put', null, 0, 0, 0, []],['delete', null, 0, 0, 0, []],['connect', null, 0, 0, 0, []],['options', null, 0, 0, 0, []],['trace', null, 0, 0, 0, []],['patch', null, 0, 0, 0, []],['other', _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-    } )],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline45,
-  },
-  );
-  let trampoline46 = _trampoline46.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline46 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 46,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline46.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 9)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 5,
+        lowerFn: 
+        function lowerImportedOwnedHost_IncomingBody(obj) {
+          if (!(obj instanceof IncomingBody)) {
+            throw new TypeError('Resource error: Not a valid \"IncomingBody\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt5) >>> 0;
+            captureTable5.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable5, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', null, 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline46,
+  });
+  let trampoline47 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 47,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline47.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 10),_liftFlatVariant({
+      caseMetas: [["get", null, 0, 0, 0, []],["head", null, 0, 0, 0, []],["post", null, 0, 0, 0, []],["put", null, 0, 0, 0, []],["delete", null, 0, 0, 0, []],["connect", null, 0, 0, 0, []],["options", null, 0, 0, 0, []],["trace", null, 0, 0, 0, []],["patch", null, 0, 0, 0, []],["other", _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      variantPayloadFlatTypes: ['i32','i32'],
+    } )],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 1, 1, 1 ],
+      [ 'err', null, 1, 1, 1 ],
+      ],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    ],
+    hasResultPointer: false,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline47,
+  });
+  let trampoline48 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 48,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline48.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 10),
     _liftFlatOption({
       caseMetas: [
       ['none', null, 0, 0, 0, [] ],
       ['some', _liftFlatVariant({
-        caseMetas: [['HTTP', null, 0, 0, 0, []],['HTTPS', null, 0, 0, 0, []],['other', _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
+        caseMetas: [["HTTP", null, 0, 0, 0, []],["HTTPS", null, 0, 0, 0, []],["other", _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
         variantSize32: 12,
         variantAlign32: 4,
         variantPayloadOffset32: 4,
@@ -19768,276 +21141,40 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline46,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 46,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline46.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatVariant({
-        caseMetas: [['HTTP', null, 0, 0, 0, []],['HTTPS', null, 0, 0, 0, []],['other', _liftFlatStringAny, 8, 4, 2, ['i32','i32']],],
-        variantSize32: 12,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 3,
-        variantPayloadFlatTypes: ['i32','i32'],
-      } ), 12, 4, 3, ['i32','i32','i32'] ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 4,
-      variantPayloadFlatTypes: ['i32','i32','i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline46,
-  },
-  );
-  let trampoline47 = _trampoline47.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 47,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline47.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline47,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 47,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline47.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline47,
-  },
-  );
-  let trampoline48 = _trampoline48.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 48,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline48.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline48,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 48,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline48.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-      variantPayloadFlatTypes: ['i32','i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 1, 1, 1 ],
-      [ 'err', null, 1, 1, 1 ],
-      ],
-      variantSize32: 1,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 1,
-    })
-    ],
-    hasResultPointer: false,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline48,
-  },
-  );
-  let trampoline49 = _trampoline49.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline49 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 49,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline49.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10)],
+    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
+    _liftFlatOption({
+      caseMetas: [
+      ['none', null, 0, 0, 0, [] ],
+      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
+    })
+    ],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 4,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutgoingBody(obj) {
-          if (!(obj instanceof OutgoingBody)) {
-            throw new TypeError('Resource error: Not a valid \"OutgoingBody\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt4;
-            captureTable4.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable4, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
+      [ 'ok', null, 1, 1, 1 ],
+      [ 'err', null, 1, 1, 1 ],
       ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
     })
     ],
-    hasResultPointer: true,
+    hasResultPointer: false,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
     getPostReturnFn: () => null,
@@ -20047,63 +21184,100 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline49,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 49,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline49.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 10)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 4,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutgoingBody(obj) {
-          if (!(obj instanceof OutgoingBody)) {
-            throw new TypeError('Resource error: Not a valid \"OutgoingBody\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt4;
-            captureTable4.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable4, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', null, 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline49,
-  },
-  );
-  let trampoline50 = _trampoline50.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline50 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 50,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline50.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 10),
+    _liftFlatOption({
+      caseMetas: [
+      ['none', null, 0, 0, 0, [] ],
+      ['some', _liftFlatStringAny, 8, 4, 2, ['i32','i32'] ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+      variantPayloadFlatTypes: ['i32','i32'],
+      payloadMaybeNull: false,
+    })
+    ],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 1, 1, 1 ],
+      [ 'err', null, 1, 1, 1 ],
+      ],
+      variantSize32: 1,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 1,
+    })
+    ],
+    hasResultPointer: false,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline50,
+  });
+  let trampoline51 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 51,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline51.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 10)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 4,
+        lowerFn: 
+        function lowerImportedOwnedHost_OutgoingBody(obj) {
+          if (!(obj instanceof OutgoingBody)) {
+            throw new TypeError('Resource error: Not a valid \"OutgoingBody\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt4) >>> 0;
+            captureTable4.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable4, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', null, 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline51,
+  });
+  let trampoline52 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 52,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline52.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 6)],
     resultLowerFns: [
     _lowerFlatOption({
@@ -20129,7 +21303,7 @@ let gen= (function* _initGenerator () {
                 }
                 let handle = obj[symbolRscHandle];
                 if (!handle) {
-                  const rep = obj[symbolRscRep] || ++captureCnt7;
+                  const rep = (obj[symbolRscRep] ?? ++captureCnt7) >>> 0;
                   captureTable7.set(rep, obj);
                   handle = rscTableCreateOwn(handleTable7, rep);
                 }
@@ -20146,7 +21320,7 @@ let gen= (function* _initGenerator () {
           })
           , 40, 8, 8 ],
           [ 'err', _lowerFlatVariant({
-            caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
+            caseMetas: [[ "DNS-timeout", null, 0, 0, 0 ],[ "DNS-error", _lowerFlatRecord({ fieldMetas: [['rcode', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20170,7 +21344,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
+            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "destination-not-found", null, 0, 0, 0 ],[ "destination-unavailable", null, 0, 0, 0 ],[ "destination-IP-prohibited", null, 0, 0, 0 ],[ "destination-IP-unroutable", null, 0, 0, 0 ],[ "connection-refused", null, 0, 0, 0 ],[ "connection-terminated", null, 0, 0, 0 ],[ "connection-timeout", null, 0, 0, 0 ],[ "connection-read-timeout", null, 0, 0, 0 ],[ "connection-write-timeout", null, 0, 0, 0 ],[ "connection-limit-reached", null, 0, 0, 0 ],[ "TLS-protocol-error", null, 0, 0, 0 ],[ "TLS-certificate-error", null, 0, 0, 0 ],[ "TLS-alert-received", _lowerFlatRecord({ fieldMetas: [['alertId', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20194,7 +21368,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
+            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "HTTP-request-denied", null, 0, 0, 0 ],[ "HTTP-request-length-required", null, 0, 0, 0 ],[ "HTTP-request-body-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20206,7 +21380,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
+            , 16, 8, 2 ],[ "HTTP-request-method-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-too-long", null, 0, 0, 0 ],[ "HTTP-request-header-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20218,7 +21392,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-request-header-size', 
+            , 8, 4, 2 ],[ "HTTP-request-header-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20254,7 +21428,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 6,
               payloadMaybeNull: false,
             })
-            , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
+            , 24, 4, 6 ],[ "HTTP-request-trailer-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20266,7 +21440,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-request-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20290,7 +21464,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-incomplete", null, 0, 0, 0 ],[ "HTTP-response-header-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20302,7 +21476,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-response-header-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20326,7 +21500,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-body-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20338,7 +21512,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
+            , 16, 8, 2 ],[ "HTTP-response-trailer-section-size", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20350,7 +21524,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+            , 8, 4, 2 ],[ "HTTP-response-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20374,7 +21548,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 2,
               payloadMaybeNull: false,
             })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
+            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-transfer-coding", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20386,7 +21560,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
+            , 12, 4, 3 ],[ "HTTP-response-content-coding", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20398,7 +21572,7 @@ let gen= (function* _initGenerator () {
               variantFlatCount: 3,
               payloadMaybeNull: false,
             })
-            , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
+            , 12, 4, 3 ],[ "HTTP-response-timeout", null, 0, 0, 0 ],[ "HTTP-upgrade-failed", null, 0, 0, 0 ],[ "HTTP-protocol-error", null, 0, 0, 0 ],[ "loop-detected", null, 0, 0, 0 ],[ "configuration-error", null, 0, 0, 0 ],[ "internal-error", 
             _lowerFlatOption({
               caseMetas: [
               [ 'none', null, 0, 0, 0 ],
@@ -20448,376 +21622,20 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline50,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 50,
+    importFn: _trampoline52,
+  });
+  let trampoline53 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 53,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline50.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 6)],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', 
-      _lowerFlatResult({
-        caseMetas: [
-        [ 'ok', 
-        _lowerFlatResult({
-          caseMetas: [
-          [ 'ok', 
-          _lowerFlatOption({
-            caseMetas: [
-            [ 'none', null, 0, 0, 0 ],
-            [ 'some', _lowerFlatOwn({
-              componentIdx: 0,
-              tableIdx: 7,
-              lowerFn: 
-              function lowerImportedOwnedHost_Fields(obj) {
-                if (!(obj instanceof Fields)) {
-                  throw new TypeError('Resource error: Not a valid \"Fields\" resource.');
-                }
-                let handle = obj[symbolRscHandle];
-                if (!handle) {
-                  const rep = obj[symbolRscRep] || ++captureCnt7;
-                  captureTable7.set(rep, obj);
-                  handle = rscTableCreateOwn(handleTable7, rep);
-                }
-                return handle;
-              }
-              ,
-            }), 4, 4, 1],
-            ],
-            variantSize32: 8,
-            variantAlign32: 4,
-            variantPayloadOffset32: 4,
-            variantFlatCount: 2,
-            payloadMaybeNull: false,
-          })
-          , 40, 8, 8 ],
-          [ 'err', _lowerFlatVariant({
-            caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['infoCode', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU16, 2, 2, 1],
-              ],
-              variantSize32: 4,
-              variantAlign32: 2,
-              variantPayloadOffset32: 2,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU8, 1, 1, 1],
-              ],
-              variantSize32: 2,
-              variantAlign32: 1,
-              variantPayloadOffset32: 1,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 2, 1 ],['alertMessage', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU64, 8, 8, 1],
-              ],
-              variantSize32: 16,
-              variantAlign32: 8,
-              variantPayloadOffset32: 8,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-request-header-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-              _lowerFlatOption({
-                caseMetas: [
-                [ 'none', null, 0, 0, 0 ],
-                [ 'some', _lowerFlatStringAny, 8, 4, 2],
-                ],
-                variantSize32: 12,
-                variantAlign32: 4,
-                variantPayloadOffset32: 4,
-                variantFlatCount: 3,
-                payloadMaybeNull: false,
-              })
-              , 12, 4 ],['fieldSize', 
-              _lowerFlatOption({
-                caseMetas: [
-                [ 'none', null, 0, 0, 0 ],
-                [ 'some', _lowerFlatU32, 4, 4, 1],
-                ],
-                variantSize32: 8,
-                variantAlign32: 4,
-                variantPayloadOffset32: 4,
-                variantFlatCount: 2,
-                payloadMaybeNull: false,
-              })
-              , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
-              ],
-              variantSize32: 24,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 6,
-              payloadMaybeNull: false,
-            })
-            , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU64, 8, 8, 1],
-              ],
-              variantSize32: 16,
-              variantAlign32: 8,
-              variantPayloadOffset32: 8,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4 ],['fieldSize', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatU32, 4, 4, 1],
-              ],
-              variantSize32: 8,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 2,
-              payloadMaybeNull: false,
-            })
-            , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
-            _lowerFlatOption({
-              caseMetas: [
-              [ 'none', null, 0, 0, 0 ],
-              [ 'some', _lowerFlatStringAny, 8, 4, 2],
-              ],
-              variantSize32: 12,
-              variantAlign32: 4,
-              variantPayloadOffset32: 4,
-              variantFlatCount: 3,
-              payloadMaybeNull: false,
-            })
-            , 12, 4, 3 ],],
-            variantSize32: 32,
-            variantAlign32: 8,
-            variantPayloadOffset32: 8,
-            variantFlatCount: 7,
-          } ), 40, 8, 8 ],
-          ],
-          variantSize32: 40,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 8,
-        })
-        , 48, 8, 8 ],
-        [ 'err', null, 48, 8, 8 ],
-        ],
-        variantSize32: 48,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 9,
-      })
-      , 48, 8, 9],
-      ],
-      variantSize32: 56,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 10,
-      payloadMaybeNull: false,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline50,
-  },
-  );
-  let trampoline51 = _trampoline51.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 51,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline51.manuallyAsync,
+    isManualAsync: _trampoline53.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
       tableIdx: 4,
       classNameFn: () => OutgoingBody,
       createResourceFn: 
       (handle) => {
-        const rep = handleTable4[(handle << 1) + 1] & ~T_FLAG;
+        const rep = handleTable4[(handle << 1) + 1] % T_OWN;
         let resourceObj = captureTable4.get(rep);
         if (!resourceObj) {
           resourceObj = Object.create(OutgoingBody.prototype);
@@ -20841,7 +21659,7 @@ let gen= (function* _initGenerator () {
         classNameFn: () => Fields,
         createResourceFn: 
         (handle) => {
-          const rep = handleTable7[(handle << 1) + 1] & ~T_FLAG;
+          const rep = handleTable7[(handle << 1) + 1] % T_OWN;
           let resourceObj = captureTable7.get(rep);
           if (!resourceObj) {
             resourceObj = Object.create(Fields.prototype);
@@ -20870,7 +21688,7 @@ let gen= (function* _initGenerator () {
       caseMetas: [
       [ 'ok', null, 40, 8, 8 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
+        caseMetas: [[ "DNS-timeout", null, 0, 0, 0 ],[ "DNS-error", _lowerFlatRecord({ fieldMetas: [['rcode', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20894,7 +21712,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
+        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "destination-not-found", null, 0, 0, 0 ],[ "destination-unavailable", null, 0, 0, 0 ],[ "destination-IP-prohibited", null, 0, 0, 0 ],[ "destination-IP-unroutable", null, 0, 0, 0 ],[ "connection-refused", null, 0, 0, 0 ],[ "connection-terminated", null, 0, 0, 0 ],[ "connection-timeout", null, 0, 0, 0 ],[ "connection-read-timeout", null, 0, 0, 0 ],[ "connection-write-timeout", null, 0, 0, 0 ],[ "connection-limit-reached", null, 0, 0, 0 ],[ "TLS-protocol-error", null, 0, 0, 0 ],[ "TLS-certificate-error", null, 0, 0, 0 ],[ "TLS-alert-received", _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20918,7 +21736,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
+        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "HTTP-request-denied", null, 0, 0, 0 ],[ "HTTP-request-length-required", null, 0, 0, 0 ],[ "HTTP-request-body-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20930,7 +21748,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
+        , 16, 8, 2 ],[ "HTTP-request-method-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-too-long", null, 0, 0, 0 ],[ "HTTP-request-header-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20942,7 +21760,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-request-header-size', 
+        , 8, 4, 2 ],[ "HTTP-request-header-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20978,7 +21796,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 6,
           payloadMaybeNull: false,
         })
-        , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
+        , 24, 4, 6 ],[ "HTTP-request-trailer-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -20990,7 +21808,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-request-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21014,7 +21832,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-incomplete", null, 0, 0, 0 ],[ "HTTP-response-header-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21026,7 +21844,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-response-header-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21050,7 +21868,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-body-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21062,7 +21880,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
+        , 16, 8, 2 ],[ "HTTP-response-trailer-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21074,7 +21892,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-response-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21098,7 +21916,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-transfer-coding", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21110,7 +21928,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
+        , 12, 4, 3 ],[ "HTTP-response-content-coding", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21122,7 +21940,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
+        , 12, 4, 3 ],[ "HTTP-response-timeout", null, 0, 0, 0 ],[ "HTTP-upgrade-failed", null, 0, 0, 0 ],[ "HTTP-protocol-error", null, 0, 0, 0 ],[ "loop-detected", null, 0, 0, 0 ],[ "configuration-error", null, 0, 0, 0 ],[ "internal-error", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -21156,427 +21974,13 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline51,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 51,
+    importFn: _trampoline53,
+  });
+  let trampoline54 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 54,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline51.manuallyAsync,
-    paramLiftFns: [_liftFlatOwn({
-      componentIdx: 0,
-      tableIdx: 4,
-      classNameFn: () => OutgoingBody,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable4[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable4.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(OutgoingBody.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable4.delete(rep);
-        }
-        rscTableRemove(handleTable4, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    ,
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatOwn({
-        componentIdx: 0,
-        tableIdx: 7,
-        classNameFn: () => Fields,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable7[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable7.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(Fields.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable7.delete(rep);
-          }
-          rscTableRemove(handleTable7, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      , 4, 4, 1, ['i32'] ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-      variantPayloadFlatTypes: ['i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 40, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['infoCode', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU16, 2, 2, 1],
-          ],
-          variantSize32: 4,
-          variantAlign32: 2,
-          variantPayloadOffset32: 2,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU8, 1, 1, 1],
-          ],
-          variantSize32: 2,
-          variantAlign32: 1,
-          variantPayloadOffset32: 1,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 2, 1 ],['alertMessage', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU64, 8, 8, 1],
-          ],
-          variantSize32: 16,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-request-header-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-          _lowerFlatOption({
-            caseMetas: [
-            [ 'none', null, 0, 0, 0 ],
-            [ 'some', _lowerFlatStringAny, 8, 4, 2],
-            ],
-            variantSize32: 12,
-            variantAlign32: 4,
-            variantPayloadOffset32: 4,
-            variantFlatCount: 3,
-            payloadMaybeNull: false,
-          })
-          , 12, 4 ],['fieldSize', 
-          _lowerFlatOption({
-            caseMetas: [
-            [ 'none', null, 0, 0, 0 ],
-            [ 'some', _lowerFlatU32, 4, 4, 1],
-            ],
-            variantSize32: 8,
-            variantAlign32: 4,
-            variantPayloadOffset32: 4,
-            variantFlatCount: 2,
-            payloadMaybeNull: false,
-          })
-          , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
-          ],
-          variantSize32: 24,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 6,
-          payloadMaybeNull: false,
-        })
-        , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU64, 8, 8, 1],
-          ],
-          variantSize32: 16,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],],
-        variantSize32: 32,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 7,
-      } ), 40, 8, 8 ],
-      ],
-      variantSize32: 40,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 8,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline51,
-  },
-  );
-  let trampoline52 = _trampoline52.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 52,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline52.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
-    })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline52,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 52,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline52.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
-    })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline52,
-  },
-  );
-  let trampoline53 = _trampoline53.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 53,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline53.manuallyAsync,
+    isManualAsync: _trampoline54.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
       elemLiftFn: _liftFlatU8,
       elemAlign32: 1,
@@ -21588,7 +21992,7 @@ let gen= (function* _initGenerator () {
       caseMetas: [
       [ 'ok', null, 2, 1, 1 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
+        caseMetas: [[ "invalid-syntax", null, 0, 0, 0 ],[ "forbidden", null, 0, 0, 0 ],[ "immutable", null, 0, 0, 0 ],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -21610,39 +22014,25 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline53,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 53,
+    importFn: _trampoline54,
+  });
+  let trampoline55 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 55,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline53.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 7),_liftFlatStringAny,_liftFlatList({
-      elemLiftFn: _liftFlatU8,
-      elemAlign32: 1,
-      elemSize32: 1,
-      typedArray: Uint8Array,
+    isManualAsync: _trampoline55.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 7)],
+    resultLowerFns: [_lowerFlatList({
+      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatList({
+        elemLowerFn: _lowerFlatU8,
+        elemSize32: 1,
+        elemAlign32: 1,
+        typedArray: Uint8Array,
+      }), 8, 4],], size32: 16, align32: 4 }),
+      elemSize32: 16,
+      elemAlign32: 4,
+      typedArray: undefined,
     })],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 2, 1, 1 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'invalid-syntax', null, 0, 0, 0 ],[ 'forbidden', null, 0, 0, 0 ],[ 'immutable', null, 0, 0, 0 ],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      } ), 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
     hasResultPointer: true,
     funcTypeIsAsync: false,
     getCallbackFn: () => null,
@@ -21651,247 +22041,21 @@ let gen= (function* _initGenerator () {
     memoryIdx: 0,
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline53,
-  },
-  );
-  let trampoline54 = _trampoline54.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 54,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline54.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2),_liftFlatBorrow.bind(null, 3),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 16, 8, 8 ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline54,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 54,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline54.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2),_liftFlatBorrow.bind(null, 3),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 16, 8, 8 ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline54,
-  },
-  );
-  let trampoline55 = _trampoline55.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 55,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline55.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 16, 8, 8 ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
+    getReallocFn: () => realloc0,
     importFn: _trampoline55,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 55,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline55.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 16, 8, 8 ],
-      ],
-      variantSize32: 16,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline55,
-  },
-  );
-  let trampoline56 = _trampoline56.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline56 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 56,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline56.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2),_liftFlatList({
-      elemLiftFn: _liftFlatU8,
-      elemAlign32: 1,
-      elemSize32: 1,
-      typedArray: Uint8Array,
-    })],
+    paramLiftFns: [_liftFlatBorrow.bind(null, 2),_liftFlatBorrow.bind(null, 3),_liftFlatU64],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
-      [ 'ok', null, 12, 4, 4 ],
+      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
           componentIdx: 0,
           tableIdx: 1,
           lowerFn: 
@@ -21901,23 +22065,23 @@ let gen= (function* _initGenerator () {
             }
             let handle = obj[symbolRscHandle];
             if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, obj);
               handle = rscTableCreateOwn(handleTable1, rep);
             }
             return handle;
           }
           ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
         variantSize32: 8,
         variantAlign32: 4,
         variantPayloadOffset32: 4,
         variantFlatCount: 2,
-      } ), 12, 4, 4 ],
+      } ), 16, 8, 8 ],
       ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
+      variantSize32: 16,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
       variantFlatCount: 3,
     })
     ],
@@ -21931,14 +22095,64 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline56,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 56,
+  });
+  let trampoline57 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 57,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline56.manuallyAsync,
+    isManualAsync: _trampoline57.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatU64, 16, 8, 8 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
+          componentIdx: 0,
+          tableIdx: 1,
+          lowerFn: 
+          function lowerImportedOwnedHost_Error$1(obj) {
+            if (!(obj instanceof Error$1)) {
+              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
+              captureTable1.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable1, rep);
+            }
+            return handle;
+          }
+          ,
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
+        variantSize32: 8,
+        variantAlign32: 4,
+        variantPayloadOffset32: 4,
+        variantFlatCount: 2,
+      } ), 16, 8, 8 ],
+      ],
+      variantSize32: 16,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
+      variantFlatCount: 3,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline57,
+  });
+  let trampoline58 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 58,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline58.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 2),_liftFlatList({
       elemLiftFn: _liftFlatU8,
       elemAlign32: 1,
@@ -21950,7 +22164,7 @@ let gen= (function* _initGenerator () {
       caseMetas: [
       [ 'ok', null, 12, 4, 4 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
           componentIdx: 0,
           tableIdx: 1,
           lowerFn: 
@@ -21960,14 +22174,14 @@ let gen= (function* _initGenerator () {
             }
             let handle = obj[symbolRscHandle];
             if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
               captureTable1.set(rep, obj);
               handle = rscTableCreateOwn(handleTable1, rep);
             }
             return handle;
           }
           ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
         variantSize32: 8,
         variantAlign32: 4,
         variantPayloadOffset32: 4,
@@ -21989,181 +22203,198 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline56,
-  },
-  );
-  let trampoline57 = _trampoline57.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 57,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline57.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 12, 4, 4 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 12, 4, 4 ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline57,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 57,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline57.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatList({
-        elemLowerFn: _lowerFlatU8,
-        elemSize32: 1,
-        elemAlign32: 1,
-      }), 12, 4, 4 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 12, 4, 4 ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline57,
-  },
-  );
-  let trampoline58 = _trampoline58.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 58,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline58.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 1)],
-    resultLowerFns: [_lowerFlatStringAny],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
     importFn: _trampoline58,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 58,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline58.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 1)],
-    resultLowerFns: [_lowerFlatStringAny],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline58,
-  },
-  );
-  let trampoline59 = _trampoline59.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline59 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 59,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline59.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 3),_liftFlatU64],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatList({
+        elemLowerFn: _lowerFlatU8,
+        elemSize32: 1,
+        elemAlign32: 1,
+        typedArray: Uint8Array,
+      }), 12, 4, 4 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
+          componentIdx: 0,
+          tableIdx: 1,
+          lowerFn: 
+          function lowerImportedOwnedHost_Error$1(obj) {
+            if (!(obj instanceof Error$1)) {
+              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
+              captureTable1.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable1, rep);
+            }
+            return handle;
+          }
+          ,
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
+        variantSize32: 8,
+        variantAlign32: 4,
+        variantPayloadOffset32: 4,
+        variantFlatCount: 2,
+      } ), 12, 4, 4 ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: () => realloc0,
+    importFn: _trampoline59,
+  });
+  let trampoline60 = _trampoline60.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$3, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 60,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline60.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 12, 4, 4 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
+          componentIdx: 0,
+          tableIdx: 1,
+          lowerFn: 
+          function lowerImportedOwnedHost_Error$1(obj) {
+            if (!(obj instanceof Error$1)) {
+              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
+              captureTable1.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable1, rep);
+            }
+            return handle;
+          }
+          ,
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
+        variantSize32: 8,
+        variantAlign32: 4,
+        variantPayloadOffset32: 4,
+        variantFlatCount: 2,
+      } ), 12, 4, 4 ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline60,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 60,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline60.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 12, 4, 4 ],
+      [ 'err', _lowerFlatVariant({
+        caseMetas: [[ "last-operation-failed", _lowerFlatOwn({
+          componentIdx: 0,
+          tableIdx: 1,
+          lowerFn: 
+          function lowerImportedOwnedHost_Error$1(obj) {
+            if (!(obj instanceof Error$1)) {
+              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
+            }
+            let handle = obj[symbolRscHandle];
+            if (!handle) {
+              const rep = (obj[symbolRscRep] ?? ++captureCnt1) >>> 0;
+              captureTable1.set(rep, obj);
+              handle = rscTableCreateOwn(handleTable1, rep);
+            }
+            return handle;
+          }
+          ,
+        }), 4, 4, 1 ],[ "closed", null, 0, 0, 0 ],],
+        variantSize32: 8,
+        variantAlign32: 4,
+        variantPayloadOffset32: 4,
+        variantFlatCount: 2,
+      } ), 12, 4, 4 ],
+      ],
+      variantSize32: 12,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 3,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline60,
+  });
+  let trampoline61 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 61,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline61.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 1)],
+    resultLowerFns: [_lowerFlatStringAny],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: () => realloc0,
+    importFn: _trampoline61,
+  });
+  let trampoline62 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 62,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline62.manuallyAsync,
     paramLiftFns: [_liftFlatOwn({
       componentIdx: 0,
       tableIdx: 10,
       classNameFn: () => OutgoingRequest,
       createResourceFn: 
       (handle) => {
-        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
+        const rep = handleTable10[(handle << 1) + 1] % T_OWN;
         let resourceObj = captureTable10.get(rep);
         if (!resourceObj) {
           resourceObj = Object.create(OutgoingRequest.prototype);
@@ -22187,7 +22418,7 @@ let gen= (function* _initGenerator () {
         classNameFn: () => RequestOptions,
         createResourceFn: 
         (handle) => {
-          const rep = handleTable11[(handle << 1) + 1] & ~T_FLAG;
+          const rep = handleTable11[(handle << 1) + 1] % T_OWN;
           let resourceObj = captureTable11.get(rep);
           if (!resourceObj) {
             resourceObj = Object.create(RequestOptions.prototype);
@@ -22224,7 +22455,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt8;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt8) >>> 0;
             captureTable8.set(rep, obj);
             handle = rscTableCreateOwn(handleTable8, rep);
           }
@@ -22233,7 +22464,7 @@ let gen= (function* _initGenerator () {
         ,
       }), 40, 8, 8 ],
       [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
+        caseMetas: [[ "DNS-timeout", null, 0, 0, 0 ],[ "DNS-error", _lowerFlatRecord({ fieldMetas: [['rcode', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22257,7 +22488,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
+        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "destination-not-found", null, 0, 0, 0 ],[ "destination-unavailable", null, 0, 0, 0 ],[ "destination-IP-prohibited", null, 0, 0, 0 ],[ "destination-IP-unroutable", null, 0, 0, 0 ],[ "connection-refused", null, 0, 0, 0 ],[ "connection-terminated", null, 0, 0, 0 ],[ "connection-timeout", null, 0, 0, 0 ],[ "connection-read-timeout", null, 0, 0, 0 ],[ "connection-write-timeout", null, 0, 0, 0 ],[ "connection-limit-reached", null, 0, 0, 0 ],[ "TLS-protocol-error", null, 0, 0, 0 ],[ "TLS-certificate-error", null, 0, 0, 0 ],[ "TLS-alert-received", _lowerFlatRecord({ fieldMetas: [['alertId', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22281,7 +22512,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
+        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ "HTTP-request-denied", null, 0, 0, 0 ],[ "HTTP-request-length-required", null, 0, 0, 0 ],[ "HTTP-request-body-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22293,7 +22524,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
+        , 16, 8, 2 ],[ "HTTP-request-method-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-invalid", null, 0, 0, 0 ],[ "HTTP-request-URI-too-long", null, 0, 0, 0 ],[ "HTTP-request-header-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22305,7 +22536,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-request-header-size', 
+        , 8, 4, 2 ],[ "HTTP-request-header-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22341,7 +22572,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 6,
           payloadMaybeNull: false,
         })
-        , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
+        , 24, 4, 6 ],[ "HTTP-request-trailer-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22353,7 +22584,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-request-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22377,7 +22608,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-incomplete", null, 0, 0, 0 ],[ "HTTP-response-header-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22389,7 +22620,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-response-header-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22413,7 +22644,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-body-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22425,7 +22656,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
+        , 16, 8, 2 ],[ "HTTP-response-trailer-section-size", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22437,7 +22668,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
+        , 8, 4, 2 ],[ "HTTP-response-trailer-size", _lowerFlatRecord({ fieldMetas: [['fieldName', 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22461,7 +22692,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 2,
           payloadMaybeNull: false,
         })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
+        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ "HTTP-response-transfer-coding", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22473,7 +22704,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
+        , 12, 4, 3 ],[ "HTTP-response-content-coding", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22485,7 +22716,7 @@ let gen= (function* _initGenerator () {
           variantFlatCount: 3,
           payloadMaybeNull: false,
         })
-        , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
+        , 12, 4, 3 ],[ "HTTP-response-timeout", null, 0, 0, 0 ],[ "HTTP-upgrade-failed", null, 0, 0, 0 ],[ "HTTP-protocol-error", null, 0, 0, 0 ],[ "loop-detected", null, 0, 0, 0 ],[ "configuration-error", null, 0, 0, 0 ],[ "internal-error", 
         _lowerFlatOption({
           caseMetas: [
           [ 'none', null, 0, 0, 0 ],
@@ -22519,387 +22750,13 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline59,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 59,
+    importFn: _trampoline62,
+  });
+  let trampoline63 = _trampoline63.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$4, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 63,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline59.manuallyAsync,
-    paramLiftFns: [_liftFlatOwn({
-      componentIdx: 0,
-      tableIdx: 10,
-      classNameFn: () => OutgoingRequest,
-      createResourceFn: 
-      (handle) => {
-        const rep = handleTable10[(handle << 1) + 1] & ~T_FLAG;
-        let resourceObj = captureTable10.get(rep);
-        if (!resourceObj) {
-          resourceObj = Object.create(OutgoingRequest.prototype);
-          Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-          Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-        } else {
-          captureTable10.delete(rep);
-        }
-        rscTableRemove(handleTable10, handle);
-        return resourceObj;
-      }
-      ,
-    })
-    ,
-    _liftFlatOption({
-      caseMetas: [
-      ['none', null, 0, 0, 0, [] ],
-      ['some', _liftFlatOwn({
-        componentIdx: 0,
-        tableIdx: 11,
-        classNameFn: () => RequestOptions,
-        createResourceFn: 
-        (handle) => {
-          const rep = handleTable11[(handle << 1) + 1] & ~T_FLAG;
-          let resourceObj = captureTable11.get(rep);
-          if (!resourceObj) {
-            resourceObj = Object.create(RequestOptions.prototype);
-            Object.defineProperty(resourceObj, symbolRscHandle, { writable: true, value: handle });
-            Object.defineProperty(resourceObj, symbolRscRep, { writable: true, value: rep });
-          } else {
-            captureTable11.delete(rep);
-          }
-          rscTableRemove(handleTable11, handle);
-          return resourceObj;
-        }
-        ,
-      })
-      , 4, 4, 1, ['i32'] ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-      variantPayloadFlatTypes: ['i32'],
-      payloadMaybeNull: false,
-    })
-    ],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 8,
-        lowerFn: 
-        function lowerImportedOwnedHost_FutureIncomingResponse(obj) {
-          if (!(obj instanceof FutureIncomingResponse)) {
-            throw new TypeError('Resource error: Not a valid \"FutureIncomingResponse\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt8;
-            captureTable8.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable8, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 40, 8, 8 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'DNS-timeout', null, 0, 0, 0 ],[ 'DNS-error', _lowerFlatRecord({ fieldMetas: [['rcode', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['infoCode', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU16, 2, 2, 1],
-          ],
-          variantSize32: 4,
-          variantAlign32: 2,
-          variantPayloadOffset32: 2,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 4, 2 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'destination-not-found', null, 0, 0, 0 ],[ 'destination-unavailable', null, 0, 0, 0 ],[ 'destination-IP-prohibited', null, 0, 0, 0 ],[ 'destination-IP-unroutable', null, 0, 0, 0 ],[ 'connection-refused', null, 0, 0, 0 ],[ 'connection-terminated', null, 0, 0, 0 ],[ 'connection-timeout', null, 0, 0, 0 ],[ 'connection-read-timeout', null, 0, 0, 0 ],[ 'connection-write-timeout', null, 0, 0, 0 ],[ 'connection-limit-reached', null, 0, 0, 0 ],[ 'TLS-protocol-error', null, 0, 0, 0 ],[ 'TLS-certificate-error', null, 0, 0, 0 ],[ 'TLS-alert-received', _lowerFlatRecord({ fieldMetas: [['alertId', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU8, 1, 1, 1],
-          ],
-          variantSize32: 2,
-          variantAlign32: 1,
-          variantPayloadOffset32: 1,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 2, 1 ],['alertMessage', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],], size32: 16, align32: 4 }), 16, 4, 5 ],[ 'HTTP-request-denied', null, 0, 0, 0 ],[ 'HTTP-request-length-required', null, 0, 0, 0 ],[ 'HTTP-request-body-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU64, 8, 8, 1],
-          ],
-          variantSize32: 16,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 16, 8, 2 ],[ 'HTTP-request-method-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-invalid', null, 0, 0, 0 ],[ 'HTTP-request-URI-too-long', null, 0, 0, 0 ],[ 'HTTP-request-header-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-request-header-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-          _lowerFlatOption({
-            caseMetas: [
-            [ 'none', null, 0, 0, 0 ],
-            [ 'some', _lowerFlatStringAny, 8, 4, 2],
-            ],
-            variantSize32: 12,
-            variantAlign32: 4,
-            variantPayloadOffset32: 4,
-            variantFlatCount: 3,
-            payloadMaybeNull: false,
-          })
-          , 12, 4 ],['fieldSize', 
-          _lowerFlatOption({
-            caseMetas: [
-            [ 'none', null, 0, 0, 0 ],
-            [ 'some', _lowerFlatU32, 4, 4, 1],
-            ],
-            variantSize32: 8,
-            variantAlign32: 4,
-            variantPayloadOffset32: 4,
-            variantFlatCount: 2,
-            payloadMaybeNull: false,
-          })
-          , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5],
-          ],
-          variantSize32: 24,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 6,
-          payloadMaybeNull: false,
-        })
-        , 24, 4, 6 ],[ 'HTTP-request-trailer-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-request-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-incomplete', null, 0, 0, 0 ],[ 'HTTP-response-header-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-response-header-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-body-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU64, 8, 8, 1],
-          ],
-          variantSize32: 16,
-          variantAlign32: 8,
-          variantPayloadOffset32: 8,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 16, 8, 2 ],[ 'HTTP-response-trailer-section-size', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4, 2 ],[ 'HTTP-response-trailer-size', _lowerFlatRecord({ fieldMetas: [['fieldName', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4 ],['fieldSize', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatU32, 4, 4, 1],
-          ],
-          variantSize32: 8,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 2,
-          payloadMaybeNull: false,
-        })
-        , 8, 4 ],], size32: 20, align32: 4 }), 20, 4, 5 ],[ 'HTTP-response-transfer-coding', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],[ 'HTTP-response-content-coding', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],[ 'HTTP-response-timeout', null, 0, 0, 0 ],[ 'HTTP-upgrade-failed', null, 0, 0, 0 ],[ 'HTTP-protocol-error', null, 0, 0, 0 ],[ 'loop-detected', null, 0, 0, 0 ],[ 'configuration-error', null, 0, 0, 0 ],[ 'internal-error', 
-        _lowerFlatOption({
-          caseMetas: [
-          [ 'none', null, 0, 0, 0 ],
-          [ 'some', _lowerFlatStringAny, 8, 4, 2],
-          ],
-          variantSize32: 12,
-          variantAlign32: 4,
-          variantPayloadOffset32: 4,
-          variantFlatCount: 3,
-          payloadMaybeNull: false,
-        })
-        , 12, 4, 3 ],],
-        variantSize32: 32,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 7,
-      } ), 40, 8, 8 ],
-      ],
-      variantSize32: 40,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 8,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline59,
-  },
-  );
-  let trampoline60 = _trampoline60.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 60,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline60.manuallyAsync,
+    isManualAsync: _trampoline63.manuallyAsync,
     paramLiftFns: [_liftFlatList({
       elemLiftFn: _liftFlatBorrow.bind(null, 0),
       elemAlign32: 4,
@@ -22910,6 +22767,7 @@ let gen= (function* _initGenerator () {
       elemLowerFn: _lowerFlatU32,
       elemSize32: 4,
       elemAlign32: 4,
+      typedArray: Uint32Array,
     })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
@@ -22920,15 +22778,12 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline60,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 60,
+    importFn: _trampoline63,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 63,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline60.manuallyAsync,
+    isManualAsync: _trampoline63.manuallyAsync,
     paramLiftFns: [_liftFlatList({
       elemLiftFn: _liftFlatBorrow.bind(null, 0),
       elemAlign32: 4,
@@ -22939,6 +22794,7 @@ let gen= (function* _initGenerator () {
       elemLowerFn: _lowerFlatU32,
       elemSize32: 4,
       elemAlign32: 4,
+      typedArray: Uint32Array,
     })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
@@ -22949,368 +22805,30 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline60,
-  },
-  );
-  let trampoline61 = _trampoline61.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 61,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline61.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 12, 4, 4 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 12, 4, 4 ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline61,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 61,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline61.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 2)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 12, 4, 4 ],
-      [ 'err', _lowerFlatVariant({
-        caseMetas: [[ 'last-operation-failed', _lowerFlatOwn({
-          componentIdx: 0,
-          tableIdx: 1,
-          lowerFn: 
-          function lowerImportedOwnedHost_Error$1(obj) {
-            if (!(obj instanceof Error$1)) {
-              throw new TypeError('Resource error: Not a valid \"Error$1\" resource.');
-            }
-            let handle = obj[symbolRscHandle];
-            if (!handle) {
-              const rep = obj[symbolRscRep] || ++captureCnt1;
-              captureTable1.set(rep, obj);
-              handle = rscTableCreateOwn(handleTable1, rep);
-            }
-            return handle;
-          }
-          ,
-        }), 4, 4, 1 ],[ 'closed', null, 0, 0, 0 ],],
-        variantSize32: 8,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 2,
-      } ), 12, 4, 4 ],
-      ],
-      variantSize32: 12,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline61,
-  },
-  );
-  let trampoline62 = _trampoline62.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 62,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline62.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 3,
-        lowerFn: 
-        function lowerImportedOwnedHost_InputStream(obj) {
-          if (!(obj instanceof InputStream)) {
-            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt3;
-            captureTable3.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable3, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline62,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 62,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline62.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 3,
-        lowerFn: 
-        function lowerImportedOwnedHost_InputStream(obj) {
-          if (!(obj instanceof InputStream)) {
-            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt3;
-            captureTable3.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable3, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline62,
-  },
-  );
-  let trampoline63 = _trampoline63.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 63,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline63.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 2,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutputStream(obj) {
-          if (!(obj instanceof OutputStream)) {
-            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
-            captureTable2.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable2, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline63,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 63,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline63.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 2,
-        lowerFn: 
-        function lowerImportedOwnedHost_OutputStream(obj) {
-          if (!(obj instanceof OutputStream)) {
-            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
-            captureTable2.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable2, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline63,
-  },
-  );
-  let trampoline64 = _trampoline64.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline64 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 64,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline64.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
-        tableIdx: 2,
+        tableIdx: 3,
         lowerFn: 
-        function lowerImportedOwnedHost_OutputStream(obj) {
-          if (!(obj instanceof OutputStream)) {
-            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
+        function lowerImportedOwnedHost_InputStream(obj) {
+          if (!(obj instanceof InputStream)) {
+            throw new TypeError('Resource error: Not a valid \"InputStream\" resource.');
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
-            captureTable2.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable2, rep);
+            const rep = (obj[symbolRscRep] ?? ++captureCnt3) >>> 0;
+            captureTable3.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable3, rep);
           }
           return handle;
         }
@@ -23318,7 +22836,7 @@ let gen= (function* _initGenerator () {
       }), 8, 4, 4 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -23342,14 +22860,66 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline64,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 64,
+  });
+  let trampoline65 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 65,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline64.manuallyAsync,
+    isManualAsync: _trampoline65.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatU64],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 2,
+        lowerFn: 
+        function lowerImportedOwnedHost_OutputStream(obj) {
+          if (!(obj instanceof OutputStream)) {
+            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
+            captureTable2.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable2, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline65,
+  });
+  let trampoline66 = _trampoline66.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$3, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 66,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline66.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
     resultLowerFns: [
     _lowerFlatResult({
@@ -23364,7 +22934,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt2;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
             captureTable2.set(rep, obj);
             handle = rscTableCreateOwn(handleTable2, rep);
           }
@@ -23374,143 +22944,7 @@ let gen= (function* _initGenerator () {
       }), 8, 4, 4 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 8, 4, 4 ],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline64,
-  },
-  );
-  let trampoline65 = _trampoline65.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 65,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline65.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 }), 2, 1, 1 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline65,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 65,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline65.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 }), 2, 1, 1 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline65,
-  },
-  );
-  let trampoline66 = _trampoline66.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 66,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline66.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 15,
-        lowerFn: 
-        function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
-          if (!(obj instanceof DirectoryEntryStream)) {
-            throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt15;
-            captureTable15.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable15, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 8, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -23534,10 +22968,7 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline66,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 66,
     componentIdx: 0,
     isAsync: false,
@@ -23548,17 +22979,17 @@ let gen= (function* _initGenerator () {
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
-        tableIdx: 15,
+        tableIdx: 2,
         lowerFn: 
-        function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
-          if (!(obj instanceof DirectoryEntryStream)) {
-            throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
+        function lowerImportedOwnedHost_OutputStream(obj) {
+          if (!(obj instanceof OutputStream)) {
+            throw new TypeError('Resource error: Not a valid \"OutputStream\" resource.');
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt15;
-            captureTable15.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable15, rep);
+            const rep = (obj[symbolRscRep] ?? ++captureCnt2) >>> 0;
+            captureTable2.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable2, rep);
           }
           return handle;
         }
@@ -23566,7 +22997,7 @@ let gen= (function* _initGenerator () {
       }), 8, 4, 4 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -23590,23 +23021,20 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline66,
-  },
-  );
-  let trampoline67 = _trampoline67.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline67 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 67,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline67.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
-      [ 'ok', null, 2, 1, 1 ],
+      [ 'ok', _lowerFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 }), 2, 1, 1 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -23630,405 +23058,29 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline67,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 67,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline67.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', null, 2, 1, 1 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 2, 1, 1 ],
-      ],
-      variantSize32: 2,
-      variantAlign32: 1,
-      variantPayloadOffset32: 1,
-      variantFlatCount: 2,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline67,
-  },
-  );
-  let trampoline68 = _trampoline68.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline68 = _trampoline68.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$3, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 68,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline68.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
-      _lowerFlatEnum({
-        caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['dataModificationTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['statusChangeTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 104, 8, 8 ],
-      ],
-      variantSize32: 104,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 13,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline68,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 68,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline68.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
-      _lowerFlatEnum({
-        caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['dataModificationTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['statusChangeTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 104, 8, 8 ],
-      ],
-      variantSize32: 104,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 13,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline68,
-  },
-  );
-  let trampoline69 = _trampoline69.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 69,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline69.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
-      _lowerFlatEnum({
-        caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['dataModificationTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['statusChangeTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 104, 8, 8 ],
-      ],
-      variantSize32: 104,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 13,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline69,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 69,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline69.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
-      _lowerFlatEnum({
-        caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['dataModificationTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],['statusChangeTimestamp', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
-        ],
-        variantSize32: 24,
-        variantAlign32: 8,
-        variantPayloadOffset32: 8,
-        variantFlatCount: 3,
-        payloadMaybeNull: false,
-      })
-      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 104, 8, 8 ],
-      ],
-      variantSize32: 104,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 13,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline69,
-  },
-  );
-  let trampoline70 = _trampoline70.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 70,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline70.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny,_liftFlatFlags({ names: ['create','directory','exclusive','truncate'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 })],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
-        tableIdx: 14,
+        tableIdx: 15,
         lowerFn: 
-        function lowerImportedOwnedHost_Descriptor(obj) {
-          if (!(obj instanceof Descriptor)) {
-            throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
+        function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
+          if (!(obj instanceof DirectoryEntryStream)) {
+            throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt14;
-            captureTable14.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable14, rep);
+            const rep = (obj[symbolRscRep] ?? ++captureCnt15) >>> 0;
+            captureTable15.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable15, rep);
           }
           return handle;
         }
@@ -24036,7 +23088,7 @@ let gen= (function* _initGenerator () {
       }), 8, 4, 4 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24059,32 +23111,29 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline70,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 70,
+    importFn: _trampoline68,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 68,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline70.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny,_liftFlatFlags({ names: ['create','directory','exclusive','truncate'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 })],
+    isManualAsync: _trampoline68.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
     resultLowerFns: [
     _lowerFlatResult({
       caseMetas: [
       [ 'ok', _lowerFlatOwn({
         componentIdx: 0,
-        tableIdx: 14,
+        tableIdx: 15,
         lowerFn: 
-        function lowerImportedOwnedHost_Descriptor(obj) {
-          if (!(obj instanceof Descriptor)) {
-            throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
+        function lowerImportedOwnedHost_DirectoryEntryStream(obj) {
+          if (!(obj instanceof DirectoryEntryStream)) {
+            throw new TypeError('Resource error: Not a valid \"DirectoryEntryStream\" resource.');
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt14;
-            captureTable14.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable14, rep);
+            const rep = (obj[symbolRscRep] ?? ++captureCnt15) >>> 0;
+            captureTable15.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable15, rep);
           }
           return handle;
         }
@@ -24092,7 +23141,7 @@ let gen= (function* _initGenerator () {
       }), 8, 4, 4 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24115,16 +23164,515 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
+    importFn: _trampoline68,
+  });
+  let trampoline69 = _trampoline69.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$2, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 69,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline69.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 2, 1, 1 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 2, 1, 1 ],
+      ],
+      variantSize32: 2,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline69,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 69,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline69.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', null, 2, 1, 1 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 2, 1, 1 ],
+      ],
+      variantSize32: 2,
+      variantAlign32: 1,
+      variantPayloadOffset32: 1,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline69,
+  });
+  let trampoline70 = _trampoline70.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$3, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 70,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline70.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
+      _lowerFlatEnum({
+        caseMetas: [["unknown", null, 1, 1, 1],["block-device", null, 1, 1, 1],["character-device", null, 1, 1, 1],["directory", null, 1, 1, 1],["fifo", null, 1, 1, 1],["symbolic-link", null, 1, 1, 1],["regular-file", null, 1, 1, 1],["socket", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['dataModificationTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['statusChangeTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 104, 8, 8 ],
+      ],
+      variantSize32: 104,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
+      variantFlatCount: 13,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
     importFn: _trampoline70,
-  },
-  );
-  let trampoline71 = _trampoline71.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 70,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline70.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
+      _lowerFlatEnum({
+        caseMetas: [["unknown", null, 1, 1, 1],["block-device", null, 1, 1, 1],["character-device", null, 1, 1, 1],["directory", null, 1, 1, 1],["fifo", null, 1, 1, 1],["symbolic-link", null, 1, 1, 1],["regular-file", null, 1, 1, 1],["socket", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['dataModificationTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['statusChangeTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 104, 8, 8 ],
+      ],
+      variantSize32: 104,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
+      variantFlatCount: 13,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline70,
+  });
+  let trampoline71 = _trampoline71.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$5, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 71,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline71.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
+      _lowerFlatEnum({
+        caseMetas: [["unknown", null, 1, 1, 1],["block-device", null, 1, 1, 1],["character-device", null, 1, 1, 1],["directory", null, 1, 1, 1],["fifo", null, 1, 1, 1],["symbolic-link", null, 1, 1, 1],["regular-file", null, 1, 1, 1],["socket", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['dataModificationTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['statusChangeTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 104, 8, 8 ],
+      ],
+      variantSize32: 104,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
+      variantFlatCount: 13,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline71,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 71,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline71.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatRecord({ fieldMetas: [['type', 
+      _lowerFlatEnum({
+        caseMetas: [["unknown", null, 1, 1, 1],["block-device", null, 1, 1, 1],["character-device", null, 1, 1, 1],["directory", null, 1, 1, 1],["fifo", null, 1, 1, 1],["symbolic-link", null, 1, 1, 1],["regular-file", null, 1, 1, 1],["socket", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 1, 1 ],['linkCount', _lowerFlatU64, 8, 8 ],['size', _lowerFlatU64, 8, 8 ],['dataAccessTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['dataModificationTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],['statusChangeTimestamp', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 }), 16, 8, 2],
+        ],
+        variantSize32: 24,
+        variantAlign32: 8,
+        variantPayloadOffset32: 8,
+        variantFlatCount: 3,
+        payloadMaybeNull: false,
+      })
+      , 24, 8 ],], size32: 96, align32: 8 }), 104, 8, 8 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 104, 8, 8 ],
+      ],
+      variantSize32: 104,
+      variantAlign32: 8,
+      variantPayloadOffset32: 8,
+      variantFlatCount: 13,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline71,
+  });
+  let trampoline72 = _trampoline72.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$6, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 72,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline72.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny,_liftFlatFlags({ names: ['create','directory','exclusive','truncate'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 })],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 14,
+        lowerFn: 
+        function lowerImportedOwnedHost_Descriptor(obj) {
+          if (!(obj instanceof Descriptor)) {
+            throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt14) >>> 0;
+            captureTable14.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable14, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline72,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 72,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline72.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny,_liftFlatFlags({ names: ['create','directory','exclusive','truncate'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatFlags({ names: ['read','write','fileIntegritySync','dataIntegritySync','requestedWriteSync','mutateDirectory'], size32: 1, align32: 1, intSizeBytes: 1 })],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', _lowerFlatOwn({
+        componentIdx: 0,
+        tableIdx: 14,
+        lowerFn: 
+        function lowerImportedOwnedHost_Descriptor(obj) {
+          if (!(obj instanceof Descriptor)) {
+            throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
+          }
+          let handle = obj[symbolRscHandle];
+          if (!handle) {
+            const rep = (obj[symbolRscRep] ?? ++captureCnt14) >>> 0;
+            captureTable14.set(rep, obj);
+            handle = rscTableCreateOwn(handleTable14, rep);
+          }
+          return handle;
+        }
+        ,
+      }), 8, 4, 4 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 8, 4, 4 ],
+      ],
+      variantSize32: 8,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 2,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline72,
+  });
+  let trampoline73 = _trampoline73.manuallyAsync ? _conditionalSuspendingHostImport(hostImportModule$2, 0, _suspendingImport(0, _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 73,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline73.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
     resultLowerFns: [
     _lowerFlatResult({
@@ -24132,7 +23680,7 @@ let gen= (function* _initGenerator () {
       [ 'ok', null, 2, 1, 1 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24155,15 +23703,12 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline71,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 71,
+    importFn: _trampoline73,
+  }), false, false, false, true)) : _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 73,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline71.manuallyAsync,
+    isManualAsync: _trampoline73.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatStringAny],
     resultLowerFns: [
     _lowerFlatResult({
@@ -24171,7 +23716,7 @@ let gen= (function* _initGenerator () {
       [ 'ok', null, 2, 1, 1 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24194,16 +23739,13 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline71,
-  },
-  );
-  let trampoline72 = _trampoline72.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 72,
+    importFn: _trampoline73,
+  });
+  let trampoline74 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 74,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline72.manuallyAsync,
+    isManualAsync: _trampoline74.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
     resultLowerFns: [
     _lowerFlatResult({
@@ -24211,7 +23753,7 @@ let gen= (function* _initGenerator () {
       [ 'ok', _lowerFlatRecord({ fieldMetas: [['lower', _lowerFlatU64, 8, 8 ],['upper', _lowerFlatU64, 8, 8 ],], size32: 16, align32: 8 }), 24, 8, 8 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24234,55 +23776,13 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline72,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 72,
+    importFn: _trampoline74,
+  });
+  let trampoline75 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 75,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline72.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['lower', _lowerFlatU64, 8, 8 ],['upper', _lowerFlatU64, 8, 8 ],], size32: 16, align32: 8 }), 24, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 24, 8, 8 ],
-      ],
-      variantSize32: 24,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline72,
-  },
-  );
-  let trampoline73 = _trampoline73.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 73,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline73.manuallyAsync,
+    isManualAsync: _trampoline75.manuallyAsync,
     paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
     resultLowerFns: [
     _lowerFlatResult({
@@ -24290,7 +23790,7 @@ let gen= (function* _initGenerator () {
       [ 'ok', _lowerFlatRecord({ fieldMetas: [['lower', _lowerFlatU64, 8, 8 ],['upper', _lowerFlatU64, 8, 8 ],], size32: 16, align32: 8 }), 24, 8, 8 ],
       [ 'err', 
       _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
         variantSize32: 1,
         variantAlign32: 1,
         variantPayloadOffset32: 1,
@@ -24313,223 +23813,70 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline73,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 73,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline73.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 14),_liftFlatFlags({ names: ['symlinkFollow'], size32: 1, align32: 1, intSizeBytes: 1 }),_liftFlatStringAny],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', _lowerFlatRecord({ fieldMetas: [['lower', _lowerFlatU64, 8, 8 ],['upper', _lowerFlatU64, 8, 8 ],], size32: 16, align32: 8 }), 24, 8, 8 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 24, 8, 8 ],
-      ],
-      variantSize32: 24,
-      variantAlign32: 8,
-      variantPayloadOffset32: 8,
-      variantFlatCount: 3,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline73,
-  },
-  );
-  let trampoline74 = _trampoline74.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 74,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline74.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 15)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['type', 
-        _lowerFlatEnum({
-          caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-          variantSize32: 1,
-          variantAlign32: 1,
-          variantPayloadOffset32: 1,
-          variantFlatCount: 1,
-        })
-        , 1, 1 ],['name', _lowerFlatStringAny, 8, 4 ],], size32: 12, align32: 4 }), 12, 4, 3],
-        ],
-        variantSize32: 16,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 4,
-        payloadMaybeNull: false,
-      })
-      , 20, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 20, 4, 4 ],
-      ],
-      variantSize32: 20,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 5,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline74,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 74,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline74.manuallyAsync,
-    paramLiftFns: [_liftFlatBorrow.bind(null, 15)],
-    resultLowerFns: [
-    _lowerFlatResult({
-      caseMetas: [
-      [ 'ok', 
-      _lowerFlatOption({
-        caseMetas: [
-        [ 'none', null, 0, 0, 0 ],
-        [ 'some', _lowerFlatRecord({ fieldMetas: [['type', 
-        _lowerFlatEnum({
-          caseMetas: [['unknown', null, 1, 1, 1],['block-device', null, 1, 1, 1],['character-device', null, 1, 1, 1],['directory', null, 1, 1, 1],['fifo', null, 1, 1, 1],['symbolic-link', null, 1, 1, 1],['regular-file', null, 1, 1, 1],['socket', null, 1, 1, 1],],
-          variantSize32: 1,
-          variantAlign32: 1,
-          variantPayloadOffset32: 1,
-          variantFlatCount: 1,
-        })
-        , 1, 1 ],['name', _lowerFlatStringAny, 8, 4 ],], size32: 12, align32: 4 }), 12, 4, 3],
-        ],
-        variantSize32: 16,
-        variantAlign32: 4,
-        variantPayloadOffset32: 4,
-        variantFlatCount: 4,
-        payloadMaybeNull: false,
-      })
-      , 20, 4, 4 ],
-      [ 'err', 
-      _lowerFlatEnum({
-        caseMetas: [['access', null, 1, 1, 1],['would-block', null, 1, 1, 1],['already', null, 1, 1, 1],['bad-descriptor', null, 1, 1, 1],['busy', null, 1, 1, 1],['deadlock', null, 1, 1, 1],['quota', null, 1, 1, 1],['exist', null, 1, 1, 1],['file-too-large', null, 1, 1, 1],['illegal-byte-sequence', null, 1, 1, 1],['in-progress', null, 1, 1, 1],['interrupted', null, 1, 1, 1],['invalid', null, 1, 1, 1],['io', null, 1, 1, 1],['is-directory', null, 1, 1, 1],['loop', null, 1, 1, 1],['too-many-links', null, 1, 1, 1],['message-size', null, 1, 1, 1],['name-too-long', null, 1, 1, 1],['no-device', null, 1, 1, 1],['no-entry', null, 1, 1, 1],['no-lock', null, 1, 1, 1],['insufficient-memory', null, 1, 1, 1],['insufficient-space', null, 1, 1, 1],['not-directory', null, 1, 1, 1],['not-empty', null, 1, 1, 1],['not-recoverable', null, 1, 1, 1],['unsupported', null, 1, 1, 1],['no-tty', null, 1, 1, 1],['no-such-device', null, 1, 1, 1],['overflow', null, 1, 1, 1],['not-permitted', null, 1, 1, 1],['pipe', null, 1, 1, 1],['read-only', null, 1, 1, 1],['invalid-seek', null, 1, 1, 1],['text-file-busy', null, 1, 1, 1],['cross-device', null, 1, 1, 1],],
-        variantSize32: 1,
-        variantAlign32: 1,
-        variantPayloadOffset32: 1,
-        variantFlatCount: 1,
-      })
-      , 20, 4, 4 ],
-      ],
-      variantSize32: 20,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 5,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline74,
-  },
-  );
-  let trampoline75 = _trampoline75.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 75,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline75.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatStringAny, 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
-    })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
     importFn: _trampoline75,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 75,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline75.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatStringAny, 8, 4],[_lowerFlatStringAny, 8, 4],], size32: 16, align32: 4 }),
-      elemSize32: 16,
-      elemAlign32: 4,
-    })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline75,
-  },
-  );
-  let trampoline76 = _trampoline76.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline76 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 76,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline76.manuallyAsync,
+    paramLiftFns: [_liftFlatBorrow.bind(null, 15)],
+    resultLowerFns: [
+    _lowerFlatResult({
+      caseMetas: [
+      [ 'ok', 
+      _lowerFlatOption({
+        caseMetas: [
+        [ 'none', null, 0, 0, 0 ],
+        [ 'some', _lowerFlatRecord({ fieldMetas: [['type', 
+        _lowerFlatEnum({
+          caseMetas: [["unknown", null, 1, 1, 1],["block-device", null, 1, 1, 1],["character-device", null, 1, 1, 1],["directory", null, 1, 1, 1],["fifo", null, 1, 1, 1],["symbolic-link", null, 1, 1, 1],["regular-file", null, 1, 1, 1],["socket", null, 1, 1, 1],],
+          variantSize32: 1,
+          variantAlign32: 1,
+          variantPayloadOffset32: 1,
+          variantFlatCount: 1,
+        })
+        , 1, 1 ],['name', _lowerFlatStringAny, 8, 4 ],], size32: 12, align32: 4 }), 12, 4, 3],
+        ],
+        variantSize32: 16,
+        variantAlign32: 4,
+        variantPayloadOffset32: 4,
+        variantFlatCount: 4,
+        payloadMaybeNull: false,
+      })
+      , 20, 4, 4 ],
+      [ 'err', 
+      _lowerFlatEnum({
+        caseMetas: [["access", null, 1, 1, 1],["would-block", null, 1, 1, 1],["already", null, 1, 1, 1],["bad-descriptor", null, 1, 1, 1],["busy", null, 1, 1, 1],["deadlock", null, 1, 1, 1],["quota", null, 1, 1, 1],["exist", null, 1, 1, 1],["file-too-large", null, 1, 1, 1],["illegal-byte-sequence", null, 1, 1, 1],["in-progress", null, 1, 1, 1],["interrupted", null, 1, 1, 1],["invalid", null, 1, 1, 1],["io", null, 1, 1, 1],["is-directory", null, 1, 1, 1],["loop", null, 1, 1, 1],["too-many-links", null, 1, 1, 1],["message-size", null, 1, 1, 1],["name-too-long", null, 1, 1, 1],["no-device", null, 1, 1, 1],["no-entry", null, 1, 1, 1],["no-lock", null, 1, 1, 1],["insufficient-memory", null, 1, 1, 1],["insufficient-space", null, 1, 1, 1],["not-directory", null, 1, 1, 1],["not-empty", null, 1, 1, 1],["not-recoverable", null, 1, 1, 1],["unsupported", null, 1, 1, 1],["no-tty", null, 1, 1, 1],["no-such-device", null, 1, 1, 1],["overflow", null, 1, 1, 1],["not-permitted", null, 1, 1, 1],["pipe", null, 1, 1, 1],["read-only", null, 1, 1, 1],["invalid-seek", null, 1, 1, 1],["text-file-busy", null, 1, 1, 1],["cross-device", null, 1, 1, 1],],
+        variantSize32: 1,
+        variantAlign32: 1,
+        variantPayloadOffset32: 1,
+        variantFlatCount: 1,
+      })
+      , 20, 4, 4 ],
+      ],
+      variantSize32: 20,
+      variantAlign32: 4,
+      variantPayloadOffset32: 4,
+      variantFlatCount: 5,
+    })
+    ],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: () => realloc0,
+    importFn: _trampoline76,
+  });
+  let trampoline77 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 77,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline77.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [
     _lowerFlatOption({
@@ -24545,7 +23892,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt12;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt12) >>> 0;
             captureTable12.set(rep, obj);
             handle = rscTableCreateOwn(handleTable12, rep);
           }
@@ -24570,160 +23917,9 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline76,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 76,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline76.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 12,
-        lowerFn: 
-        function lowerImportedOwnedHost_TerminalInput(obj) {
-          if (!(obj instanceof TerminalInput)) {
-            throw new TypeError('Resource error: Not a valid \"TerminalInput\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt12;
-            captureTable12.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable12, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4, 1],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-      payloadMaybeNull: false,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline76,
-  },
-  );
-  let trampoline77 = _trampoline77.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 77,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline77.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 13,
-        lowerFn: 
-        function lowerImportedOwnedHost_TerminalOutput(obj) {
-          if (!(obj instanceof TerminalOutput)) {
-            throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt13;
-            captureTable13.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable13, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4, 1],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-      payloadMaybeNull: false,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline77,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 77,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline77.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [
-    _lowerFlatOption({
-      caseMetas: [
-      [ 'none', null, 0, 0, 0 ],
-      [ 'some', _lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 13,
-        lowerFn: 
-        function lowerImportedOwnedHost_TerminalOutput(obj) {
-          if (!(obj instanceof TerminalOutput)) {
-            throw new TypeError('Resource error: Not a valid \"TerminalOutput\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt13;
-            captureTable13.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable13, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4, 1],
-      ],
-      variantSize32: 8,
-      variantAlign32: 4,
-      variantPayloadOffset32: 4,
-      variantFlatCount: 2,
-      payloadMaybeNull: false,
-    })
-    ],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline77,
-  },
-  );
-  let trampoline78 = _trampoline78.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline78 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 78,
     componentIdx: 0,
     isAsync: false,
@@ -24743,7 +23939,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt13;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt13) >>> 0;
             captureTable13.set(rep, obj);
             handle = rscTableCreateOwn(handleTable13, rep);
           }
@@ -24769,14 +23965,12 @@ let gen= (function* _initGenerator () {
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
     importFn: _trampoline78,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 78,
+  });
+  let trampoline79 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 79,
     componentIdx: 0,
     isAsync: false,
-    isManualAsync: _trampoline78.manuallyAsync,
+    isManualAsync: _trampoline79.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [
     _lowerFlatOption({
@@ -24792,7 +23986,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt13;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt13) >>> 0;
             captureTable13.set(rep, obj);
             handle = rscTableCreateOwn(handleTable13, rep);
           }
@@ -24817,57 +24011,31 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: undefined,
-    importFn: _trampoline78,
-  },
-  );
-  let trampoline79 = _trampoline79.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 79,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline79.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
     importFn: _trampoline79,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 79,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline79.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: undefined,
-    importFn: _trampoline79,
-  },
-  );
-  let trampoline80 = _trampoline80.manuallyAsync ? new WebAssembly.Suspending(_suspendingImport(0, _lowerImportBackwardsCompat.bind(
-  null,
-  {
+  });
+  let trampoline80 = _lowerImportBackwardsCompat.bind(null, {
     trampolineIdx: 80,
     componentIdx: 0,
     isAsync: false,
     isManualAsync: _trampoline80.manuallyAsync,
+    paramLiftFns: [],
+    resultLowerFns: [_lowerFlatRecord({ fieldMetas: [['seconds', _lowerFlatU64, 8, 8 ],['nanoseconds', _lowerFlatU32, 4, 4 ],], size32: 16, align32: 8 })],
+    hasResultPointer: true,
+    funcTypeIsAsync: false,
+    getCallbackFn: () => null,
+    getPostReturnFn: () => null,
+    isCancellable: false,
+    memoryIdx: 0,
+    stringEncoding: 'utf8',
+    getMemoryFn: () => memory0,
+    getReallocFn: undefined,
+    importFn: _trampoline80,
+  });
+  let trampoline81 = _lowerImportBackwardsCompat.bind(null, {
+    trampolineIdx: 81,
+    componentIdx: 0,
+    isAsync: false,
+    isManualAsync: _trampoline81.manuallyAsync,
     paramLiftFns: [],
     resultLowerFns: [_lowerFlatList({
       elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatOwn({
@@ -24880,7 +24048,7 @@ let gen= (function* _initGenerator () {
           }
           let handle = obj[symbolRscHandle];
           if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt14;
+            const rep = (obj[symbolRscRep] ?? ++captureCnt14) >>> 0;
             captureTable14.set(rep, obj);
             handle = rscTableCreateOwn(handleTable14, rep);
           }
@@ -24890,6 +24058,7 @@ let gen= (function* _initGenerator () {
       }), 4, 4],[_lowerFlatStringAny, 8, 4],], size32: 12, align32: 4 }),
       elemSize32: 12,
       elemAlign32: 4,
+      typedArray: undefined,
     })],
     hasResultPointer: true,
     funcTypeIsAsync: false,
@@ -24900,265 +24069,236 @@ let gen= (function* _initGenerator () {
     stringEncoding: 'utf8',
     getMemoryFn: () => memory0,
     getReallocFn: () => realloc0,
-    importFn: _trampoline80,
-  },
-  ))) : _lowerImportBackwardsCompat.bind(
-  null,
-  {
-    trampolineIdx: 80,
-    componentIdx: 0,
-    isAsync: false,
-    isManualAsync: _trampoline80.manuallyAsync,
-    paramLiftFns: [],
-    resultLowerFns: [_lowerFlatList({
-      elemLowerFn: _lowerFlatTuple({ elemLowerMetas: [[_lowerFlatOwn({
-        componentIdx: 0,
-        tableIdx: 14,
-        lowerFn: 
-        function lowerImportedOwnedHost_Descriptor(obj) {
-          if (!(obj instanceof Descriptor)) {
-            throw new TypeError('Resource error: Not a valid \"Descriptor\" resource.');
-          }
-          let handle = obj[symbolRscHandle];
-          if (!handle) {
-            const rep = obj[symbolRscRep] || ++captureCnt14;
-            captureTable14.set(rep, obj);
-            handle = rscTableCreateOwn(handleTable14, rep);
-          }
-          return handle;
-        }
-        ,
-      }), 4, 4],[_lowerFlatStringAny, 8, 4],], size32: 12, align32: 4 }),
-      elemSize32: 12,
-      elemAlign32: 4,
-    })],
-    hasResultPointer: true,
-    funcTypeIsAsync: false,
-    getCallbackFn: () => null,
-    getPostReturnFn: () => null,
-    isCancellable: false,
-    memoryIdx: 0,
-    stringEncoding: 'utf8',
-    getMemoryFn: () => memory0,
-    getReallocFn: () => realloc0,
-    importFn: _trampoline80,
-  },
-  );
-  Promise.all([module0, module1, module2]).catch(() => {});
-  ({ exports: exports0 } = yield instantiateCore(yield module1));
-  ({ exports: exports1 } = yield instantiateCore(yield module0, {
-    'component:aws-cli/providers': {
-      'provide-credentials': Object.assign(exports0['1'], { _jcoMaySuspend: false }),
-      'provide-region': Object.assign(exports0['2'], { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/environment@0.2.0': {
-      'get-environment': Object.assign(exports0['38'], { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/environment@0.2.12': {
-      'get-arguments': Object.assign(exports0['3'], { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/exit@0.2.0': {
-      exit: Object.assign(trampoline32, { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/stderr@0.2.0': {
-      'get-stderr': Object.assign(trampoline36, { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/stdin@0.2.0': {
-      'get-stdin': Object.assign(trampoline34, { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/stdout@0.2.0': {
-      'get-stdout': Object.assign(trampoline35, { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/terminal-input@0.2.0': {
-      '[resource-drop]terminal-input': Object.assign(_guardMayLeave(0, trampoline28), { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/terminal-output@0.2.0': {
-      '[resource-drop]terminal-output': Object.assign(_guardMayLeave(0, trampoline29), { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/terminal-stderr@0.2.0': {
-      'get-terminal-stderr': Object.assign(exports0['41'], { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/terminal-stdin@0.2.0': {
-      'get-terminal-stdin': Object.assign(exports0['39'], { _jcoMaySuspend: false }),
-    },
-    'wasi:cli/terminal-stdout@0.2.0': {
-      'get-terminal-stdout': Object.assign(exports0['40'], { _jcoMaySuspend: false }),
-    },
-    'wasi:clocks/monotonic-clock@0.2.0': {
-      now: Object.assign(trampoline15, { _jcoMaySuspend: false }),
-      'subscribe-duration': trampoline14,
-    },
-    'wasi:clocks/monotonic-clock@0.2.12': {
-      now: Object.assign(trampoline15, { _jcoMaySuspend: false }),
-      'subscribe-duration': trampoline14,
-    },
-    'wasi:clocks/wall-clock@0.2.0': {
-      now: Object.assign(exports0['42'], { _jcoMaySuspend: false }),
-    },
-    'wasi:filesystem/preopens@0.2.0': {
-      'get-directories': Object.assign(exports0['43'], { _jcoMaySuspend: false }),
-    },
-    'wasi:filesystem/types@0.2.0': {
-      '[method]descriptor.append-via-stream': Object.assign(exports0['27'], { _jcoMaySuspend: false }),
-      '[method]descriptor.create-directory-at': Object.assign(exports0['30'], { _jcoMaySuspend: false }),
-      '[method]descriptor.get-flags': Object.assign(exports0['28'], { _jcoMaySuspend: false }),
-      '[method]descriptor.metadata-hash': Object.assign(exports0['35'], { _jcoMaySuspend: false }),
-      '[method]descriptor.metadata-hash-at': Object.assign(exports0['36'], { _jcoMaySuspend: false }),
-      '[method]descriptor.open-at': Object.assign(exports0['33'], { _jcoMaySuspend: false }),
-      '[method]descriptor.read-directory': Object.assign(exports0['29'], { _jcoMaySuspend: false }),
-      '[method]descriptor.read-via-stream': Object.assign(exports0['25'], { _jcoMaySuspend: false }),
-      '[method]descriptor.stat': Object.assign(exports0['31'], { _jcoMaySuspend: false }),
-      '[method]descriptor.stat-at': Object.assign(exports0['32'], { _jcoMaySuspend: false }),
-      '[method]descriptor.unlink-file-at': Object.assign(exports0['34'], { _jcoMaySuspend: false }),
-      '[method]descriptor.write-via-stream': Object.assign(exports0['26'], { _jcoMaySuspend: false }),
-      '[method]directory-entry-stream.read-directory-entry': Object.assign(exports0['37'], { _jcoMaySuspend: false }),
-      '[resource-drop]descriptor': Object.assign(_guardMayLeave(0, trampoline30), { _jcoMaySuspend: false }),
-      '[resource-drop]directory-entry-stream': Object.assign(_guardMayLeave(0, trampoline31), { _jcoMaySuspend: false }),
-    },
-    'wasi:http/outgoing-handler@0.2.12': {
-      handle: Object.assign(exports0['22'], { _jcoMaySuspend: false }),
-    },
-    'wasi:http/types@0.2.12': {
-      '[constructor]fields': Object.assign(trampoline27, { _jcoMaySuspend: false }),
-      '[constructor]outgoing-request': Object.assign(trampoline16, { _jcoMaySuspend: false }),
-      '[constructor]request-options': Object.assign(trampoline18, { _jcoMaySuspend: false }),
-      '[method]fields.append': Object.assign(exports0['16'], { _jcoMaySuspend: false }),
-      '[method]fields.entries': Object.assign(exports0['15'], { _jcoMaySuspend: false }),
-      '[method]future-incoming-response.get': Object.assign(exports0['6'], { _jcoMaySuspend: false }),
-      '[method]future-incoming-response.subscribe': Object.assign(trampoline8, { _jcoMaySuspend: false }),
-      '[method]future-trailers.get': Object.assign(exports0['13'], { _jcoMaySuspend: false }),
-      '[method]future-trailers.subscribe': Object.assign(trampoline4, { _jcoMaySuspend: false }),
-      '[method]incoming-body.stream': Object.assign(exports0['5'], { _jcoMaySuspend: false }),
-      '[method]incoming-response.consume': Object.assign(exports0['7'], { _jcoMaySuspend: false }),
-      '[method]incoming-response.headers': Object.assign(trampoline10, { _jcoMaySuspend: false }),
-      '[method]incoming-response.status': Object.assign(trampoline11, { _jcoMaySuspend: false }),
-      '[method]outgoing-body.write': Object.assign(exports0['4'], { _jcoMaySuspend: false }),
-      '[method]outgoing-request.body': Object.assign(exports0['12'], { _jcoMaySuspend: false }),
-      '[method]outgoing-request.set-authority': Object.assign(exports0['10'], { _jcoMaySuspend: false }),
-      '[method]outgoing-request.set-method': Object.assign(exports0['8'], { _jcoMaySuspend: false }),
-      '[method]outgoing-request.set-path-with-query': Object.assign(exports0['11'], { _jcoMaySuspend: false }),
-      '[method]outgoing-request.set-scheme': Object.assign(exports0['9'], { _jcoMaySuspend: false }),
-      '[method]request-options.set-between-bytes-timeout': Object.assign(trampoline21, { _jcoMaySuspend: false }),
-      '[method]request-options.set-connect-timeout': Object.assign(trampoline19, { _jcoMaySuspend: false }),
-      '[method]request-options.set-first-byte-timeout': Object.assign(trampoline20, { _jcoMaySuspend: false }),
-      '[resource-drop]fields': Object.assign(_guardMayLeave(0, trampoline5), { _jcoMaySuspend: false }),
-      '[resource-drop]future-incoming-response': Object.assign(_guardMayLeave(0, trampoline9), { _jcoMaySuspend: false }),
-      '[resource-drop]future-trailers': Object.assign(_guardMayLeave(0, trampoline7), { _jcoMaySuspend: false }),
-      '[resource-drop]incoming-body': Object.assign(_guardMayLeave(0, trampoline3), { _jcoMaySuspend: false }),
-      '[resource-drop]incoming-response': Object.assign(_guardMayLeave(0, trampoline12), { _jcoMaySuspend: false }),
-      '[resource-drop]outgoing-body': Object.assign(_guardMayLeave(0, trampoline6), { _jcoMaySuspend: false }),
-      '[resource-drop]outgoing-request': Object.assign(_guardMayLeave(0, trampoline17), { _jcoMaySuspend: false }),
-      '[resource-drop]request-options': Object.assign(_guardMayLeave(0, trampoline22), { _jcoMaySuspend: false }),
-      '[static]incoming-body.finish': Object.assign(trampoline2, { _jcoMaySuspend: false }),
-      '[static]outgoing-body.finish': Object.assign(exports0['14'], { _jcoMaySuspend: false }),
-    },
-    'wasi:io/error@0.2.0': {
-      '[resource-drop]error': Object.assign(_guardMayLeave(0, trampoline1), { _jcoMaySuspend: false }),
-    },
-    'wasi:io/error@0.2.12': {
-      '[method]error.to-debug-string': Object.assign(exports0['21'], { _jcoMaySuspend: false }),
-      '[resource-drop]error': Object.assign(_guardMayLeave(0, trampoline1), { _jcoMaySuspend: false }),
-    },
-    'wasi:io/poll@0.2.0': {
-      '[method]pollable.block': trampoline33,
-      '[resource-drop]pollable': Object.assign(_guardMayLeave(0, trampoline25), { _jcoMaySuspend: false }),
-      poll: Object.assign(exports0['23'], { _jcoMaySuspend: false }),
-    },
-    'wasi:io/poll@0.2.12': {
-      '[method]pollable.ready': Object.assign(trampoline26, { _jcoMaySuspend: false }),
-      '[resource-drop]pollable': Object.assign(_guardMayLeave(0, trampoline25), { _jcoMaySuspend: false }),
-      poll: Object.assign(exports0['23'], { _jcoMaySuspend: false }),
-    },
-    'wasi:io/streams@0.2.0': {
-      '[method]input-stream.read': Object.assign(exports0['20'], { _jcoMaySuspend: false }),
-      '[method]input-stream.subscribe': Object.assign(trampoline24, { _jcoMaySuspend: false }),
-      '[method]output-stream.blocking-flush': Object.assign(exports0['24'], { _jcoMaySuspend: false }),
-      '[method]output-stream.check-write': Object.assign(exports0['18'], { _jcoMaySuspend: false }),
-      '[method]output-stream.subscribe': Object.assign(trampoline23, { _jcoMaySuspend: false }),
-      '[method]output-stream.write': Object.assign(exports0['19'], { _jcoMaySuspend: false }),
-      '[resource-drop]input-stream': Object.assign(_guardMayLeave(0, trampoline13), { _jcoMaySuspend: false }),
-      '[resource-drop]output-stream': Object.assign(_guardMayLeave(0, trampoline0), { _jcoMaySuspend: false }),
-    },
-    'wasi:io/streams@0.2.12': {
-      '[method]input-stream.read': Object.assign(exports0['20'], { _jcoMaySuspend: false }),
-      '[method]input-stream.subscribe': Object.assign(trampoline24, { _jcoMaySuspend: false }),
-      '[method]output-stream.check-write': Object.assign(exports0['18'], { _jcoMaySuspend: false }),
-      '[method]output-stream.splice': Object.assign(exports0['17'], { _jcoMaySuspend: false }),
-      '[method]output-stream.subscribe': Object.assign(trampoline23, { _jcoMaySuspend: false }),
-      '[method]output-stream.write': Object.assign(exports0['19'], { _jcoMaySuspend: false }),
-      '[resource-drop]input-stream': Object.assign(_guardMayLeave(0, trampoline13), { _jcoMaySuspend: false }),
-      '[resource-drop]output-stream': Object.assign(_guardMayLeave(0, trampoline0), { _jcoMaySuspend: false }),
-    },
-    'wasi:random/insecure-seed@0.2.12': {
-      'insecure-seed': Object.assign(exports0['0'], { _jcoMaySuspend: false }),
-    },
-  }));
-  memory0 = exports1.memory;
-  realloc0 = (oldPtr, oldSize, align, newSize) => exports1.cabi_realloc(oldPtr, oldSize, align, newSize) >>> 0;
-  
+    importFn: _trampoline81,
+  });
+  let _initTask0;
+  let _initTaskID0;
+  let _initThreadID0;
   try {
-    const realloc0Promising = WebAssembly.promising(exports1.cabi_realloc);
-    realloc0Async = async (oldPtr, oldSize, align, newSize) => (await realloc0Promising(oldPtr, oldSize, align, newSize)) >>> 0;
-  } catch(err) {
-    realloc0Async = realloc0;
+    
+    {
+      const { task, taskID, threadID } = createNewCurrentImplicitThread({
+        componentIdx: 0,
+        isAsync: false,
+        callingWasmExport: true,
+        entryFnName: '<initialize>',
+      });
+      _initTask0= task;
+      _initTaskID0= taskID;
+      _initThreadID0= threadID;
+      _setGlobalCurrentThreadMeta({ componentIdx: 0, taskID, threadID });
+    }
+    
+    ({ exports: exports0 } = yield instantiateCore(yield module1));
+    ({ exports: exports1 } = yield instantiateCore(yield module0, {
+      "component:aws-cli/providers": {
+        "provide-credentials": Object.assign(exports0["0"], { _jcoMaySuspend: false }),
+        "provide-region": Object.assign(exports0["1"], { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/environment@0.2.12": {
+        "get-arguments": Object.assign(exports0["3"], { _jcoMaySuspend: false }),
+        "get-environment": Object.assign(exports0["4"], { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/exit@0.2.12": {
+        exit: Object.assign(_guardTrap(0, trampoline32, false), { _jcoMaySuspend: false }),
+        "exit-with-code": Object.assign(_guardTrap(0, trampoline33, false), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/stderr@0.2.12": {
+        "get-stderr": Object.assign(_guardTrap(0, trampoline37, false), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/stdin@0.2.12": {
+        "get-stdin": Object.assign(_guardTrap(0, trampoline35, false), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/stdout@0.2.12": {
+        "get-stdout": Object.assign(_guardTrap(0, trampoline36, false), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/terminal-input@0.2.12": {
+        "[resource-drop]terminal-input": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline28), true), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/terminal-output@0.2.12": {
+        "[resource-drop]terminal-output": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline29), true), { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/terminal-stderr@0.2.12": {
+        "get-terminal-stderr": Object.assign(exports0["41"], { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/terminal-stdin@0.2.12": {
+        "get-terminal-stdin": Object.assign(exports0["39"], { _jcoMaySuspend: false }),
+      },
+      "wasi:cli/terminal-stdout@0.2.12": {
+        "get-terminal-stdout": Object.assign(exports0["40"], { _jcoMaySuspend: false }),
+      },
+      "wasi:clocks/monotonic-clock@0.2.12": {
+        now: Object.assign(_guardTrap(0, trampoline15, false), { _jcoMaySuspend: false }),
+        "subscribe-duration": trampoline14,
+      },
+      "wasi:clocks/wall-clock@0.2.12": {
+        now: Object.assign(exports0["42"], { _jcoMaySuspend: false }),
+      },
+      "wasi:filesystem/preopens@0.2.12": {
+        "get-directories": Object.assign(exports0["43"], { _jcoMaySuspend: false }),
+      },
+      "wasi:filesystem/types@0.2.12": {
+        "[method]descriptor.append-via-stream": Object.assign(exports0["28"], { _jcoMaySuspend: false }),
+        "[method]descriptor.create-directory-at": Object.assign(exports0["31"], { _jcoMaySuspend: false }),
+        "[method]descriptor.get-flags": Object.assign(exports0["29"], { _jcoMaySuspend: false }),
+        "[method]descriptor.metadata-hash": Object.assign(exports0["36"], { _jcoMaySuspend: false }),
+        "[method]descriptor.metadata-hash-at": Object.assign(exports0["37"], { _jcoMaySuspend: false }),
+        "[method]descriptor.open-at": Object.assign(exports0["34"], { _jcoMaySuspend: false }),
+        "[method]descriptor.read-directory": Object.assign(exports0["30"], { _jcoMaySuspend: false }),
+        "[method]descriptor.read-via-stream": Object.assign(exports0["26"], { _jcoMaySuspend: false }),
+        "[method]descriptor.stat": Object.assign(exports0["32"], { _jcoMaySuspend: false }),
+        "[method]descriptor.stat-at": Object.assign(exports0["33"], { _jcoMaySuspend: false }),
+        "[method]descriptor.unlink-file-at": Object.assign(exports0["35"], { _jcoMaySuspend: false }),
+        "[method]descriptor.write-via-stream": Object.assign(exports0["27"], { _jcoMaySuspend: false }),
+        "[method]directory-entry-stream.read-directory-entry": Object.assign(exports0["38"], { _jcoMaySuspend: false }),
+        "[resource-drop]descriptor": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline30), true), { _jcoMaySuspend: false }),
+        "[resource-drop]directory-entry-stream": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline31), true), { _jcoMaySuspend: false }),
+      },
+      "wasi:http/outgoing-handler@0.2.12": {
+        handle: Object.assign(exports0["24"], { _jcoMaySuspend: false }),
+      },
+      "wasi:http/types@0.2.12": {
+        "[constructor]fields": Object.assign(_guardTrap(0, trampoline27, false), { _jcoMaySuspend: false }),
+        "[constructor]outgoing-request": Object.assign(_guardTrap(0, trampoline16, false), { _jcoMaySuspend: false }),
+        "[constructor]request-options": Object.assign(_guardTrap(0, trampoline18, false), { _jcoMaySuspend: false }),
+        "[method]fields.append": Object.assign(exports0["16"], { _jcoMaySuspend: false }),
+        "[method]fields.entries": Object.assign(exports0["17"], { _jcoMaySuspend: false }),
+        "[method]future-incoming-response.get": Object.assign(exports0["7"], { _jcoMaySuspend: false }),
+        "[method]future-incoming-response.subscribe": Object.assign(_guardTrap(0, trampoline8, false), { _jcoMaySuspend: false }),
+        "[method]future-trailers.get": Object.assign(exports0["14"], { _jcoMaySuspend: false }),
+        "[method]future-trailers.subscribe": Object.assign(_guardTrap(0, trampoline4, false), { _jcoMaySuspend: false }),
+        "[method]incoming-body.stream": Object.assign(exports0["6"], { _jcoMaySuspend: false }),
+        "[method]incoming-response.consume": Object.assign(exports0["8"], { _jcoMaySuspend: false }),
+        "[method]incoming-response.headers": Object.assign(_guardTrap(0, trampoline10, false), { _jcoMaySuspend: false }),
+        "[method]incoming-response.status": Object.assign(_guardTrap(0, trampoline11, false), { _jcoMaySuspend: false }),
+        "[method]outgoing-body.write": Object.assign(exports0["5"], { _jcoMaySuspend: false }),
+        "[method]outgoing-request.body": Object.assign(exports0["13"], { _jcoMaySuspend: false }),
+        "[method]outgoing-request.set-authority": Object.assign(exports0["11"], { _jcoMaySuspend: false }),
+        "[method]outgoing-request.set-method": Object.assign(exports0["9"], { _jcoMaySuspend: false }),
+        "[method]outgoing-request.set-path-with-query": Object.assign(exports0["12"], { _jcoMaySuspend: false }),
+        "[method]outgoing-request.set-scheme": Object.assign(exports0["10"], { _jcoMaySuspend: false }),
+        "[method]request-options.set-between-bytes-timeout": Object.assign(_guardTrap(0, trampoline21, false), { _jcoMaySuspend: false }),
+        "[method]request-options.set-connect-timeout": Object.assign(_guardTrap(0, trampoline19, false), { _jcoMaySuspend: false }),
+        "[method]request-options.set-first-byte-timeout": Object.assign(_guardTrap(0, trampoline20, false), { _jcoMaySuspend: false }),
+        "[resource-drop]fields": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline5), true), { _jcoMaySuspend: false }),
+        "[resource-drop]future-incoming-response": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline9), true), { _jcoMaySuspend: false }),
+        "[resource-drop]future-trailers": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline7), true), { _jcoMaySuspend: false }),
+        "[resource-drop]incoming-body": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline3), true), { _jcoMaySuspend: false }),
+        "[resource-drop]incoming-response": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline12), true), { _jcoMaySuspend: false }),
+        "[resource-drop]outgoing-body": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline6), true), { _jcoMaySuspend: false }),
+        "[resource-drop]outgoing-request": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline17), true), { _jcoMaySuspend: false }),
+        "[resource-drop]request-options": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline22), true), { _jcoMaySuspend: false }),
+        "[static]incoming-body.finish": Object.assign(_guardTrap(0, trampoline2, false), { _jcoMaySuspend: false }),
+        "[static]outgoing-body.finish": Object.assign(exports0["15"], { _jcoMaySuspend: false }),
+      },
+      "wasi:io/error@0.2.12": {
+        "[method]error.to-debug-string": Object.assign(exports0["23"], { _jcoMaySuspend: false }),
+        "[resource-drop]error": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline1), true), { _jcoMaySuspend: false }),
+      },
+      "wasi:io/poll@0.2.12": {
+        "[method]pollable.block": trampoline34,
+        "[method]pollable.ready": Object.assign(_guardTrap(0, trampoline25, false), { _jcoMaySuspend: false }),
+        "[resource-drop]pollable": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline24), true), { _jcoMaySuspend: false }),
+        poll: Object.assign(exports0["25"], { _jcoMaySuspend: false }),
+      },
+      "wasi:io/streams@0.2.12": {
+        "[method]input-stream.read": Object.assign(exports0["21"], { _jcoMaySuspend: false }),
+        "[method]input-stream.subscribe": Object.assign(_guardTrap(0, trampoline26, false), { _jcoMaySuspend: false }),
+        "[method]output-stream.blocking-flush": Object.assign(exports0["22"], { _jcoMaySuspend: false }),
+        "[method]output-stream.check-write": Object.assign(exports0["19"], { _jcoMaySuspend: false }),
+        "[method]output-stream.splice": Object.assign(exports0["18"], { _jcoMaySuspend: false }),
+        "[method]output-stream.subscribe": Object.assign(_guardTrap(0, trampoline23, false), { _jcoMaySuspend: false }),
+        "[method]output-stream.write": Object.assign(exports0["20"], { _jcoMaySuspend: false }),
+        "[resource-drop]input-stream": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline13), true), { _jcoMaySuspend: false }),
+        "[resource-drop]output-stream": Object.assign(_guardTrap(0, _guardMayLeave(0, trampoline0), true), { _jcoMaySuspend: false }),
+      },
+      "wasi:random/insecure-seed@0.2.12": {
+        "insecure-seed": Object.assign(exports0["2"], { _jcoMaySuspend: false }),
+      },
+    }));
+    memory0 = exports1.memory;
+    realloc0 = (oldPtr, oldSize, align, newSize) => exports1.cabi_realloc(oldPtr, oldSize, align, newSize) >>> 0;
+    
+    try {
+      const realloc0Promising = WebAssembly.promising(exports1.cabi_realloc);
+      realloc0Async = async (oldPtr, oldSize, align, newSize) => (await realloc0Promising(oldPtr, oldSize, align, newSize)) >>> 0;
+    } catch(err) {
+      realloc0Async = realloc0;
+    }
+    
+    ({ exports: exports2 } = yield instantiateCore(yield module2, (_setGlobalCurrentThreadMeta({ componentIdx: 0, taskID: _initTaskID0, threadID: _initThreadID0 }), {
+      actual: {
+        "0": trampoline38,
+        "1": trampoline39,
+        "10": Object.assign(_guardTrap(0, trampoline48, false), { _jcoMaySuspend: false }),
+        "11": Object.assign(_guardTrap(0, trampoline49, false), { _jcoMaySuspend: false }),
+        "12": Object.assign(_guardTrap(0, trampoline50, false), { _jcoMaySuspend: false }),
+        "13": Object.assign(_guardTrap(0, trampoline51, false), { _jcoMaySuspend: false }),
+        "14": Object.assign(_guardTrap(0, trampoline52, false), { _jcoMaySuspend: false }),
+        "15": Object.assign(_guardTrap(0, trampoline53, false), { _jcoMaySuspend: false }),
+        "16": Object.assign(_guardTrap(0, trampoline54, false), { _jcoMaySuspend: false }),
+        "17": Object.assign(_guardTrap(0, trampoline55, false), { _jcoMaySuspend: false }),
+        "18": Object.assign(_guardTrap(0, trampoline56, false), { _jcoMaySuspend: false }),
+        "19": Object.assign(_guardTrap(0, trampoline57, false), { _jcoMaySuspend: false }),
+        "2": Object.assign(_guardTrap(0, trampoline40, false), { _jcoMaySuspend: false }),
+        "20": Object.assign(_guardTrap(0, trampoline58, false), { _jcoMaySuspend: false }),
+        "21": Object.assign(_guardTrap(0, trampoline59, false), { _jcoMaySuspend: false }),
+        "22": trampoline60,
+        "23": Object.assign(_guardTrap(0, trampoline61, false), { _jcoMaySuspend: false }),
+        "24": Object.assign(_guardTrap(0, trampoline62, false), { _jcoMaySuspend: false }),
+        "25": trampoline63,
+        "26": Object.assign(_guardTrap(0, trampoline64, false), { _jcoMaySuspend: false }),
+        "27": Object.assign(_guardTrap(0, trampoline65, false), { _jcoMaySuspend: false }),
+        "28": trampoline66,
+        "29": Object.assign(_guardTrap(0, trampoline67, false), { _jcoMaySuspend: false }),
+        "3": Object.assign(_guardTrap(0, trampoline41, false), { _jcoMaySuspend: false }),
+        "30": trampoline68,
+        "31": trampoline69,
+        "32": trampoline70,
+        "33": trampoline71,
+        "34": trampoline72,
+        "35": trampoline73,
+        "36": Object.assign(_guardTrap(0, trampoline74, false), { _jcoMaySuspend: false }),
+        "37": Object.assign(_guardTrap(0, trampoline75, false), { _jcoMaySuspend: false }),
+        "38": Object.assign(_guardTrap(0, trampoline76, false), { _jcoMaySuspend: false }),
+        "39": Object.assign(_guardTrap(0, trampoline77, false), { _jcoMaySuspend: false }),
+        "4": Object.assign(_guardTrap(0, trampoline42, false), { _jcoMaySuspend: false }),
+        "40": Object.assign(_guardTrap(0, trampoline78, false), { _jcoMaySuspend: false }),
+        "41": Object.assign(_guardTrap(0, trampoline79, false), { _jcoMaySuspend: false }),
+        "42": Object.assign(_guardTrap(0, trampoline80, false), { _jcoMaySuspend: false }),
+        "43": Object.assign(_guardTrap(0, trampoline81, false), { _jcoMaySuspend: false }),
+        "5": Object.assign(_guardTrap(0, trampoline43, false), { _jcoMaySuspend: false }),
+        "6": Object.assign(_guardTrap(0, trampoline44, false), { _jcoMaySuspend: false }),
+        "7": Object.assign(_guardTrap(0, trampoline45, false), { _jcoMaySuspend: false }),
+        "8": Object.assign(_guardTrap(0, trampoline46, false), { _jcoMaySuspend: false }),
+        "9": Object.assign(_guardTrap(0, trampoline47, false), { _jcoMaySuspend: false }),
+      },
+      main: {
+        _initialize: Object.assign(exports1._initialize, { _jcoMaySuspend: false }),
+      },
+      shim: {
+        $imports: exports0.$imports,
+      },
+    })));
+  } finally {
+    
+    _clearCurrentTask({ componentIdx: 0, taskID: _initTaskID0, threadID: _initThreadID0});
+    // Initialization is finished: retire its task and release the
+    // implicit thread's instance-scoped index for the first call.
+    if (_initTask0) {
+      _initTask0.resolve([]);
+      _initTask0.exit({ skipExclusiveLockCheck: true });
+    }
+    
   }
-  
-  ({ exports: exports2 } = yield instantiateCore(yield module2, {
-    '': {
-      $imports: exports0.$imports,
-      '0': Object.assign(trampoline37, { _jcoMaySuspend: false }),
-      '1': trampoline38,
-      '10': Object.assign(trampoline47, { _jcoMaySuspend: false }),
-      '11': Object.assign(trampoline48, { _jcoMaySuspend: false }),
-      '12': Object.assign(trampoline49, { _jcoMaySuspend: false }),
-      '13': Object.assign(trampoline50, { _jcoMaySuspend: false }),
-      '14': Object.assign(trampoline51, { _jcoMaySuspend: false }),
-      '15': Object.assign(trampoline52, { _jcoMaySuspend: false }),
-      '16': Object.assign(trampoline53, { _jcoMaySuspend: false }),
-      '17': Object.assign(trampoline54, { _jcoMaySuspend: false }),
-      '18': Object.assign(trampoline55, { _jcoMaySuspend: false }),
-      '19': Object.assign(trampoline56, { _jcoMaySuspend: false }),
-      '2': trampoline39,
-      '20': Object.assign(trampoline57, { _jcoMaySuspend: false }),
-      '21': Object.assign(trampoline58, { _jcoMaySuspend: false }),
-      '22': Object.assign(trampoline59, { _jcoMaySuspend: false }),
-      '23': trampoline60,
-      '24': trampoline61,
-      '25': Object.assign(trampoline62, { _jcoMaySuspend: false }),
-      '26': Object.assign(trampoline63, { _jcoMaySuspend: false }),
-      '27': trampoline64,
-      '28': Object.assign(trampoline65, { _jcoMaySuspend: false }),
-      '29': trampoline66,
-      '3': Object.assign(trampoline40, { _jcoMaySuspend: false }),
-      '30': trampoline67,
-      '31': trampoline68,
-      '32': trampoline69,
-      '33': trampoline70,
-      '34': trampoline71,
-      '35': Object.assign(trampoline72, { _jcoMaySuspend: false }),
-      '36': Object.assign(trampoline73, { _jcoMaySuspend: false }),
-      '37': Object.assign(trampoline74, { _jcoMaySuspend: false }),
-      '38': Object.assign(trampoline75, { _jcoMaySuspend: false }),
-      '39': Object.assign(trampoline76, { _jcoMaySuspend: false }),
-      '4': Object.assign(trampoline41, { _jcoMaySuspend: false }),
-      '40': Object.assign(trampoline77, { _jcoMaySuspend: false }),
-      '41': Object.assign(trampoline78, { _jcoMaySuspend: false }),
-      '42': Object.assign(trampoline79, { _jcoMaySuspend: false }),
-      '43': Object.assign(trampoline80, { _jcoMaySuspend: false }),
-      '5': Object.assign(trampoline42, { _jcoMaySuspend: false }),
-      '6': Object.assign(trampoline43, { _jcoMaySuspend: false }),
-      '7': Object.assign(trampoline44, { _jcoMaySuspend: false }),
-      '8': Object.assign(trampoline45, { _jcoMaySuspend: false }),
-      '9': Object.assign(trampoline46, { _jcoMaySuspend: false }),
-    },
-  }));
-  run0212Run = WebAssembly.promising(exports1['wasi:cli/run@0.2.12#run']);
+  run0212Run = WebAssembly.promising(exports1["wasi:cli/run@0.2.12#run"]);
   const run0212 = {
     run: run,
     
   };
   
-  return { run: run0212, 'wasi:cli/run@0.2.12': run0212,  };
+  return { _util: { stop: _stopInstance, whenIdle: _whenIdle,/** Test whether a value is a declared WIT result error from this instance. */
+  isComponentError: value => value instanceof ComponentError, }, run: run0212, "wasi:cli/run@0.2.12": run0212,  };
 })();
 let promise, resolve, reject;
 function normalizeInstantiationError(e) {
@@ -25166,7 +24306,7 @@ function normalizeInstantiationError(e) {
   // core start function before entering its JS wrapper.
   // At component instantiation time that always means the
   // implicit synchronous task attempted to block.
-  if (typeof WebAssembly.SuspendError === 'function' && e instanceof WebAssembly.SuspendError) {
+  if (typeof WebAssembly !== 'undefined' && typeof WebAssembly.SuspendError === 'function' && e instanceof WebAssembly.SuspendError) {
     return new WebAssembly.RuntimeError('cannot block a synchronous task before returning');
   }
   return e;
@@ -25195,6 +24335,7 @@ return promise || maybeSyncReturn;
 };
 
 export const _util = {
+  
   
 }
 
