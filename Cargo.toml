@@ -20,15 +20,15 @@ edition = "2024"
 anyhow = { version = "1.0" }
 bytes = { version = "1.5" }
 tokio = { version = "1.52", default-features = false }
-wasmtime = { version = "49" }
-wasmtime-wasi = { version = "49" }
-wasmtime-wasi-http = { version = "49" }
+wasmtime = { version = "51" }
+wasmtime-wasi = { version = "51" }
+wasmtime-wasi-http = { version = "51" }
 
 [workspace.metadata.bin]
 cargo-component = { version = "^0.21", locked = true }
-wasmtime-cli = { version = "^49", bins = [
+wasmtime-cli = { version = "^51", bins = [
     "wasmtime",
 ], locked = true, features = [
     "component-model",
 ] }
-wkg = { version = "^0.15", locked = true }
+wkg = { version = "^0.16", locked = true }
