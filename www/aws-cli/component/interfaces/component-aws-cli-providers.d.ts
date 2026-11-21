@@ -1,6 +1,9 @@
 /** @module Interface component:aws-cli/providers **/
-export function provideCredentials(serviceId: string | undefined): Promise<Credentials>;
-export function provideRegion(region: Region | undefined): Promise<Region | undefined>;
+/**
+ * @throws {CredentialsError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+ */
+export function provideCredentials(serviceId: string | undefined): Promise<Credentials> | Credentials;
+export function provideRegion(region: Region | undefined): Promise<Region | undefined> | Region | undefined;
 export interface Credentials {
   accessKeyId: string,
   secretAccessKey: string,

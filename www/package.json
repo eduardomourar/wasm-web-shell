@@ -19,12 +19,12 @@
   },
   "dependencies": {
     "@xterm/xterm": "^6",
-    "aws-cli-wasm": "file://./aws-cli",
+    "aws-cli-wasm": "file:aws-cli",
     "cookie-store": "^4.0.0-next.4",
-    "coreutils-wasm": "file://./coreutils",
+    "coreutils-wasm": "file:coreutils",
     "react": "^19",
     "react-dom": "^19",
-    "wasm-terminal": "file://./wasm-terminal"
+    "wasm-terminal": "file:wasm-terminal"
   },
   "devDependencies": {
     "@playwright/test": "^1",
