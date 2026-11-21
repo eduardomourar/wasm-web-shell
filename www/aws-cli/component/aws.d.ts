@@ -20,34 +20,63 @@ import type * as WasiIoError from './interfaces/wasi-io-error.js'; // wasi:io/er
 import type * as WasiIoPoll from './interfaces/wasi-io-poll.js'; // wasi:io/poll@0.2.12
 import type * as WasiIoStreams from './interfaces/wasi-io-streams.js'; // wasi:io/streams@0.2.12
 import type * as WasiRandomInsecureSeed from './interfaces/wasi-random-insecure-seed.js'; // wasi:random/insecure-seed@0.2.12
-import type * as WasiCliRun from './interfaces/wasi-cli-run.js'; // wasi:cli/run@0.2.12
+import type * as WasiCliRunExports from './interfaces/exports/wasi-cli-run.js'; // wasi:cli/run@0.2.12
 export interface ImportObject {
-  'component:aws-cli/providers': typeof ComponentAwsCliProviders,
-  'wasi:cli/environment@0.2.12': typeof WasiCliEnvironment,
-  'wasi:cli/exit@0.2.12': typeof WasiCliExit,
-  'wasi:cli/stderr@0.2.12': typeof WasiCliStderr,
-  'wasi:cli/stdin@0.2.12': typeof WasiCliStdin,
-  'wasi:cli/stdout@0.2.12': typeof WasiCliStdout,
-  'wasi:cli/terminal-input@0.2.12': typeof WasiCliTerminalInput,
-  'wasi:cli/terminal-output@0.2.12': typeof WasiCliTerminalOutput,
-  'wasi:cli/terminal-stderr@0.2.12': typeof WasiCliTerminalStderr,
-  'wasi:cli/terminal-stdin@0.2.12': typeof WasiCliTerminalStdin,
-  'wasi:cli/terminal-stdout@0.2.12': typeof WasiCliTerminalStdout,
-  'wasi:clocks/monotonic-clock@0.2.12': typeof WasiClocksMonotonicClock,
-  'wasi:clocks/wall-clock@0.2.12': typeof WasiClocksWallClock,
-  'wasi:filesystem/preopens@0.2.12': typeof WasiFilesystemPreopens,
-  'wasi:filesystem/types@0.2.12': typeof WasiFilesystemTypes,
-  'wasi:http/outgoing-handler@0.2.12': typeof WasiHttpOutgoingHandler,
-  'wasi:http/types@0.2.12': typeof WasiHttpTypes,
-  'wasi:io/error@0.2.12': typeof WasiIoError,
-  'wasi:io/poll@0.2.12': typeof WasiIoPoll,
-  'wasi:io/streams@0.2.12': typeof WasiIoStreams,
-  'wasi:random/insecure-seed@0.2.12': typeof WasiRandomInsecureSeed,
+  "component:aws-cli/providers": typeof ComponentAwsCliProviders,
+  "wasi:cli/environment@0.2.12": typeof WasiCliEnvironment,
+  "wasi:cli/exit@0.2.12": typeof WasiCliExit,
+  "wasi:cli/stderr@0.2.12": typeof WasiCliStderr,
+  "wasi:cli/stdin@0.2.12": typeof WasiCliStdin,
+  "wasi:cli/stdout@0.2.12": typeof WasiCliStdout,
+  "wasi:cli/terminal-input@0.2.12": typeof WasiCliTerminalInput,
+  "wasi:cli/terminal-output@0.2.12": typeof WasiCliTerminalOutput,
+  "wasi:cli/terminal-stderr@0.2.12": typeof WasiCliTerminalStderr,
+  "wasi:cli/terminal-stdin@0.2.12": typeof WasiCliTerminalStdin,
+  "wasi:cli/terminal-stdout@0.2.12": typeof WasiCliTerminalStdout,
+  "wasi:clocks/monotonic-clock@0.2.12": typeof WasiClocksMonotonicClock,
+  "wasi:clocks/wall-clock@0.2.12": typeof WasiClocksWallClock,
+  "wasi:filesystem/preopens@0.2.12": typeof WasiFilesystemPreopens,
+  "wasi:filesystem/types@0.2.12": typeof WasiFilesystemTypes,
+  "wasi:http/outgoing-handler@0.2.12": typeof WasiHttpOutgoingHandler,
+  "wasi:http/types@0.2.12": typeof WasiHttpTypes,
+  "wasi:io/error@0.2.12": typeof WasiIoError,
+  "wasi:io/poll@0.2.12": typeof WasiIoPoll,
+  "wasi:io/streams@0.2.12": typeof WasiIoStreams,
+  "wasi:random/insecure-seed@0.2.12": typeof WasiRandomInsecureSeed,
 }
 export interface Root {
-  'wasi:cli/run@0.2.12': typeof WasiCliRun,
-  run: typeof WasiCliRun,
+  "wasi:cli/run@0.2.12": typeof WasiCliRunExports,
+  run: typeof WasiCliRunExports,
+  /** Permanently stop this instance and dispose guest-owned host resources. */
+  readonly _util: { stop(): void; whenIdle(): Promise<void>;  /** Test whether a value is a declared WIT result error from this instance. */
+  isComponentError(value: unknown): value is Error & { readonly payload: unknown }; };
 }
+
+/**
+* Options accepted by `instantiate`.
+*/
+export interface InstantiateOptions {
+  /**
+  * Called with each trap of this instance as it happens, in whichever
+  * task: including one a guest left running, which no call of the host's
+  * would otherwise fail for. Not called for stopping the instance, which
+  * it may do itself.
+  */
+  onTrap?: (error: WebAssembly.RuntimeError) => void;
+  /** Runtime overrides for this instance. */
+  shim?: {
+    /** Platform globals used instead of those on `globalThis`. */
+    globals?: {
+      /**
+      * The WebAssembly implementation used by this instance,
+      * including by the default `instantiateCore`. Defaults to
+      * `globalThis.WebAssembly`.
+      */
+      WebAssembly?: typeof WebAssembly;
+    };
+  };
+}
+
 
 /**
 * Instantiates this component with the provided imports and
@@ -67,15 +96,20 @@ export interface Root {
 * identified by `path` and returning its compiled
 * `WebAssembly.Module` object. This would use the
 * `WebAssembly.Module` constructor on the web, for example.
+*
+* The optional `options` argument configures instantiation; see
+* `InstantiateOptions`.
 */
 export function instantiate(
 getCoreModule: (path: string) => WebAssembly.Module,
 imports: ImportObject,
-instantiateCore?: (module: WebAssembly.Module, imports: Record<string, any>) => WebAssembly.Instance
+instantiateCore?: (module: WebAssembly.Module, imports: Record<string, any>) => WebAssembly.Instance,
+options?: InstantiateOptions
 ): Root;
 export function instantiate(
 getCoreModule: (path: string) => WebAssembly.Module | Promise<WebAssembly.Module>,
 imports: ImportObject,
-instantiateCore?: (module: WebAssembly.Module, imports: Record<string, any>) => WebAssembly.Instance | Promise<WebAssembly.Instance>
+instantiateCore?: (module: WebAssembly.Module, imports: Record<string, any>) => WebAssembly.Instance | Promise<WebAssembly.Instance>,
+options?: InstantiateOptions
 ): Root | Promise<Root>;
 

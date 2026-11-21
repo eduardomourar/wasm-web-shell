@@ -211,6 +211,9 @@ export type Result<T, E> = { tag: 'ok', val: T } | { tag: 'err', val: E };
 
 export class Fields {
   constructor()
+  /**
+  * @throws {HeaderError} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   append(name: FieldName, value: FieldValue): void;
   entries(): Array<[FieldName, FieldValue]>;
 }
@@ -238,6 +241,9 @@ export class IncomingBody {
    * This type does not have a public constructor.
    */
   private constructor();
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   stream(): InputStream;
   static finish(this_: IncomingBody): FutureTrailers;
 }
@@ -249,6 +255,9 @@ export class IncomingResponse {
   private constructor();
   status(): StatusCode;
   headers(): Headers;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   consume(): IncomingBody;
 }
 
@@ -257,22 +266,52 @@ export class OutgoingBody {
    * This type does not have a public constructor.
    */
   private constructor();
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   write(): OutputStream;
+  /**
+  * @throws {ErrorCode} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   static finish(this_: OutgoingBody, trailers: Trailers | undefined): void;
 }
 
 export class OutgoingRequest {
   constructor(headers: Headers)
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   body(): OutgoingBody;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setMethod(method: Method): void;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setPathWithQuery(pathWithQuery: string | undefined): void;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setScheme(scheme: Scheme | undefined): void;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setAuthority(authority: string | undefined): void;
 }
 
 export class RequestOptions {
   constructor()
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setConnectTimeout(duration: Duration | undefined): void;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setFirstByteTimeout(duration: Duration | undefined): void;
+  /**
+  * @throws {undefined} To return the error of the result, throw it, or an `Error` that has it as its `payload`.
+  */
   setBetweenBytesTimeout(duration: Duration | undefined): void;
 }
