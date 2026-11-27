@@ -16,7 +16,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Increase swap space
         # A cold cache forces a full rebuild of ~28 aws-sdk-* crates with thin LTO,
@@ -30,7 +30,7 @@ jobs:
 
       - name: Cache cargo
         id: cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -42,14 +42,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
       - name: Cache cargo run bin
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
       - name: Install cargo binstall
-        uses: cargo-bins/cargo-binstall@v1.20.1
+        uses: cargo-bins/cargo-binstall@v1.28.0
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -61,7 +61,7 @@ jobs:
           cargo build -p wasi-engine
       - name: Upload build outputs
         # Lets the jobs that depend on `build` run the CLI without rebuilding it.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wasi-engine
           path: |
@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload wasm components
         # The wasi-engine build script composes these, so `lint` needs them to compile it.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wasm-components
           path: |
@@ -92,7 +92,7 @@ jobs:
       checks: write
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Increase swap space
         run: |
@@ -103,13 +103,13 @@ jobs:
           sudo swapon /swapfile
 
       - name: Download wasm components
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-components
           path: target/wasm32-wasip2/debug
 
       - name: Restore cargo cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -140,10 +140,10 @@ jobs:
     env:
       CARGO_TARGET_DIR: "${{ github.workspace }}/target"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download build outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasi-engine
           path: target
@@ -172,7 +172,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: "${{ github.workspace }}/target"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Increase swap space
         run: |
@@ -184,7 +184,7 @@ jobs:
 
       - name: Cache cargo
         id: cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -197,14 +197,14 @@ jobs:
             ${{ runner.os }}-cargo-unit-
             ${{ runner.os }}-cargo-build-
       - name: Cache cargo run bin
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             .bin/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
       - name: Install cargo binstall
-        uses: cargo-bins/cargo-binstall@v1.20.1
+        uses: cargo-bins/cargo-binstall@v1.28.0
       - name: Install cargo-run-bin
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -229,9 +229,9 @@ jobs:
       run:
         working-directory: www
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: "www/package.json"
           cache: "npm"
@@ -249,7 +249,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: www/playwright-report/
@@ -266,9 +266,9 @@ jobs:
       run:
         working-directory: www
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: "www/package.json"
           cache: "npm"
@@ -285,7 +285,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-webkit
           path: www/playwright-report/
